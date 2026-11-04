@@ -93,6 +93,7 @@ fn real_parser_reads_valid_txt_as_the_scenario_fixture_assumes() {
     assert_eq!(parsed.metrics.checkpoints_independent, None);
     assert_eq!(parsed.profile, valid_report().profile);
     assert_eq!(parsed.metrics, valid_report().metrics);
+    assert!(cadcraft_droneqa::qa::validate_report(&parsed).is_ok());
     let p = pilot();
     for (name, expected) in [("pass", Outcome::Pass), ("fail", Outcome::Fail), ("insufficient-data", Outcome::InsufficientData)] {
         assert_eq!(analyze(&scenario_mission(name), &scenario_ruleset(), Some(&parsed), Some(&p)).outcome, expected, "{name}");

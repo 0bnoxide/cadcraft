@@ -540,3 +540,63 @@ fn analysis_round_trips_through_json() {
     assert_eq!(v["risk_level"], "HIGH");
     assert_eq!(serde_json::from_value::<Analysis>(v).unwrap(), a);
 }
+
+#[test]
+fn caller_supplied_reports_are_validated_like_the_reference_models() {
+    use cadcraft_droneqa::qa::validate_report;
+    use cadcraft_droneqa::{ParserDiagnostic, ReportEvidence, ReportResiduals};
+    assert!(validate_report(&valid_report()).is_ok());
+    let residuals = ReportResiduals {
+        provenance: "fitted_gcps".into(),
+        unit: "US survey foot".into(),
+        mean_xyz: [0.0, -0.1, 0.1],
+        sigma_xyz: [0.1; 3],
+        rms_xyz: [0.1; 3],
+    };
+    let mut with_evidence = valid_report();
+    with_evidence.report_evidence = Some(ReportEvidence { gcp_fit: Some(residuals.clone()), ..ReportEvidence::default() });
+    assert!(validate_report(&with_evidence).is_ok());
+
+    let mut bad: Vec<ParseResult> = Vec::new();
+    for v in [-1.0, f64::NAN, f64::INFINITY] {
+        let mut r = valid_report();
+        r.metrics.rmse_z_feet = Some(v);
+        bad.push(r);
+    }
+    let mut r = valid_report();
+    r.metrics.calibrated_images = Some(101);
+    bad.push(r);
+    let mut r = valid_report();
+    r.metrics.processing_software = Some("x".repeat(2001));
+    bad.push(r);
+    let mut r = valid_report();
+    r.profile = " ".into();
+    bad.push(r);
+    let mut r = valid_report();
+    r.diagnostics = vec![ParserDiagnostic { code: "X".into(), message: "m".into() }; 257];
+    bad.push(r);
+    for (provenance, unit, sigma) in [("checkpoints", "US survey foot", 0.1), ("fitted_gcps", "metre", 0.1), ("fitted_gcps", "US survey foot", -0.1)]
+    {
+        let mut r = valid_report();
+        r.report_evidence = Some(ReportEvidence {
+            camera_offsets: Some(ReportResiduals { provenance: provenance.into(), unit: unit.into(), sigma_xyz: [sigma; 3], ..residuals.clone() }),
+            ..ReportEvidence::default()
+        });
+        bad.push(r);
+    }
+    for r in &bad {
+        assert!(validate_report(r).is_err(), "{r:?}");
+    }
+    let mut r = valid_report();
+    r.metrics.processing_software = Some(format!("token=SYNTHETIC_PRIVATE {}", "x".repeat(2001)));
+    assert!(!validate_report(&r).unwrap_err().contains("SYNTHETIC_PRIVATE"));
+}
+
+#[test]
+fn analyze_ignores_an_invalid_report_instead_of_passing_it() {
+    // Codex's reproduction (#10): a negative report RMSE must not pass the Z criterion.
+    let rep = report(json!({"checkpoints_independent": true, "checkpoints_bare_ground": true, "rmse_z_feet": -1.0}));
+    let f = by_rule(&mission(json!({"rmse_z_feet": null})), &rules(json!({})), Some(&rep), Some(NONE));
+    assert_eq!(outcome(&f, "ACCURACY.RMSE_Z"), Outcome::InsufficientData);
+    assert_eq!(outcome(&f, "PROCESSING.REPORT"), Outcome::InsufficientData);
+}

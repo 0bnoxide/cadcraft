@@ -3,7 +3,7 @@
 //! agreed with Codex by Paseo message (see `docs/agents/slice-3-notes-claude.md`).
 
 use cadcraft_droneqa::mission::{Mission, Ruleset, check_field_names, check_shape};
-use cadcraft_droneqa::qa::{analyze, summarize};
+use cadcraft_droneqa::qa::{analyze, summarize, validate_report};
 use cadcraft_droneqa::{ParseResult, pix4d};
 use serde_json::{Value, json};
 
@@ -46,6 +46,9 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         (None, Some(text)) => Some(pix4d::parse(text.as_bytes(), content_type)),
         (None, None) => None,
     };
+    if let Some(r) = &report {
+        validate_report(r).map_err(|e| bad(ID, e))?;
+    }
     let analysis = analyze(&mission, &ruleset, report.as_ref(), Some(&sensitive));
     let summary = summarize(&analysis);
     Ok(json!({ "analysis": analysis, "summary": summary }))
@@ -167,6 +170,7 @@ mod tests {
             json!({"mission": bad_mission, "ruleset": ruleset}),
             json!({"mission": mission, "ruleset": ruleset, "sensitive_fields": [secret]}),
             json!({"mission": mission, "ruleset": ruleset, "report": {"profile": secret, "metrics": secret}}),
+            json!({"mission": mission, "ruleset": ruleset, "report": {"profile": "p", "metrics": {"rmse_z_feet": -1.0}, "report_evidence": null, "diagnostics": []}}),
         ] {
             let e = s.execute(ID, &p).unwrap_err().to_string();
             assert!(!e.contains("SYNTHETIC_PRIVATE"), "{e}");

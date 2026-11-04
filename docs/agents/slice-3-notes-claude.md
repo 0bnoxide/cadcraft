@@ -34,6 +34,10 @@ Rows are in exact send/receive order (the order `paseo logs` shows); `paseo logs
 | (git) 14:30 | — | — | My commit 6750e94 (mission, QA, droneqa). |
 | — | Claude → Codex | a925e0a0 | PR up: #10 at 6dd9e4d, review request; review done on 2f67906 (accepted, one non-blocking note, on #10). |
 | — | Codex → Claude | 3ebbb207 | Review of #10 (in progress): unbounded recursion in `Mission::from_value` (clone/trim before rejection); serde errors echo rejected values. |
+| — | Codex → Claude | 0bb90b40 | Review done on #10 at 6dd9e4d: the two boundary issues above block acceptance; ParseResult decode errors too. |
+| — | Codex → Claude | c2dab293 | Asks for a shared `qa::validate_report(&ParseResult) -> Result<(), String>` (negative RMSE, calibrated > total, bounded strings). |
+| — | Codex → Claude | b359cd60 | Refines history to JSON Lines (one immutable event per line, SHA-256 chain, caps, lock); asks to confirm. |
+| — | Codex → Claude | 76273038 | Reproduces negative report RMSE passing `ACCURACY.RMSE_Z`; addendum on #10. |
 
 Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's foundation 2f67906 (after 26da0240), then my mission/qa/command commit (after all four agreements and Codex's foundation SHA in e43abbd6).
 
@@ -49,6 +53,7 @@ Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's founda
 - **Attachment patterns**: Rust `regex`, wrapped as `^(?:pattern)$` for Python `re.fullmatch` semantics, including alternation. It has no lookaround or backreferences, so those patterns fail ruleset validation rather than matching differently (tested). Patterns are capped at 1000 bytes and a 1 MiB compiled size.
 - **Hostile shapes** (Codex's review, 3ebbb207): `check_shape` walks input iteratively and rejects nesting beyond 16 levels or more than 200 000 values before anything clones, trims, deserializes or drops it, since `catch_unwind` cannot recover from a stack overflow. This covers `Mission::from_value`, `Ruleset::from_value`, `normalize_mission` inputs and `droneqa`'s `report`. The regression test uses 500 000 levels, built and leaked by hand because `json!` and `Drop` recurse too.
 - **Errors never echo input** (3ebbb207): serde messages lose their quoted and back-ticked spans. A mission error names the failing field, found by deserializing each field alone. Unknown keys are named only when they're plain identifiers, and list errors give an index (`required_metrics[2]`), not the value.
+- **Report validation** (c2dab293, 76273038): `qa::validate_report` applies the reference `QAMetrics`/`ReportEvidence` rules to a caller-supplied `ParseResult`: finite non-negative RMSE and GSD, residuals with a qualified provenance and unit, calibrated ≤ total, and text and diagnostics bounded. `droneqa` rejects an invalid `report` with an error. `analyze` also ignores one (fail closed, reported as no usable report), so a direct caller can't get a PASS from it either. The same validator serves Codex's workflow.
 - **Number display**: requirements print thresholds through `serde_json` (`<= 10.0`, `>= 3`), which matches Python's `repr` for the values the rules use, so the reference strings (`<= 0.25`, `<= 0.2499999`) carry over.
 - **Scenario ruleset**: as in the reference `fixture_client.load_fixture`, the fixture ruleset with the scenario's keys replaced and its `control` merged. It lives inline in the tests, so no shared fixture file changes.
 

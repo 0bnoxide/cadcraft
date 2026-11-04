@@ -11,7 +11,7 @@ use std::collections::BTreeSet;
 use serde_json::{Map, Value, json};
 
 use crate::mission::{COORDINATE_FIELDS, Mission, Ruleset, attachment_pattern};
-use crate::model::{Analysis, Finding, Outcome, ParseResult, Severity};
+use crate::model::{Analysis, Finding, Outcome, ParseResult, ReportResiduals, Severity};
 
 const REDACTED: &str = "[REDACTED]";
 
@@ -157,9 +157,12 @@ fn count(v: Option<u64>) -> Option<Value> {
 
 /// Run every rule on a mission, its ruleset and an optional parsed report.
 ///
+/// A report that fails [`validate_report`] is ignored, as if none were given.
 /// `sensitive_fields` names the private mission fields; `None` treats every field as private
 /// (fail closed). Findings that derive from a private field carry `[REDACTED]` instead of values.
 pub fn analyze(mission: &Mission, ruleset: &Ruleset, report: Option<&ParseResult>, sensitive_fields: Option<&[String]>) -> Analysis {
+    // Fail closed: a report that breaks the model rules is not evidence (callers report why).
+    let report = report.filter(|r| validate_report(r).is_ok());
     let map = mission.to_map();
     let private = match sensitive_fields {
         None => Mission::field_names().into_iter().collect(),
@@ -692,6 +695,81 @@ fn deliverables(r: &mut Rules, mission: &Mission, ruleset: &Ruleset) {
             ..Extra::default()
         },
     );
+}
+
+/// Most diagnostics a report may carry (the parser's own cap).
+pub const MAX_DIAGNOSTICS: usize = 256;
+
+/// Check a parse result that came from outside the parser (a caller's JSON), with the reference
+/// `QAMetrics`/`ReportEvidence` rules: finite, non-negative measurements, calibrated images no more
+/// than the total, bounded text and lists, and the qualified residual provenance and unit.
+/// Errors name the field, never its value.
+pub fn validate_report(report: &ParseResult) -> Result<(), String> {
+    let bad = |m: &str| Err(format!("report: {m}"));
+    let text = |s: &str| !s.trim().is_empty() && s.chars().count() <= crate::mission::MAX_TEXT;
+    let non_negative = |v: f64| v.is_finite() && v >= 0.0;
+    if !text(&report.profile) {
+        return bad("profile must be 1 to 2000 characters");
+    }
+    let m = &report.metrics;
+    for (name, v) in [("rmse_x_feet", m.rmse_x_feet), ("rmse_y_feet", m.rmse_y_feet), ("rmse_z_feet", m.rmse_z_feet)] {
+        if v.is_some_and(|v| !non_negative(v)) {
+            return bad(&format!("metrics.{name} must be finite and not negative"));
+        }
+    }
+    if let (Some(c), Some(t)) = (m.calibrated_images, m.total_images)
+        && c > t
+    {
+        return bad("metrics.calibrated_images exceeds metrics.total_images");
+    }
+    for (name, v) in [("processing_software", &m.processing_software), ("processing_version", &m.processing_version)] {
+        if v.as_deref().is_some_and(|s| !text(s)) {
+            return bad(&format!("metrics.{name} must be 1 to 2000 characters"));
+        }
+    }
+    if report.diagnostics.len() > MAX_DIAGNOSTICS {
+        return bad("too many diagnostics");
+    }
+    if report.diagnostics.iter().any(|d| !text(&d.code) || !text(&d.message)) {
+        return bad("diagnostic code and message must be 1 to 2000 characters");
+    }
+    let Some(e) = &report.report_evidence else { return Ok(()) };
+    if e.gsd_cm.is_some_and(|v| !non_negative(v)) {
+        return bad("report_evidence.gsd_cm must be finite and not negative");
+    }
+    for (name, r) in [("gcp_fit", &e.gcp_fit), ("camera_offsets", &e.camera_offsets)] {
+        if r.as_ref().is_some_and(|r| !residuals_ok(r)) {
+            return bad(&format!("report_evidence.{name} is not a qualified residual summary"));
+        }
+    }
+    if e.camera_translation_xyz.is_some_and(|xyz| xyz.iter().any(|v| !v.is_finite())) {
+        return bad("report_evidence.camera_translation_xyz must be finite");
+    }
+    if e.camera_translation_unit.as_deref().is_some_and(|u| u != US_FOOT) {
+        return bad("report_evidence.camera_translation_unit must be US survey foot");
+    }
+    let texts = [
+        ("image_crs", &e.image_crs),
+        ("gcp_crs", &e.gcp_crs),
+        ("output_crs", &e.output_crs),
+        ("classification_time", &e.classification_time),
+        ("dtm_resolution_label", &e.dtm_resolution_label),
+        ("vertical_datum", &e.vertical_datum),
+        ("geoid_model", &e.geoid_model),
+    ];
+    if let Some((name, _)) = texts.iter().find(|(_, v)| v.as_deref().is_some_and(|s| !text(s))) {
+        return bad(&format!("report_evidence.{name} must be 1 to 2000 characters"));
+    }
+    Ok(())
+}
+
+const US_FOOT: &str = "US survey foot";
+
+fn residuals_ok(r: &ReportResiduals) -> bool {
+    matches!(r.provenance.as_str(), "fitted_gcps" | "initial_computed_camera_positions")
+        && r.unit == US_FOOT
+        && r.mean_xyz.iter().all(|v| v.is_finite())
+        && r.sigma_xyz.iter().chain(&r.rms_xyz).all(|v| v.is_finite() && *v >= 0.0)
 }
 
 /// A review brief of at most 500 characters, built from presentation-safe findings only.
