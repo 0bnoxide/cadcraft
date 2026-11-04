@@ -247,10 +247,7 @@ fn mapper(text: &str) -> ParseResult {
     let images = dataset.as_ref().and_then(|values| {
         let counts = pair(values)?;
         let percent_text = values.get(2)?;
-        let percent = percent_text.parse::<f64>().ok()?;
-        let digits = percent_text.split_once('.').map_or(0, |(_, fraction)| fraction.len());
-        let tolerance = 0.5 * 10_f64.powi(-i32::try_from(digits).ok()?);
-        (percent <= 100.0 && (100.0 * counts.0 as f64 / counts.1 as f64 - percent).abs() <= tolerance).then_some(counts)
+        percentage_consistent(counts.0, counts.1, percent_text).then_some(counts)
     });
     if images.is_some() && images == calibrated.as_ref().and_then(|values| pair(values)) {
         if let Some((a, b)) = images {
@@ -365,4 +362,25 @@ fn mapper(text: &str) -> ParseResult {
     result.metrics.processing_version = Some("4.10.0".into());
     result.report_evidence = Some(evidence);
     result
+}
+
+fn percentage_consistent(calibrated: u64, total: u64, raw: &str) -> bool {
+    let digits = raw.split_once('.').map_or(0, |(_, fraction)| fraction.len());
+    if total == 0 || calibrated > total || digits > 20 || !decimal(raw) {
+        return false;
+    }
+    let Ok(displayed) = raw.replace('.', "").parse::<u128>() else {
+        return false;
+    };
+    let divisor = u128::from(total);
+    let numerator = 100 * u128::from(calibrated);
+    let mut quotient = numerator / divisor;
+    let mut remainder = numerator % divisor;
+    // Long division keeps products within u128 even for u64 counts and 20 decimal places.
+    for _ in 0..digits {
+        remainder *= 10;
+        quotient = quotient * 10 + remainder / divisor;
+        remainder %= divisor;
+    }
+    (quotient == displayed && remainder * 2 <= divisor) || (quotient.checked_add(1) == Some(displayed) && remainder * 2 >= divisor)
 }
