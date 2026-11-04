@@ -22,7 +22,7 @@ fn signed_area2(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> (f64, bool) {
     let cross = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
     let d2 = |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
     let longest = d2(a, b).max(d2(b, c)).max(d2(c, a));
-    (cross, !(cross.abs() > 1e-12 * longest))
+    (cross, cross.is_nan() || cross.abs() <= 1e-12 * longest)
 }
 
 /// The TIN as a polyface mesh: one face per triangle, 1-based `[a, b, c, 0]`.
@@ -63,7 +63,7 @@ pub(crate) fn polyface_to_tin(mesh: &PolyfaceMesh) -> Result<Tin> {
         let face_err = |why: &str| bad(CONV, format!("polyface face {} {why}", fi + 1));
         let mut corners: Vec<u32> = Vec::with_capacity(4);
         for &ix in f.iter().take_while(|&&ix| ix != 0) {
-            let at = u32::try_from(ix.unsigned_abs()).ok().and_then(|k| k.checked_sub(1)).filter(|&k| k < n);
+            let at = ix.unsigned_abs().checked_sub(1).filter(|&k| k < n);
             corners.push(at.ok_or_else(|| face_err("names a vertex that does not exist"))?);
         }
         let tris: Vec<[u32; 3]> = match corners.as_slice() {
