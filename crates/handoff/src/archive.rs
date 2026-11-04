@@ -286,6 +286,10 @@ fn read_entries<R: Read + Seek>(source: &mut R) -> Result<Vec<Entry>, OpenError>
         entries.push(entry);
         at = next;
     }
+    if at != central.len() {
+        // Unparsed bytes could hide records that another ZIP reader would see.
+        return Err(OpenError::Invalid("central directory size"));
+    }
     preflight(source, &mut entries, &dir, len)?;
     Ok(entries)
 }
@@ -516,8 +520,31 @@ fn descriptor_span<R: Read + Seek>(source: &mut R, entry: &Entry, boundary: u64)
 // ----- entry data -----
 
 /// An uncompressed entry stream that enforces a byte limit and verifies size and CRC at the end.
+/// The decoder for one entry's data, which is limited to its declared compressed span.
+enum Inner<'a> {
+    Stored(io::Take<&'a mut dyn Read>),
+    Deflate(flate2::read::DeflateDecoder<io::Take<&'a mut dyn Read>>),
+}
+
+impl Inner<'_> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        match self {
+            Inner::Stored(r) => r.read(buf),
+            Inner::Deflate(r) => r.read(buf),
+        }
+    }
+
+    /// Whether the decoder used every byte of the declared compressed span.
+    fn consumed_all(&self, compressed_size: u64) -> bool {
+        match self {
+            Inner::Stored(r) => r.limit() == 0,
+            Inner::Deflate(r) => r.total_in() == compressed_size,
+        }
+    }
+}
+
 pub(crate) struct EntryReader<'a> {
-    inner: Box<dyn Read + 'a>,
+    inner: Inner<'a>,
     limit: u64,
     expected_size: u64,
     expected_crc: u32,
@@ -531,8 +558,9 @@ pub(crate) struct EntryReader<'a> {
 impl<'a> EntryReader<'a> {
     fn open<R: Read + Seek>(source: &'a mut R, entry: &Entry, limit: u64) -> io::Result<Self> {
         source.seek(SeekFrom::Start(entry.data_offset))?;
-        let raw = Read::take(source, entry.compressed_size);
-        let inner: Box<dyn Read + 'a> = if entry.method == 8 { Box::new(flate2::read::DeflateDecoder::new(raw)) } else { Box::new(raw) };
+        let source: &'a mut dyn Read = source;
+        let raw = source.take(entry.compressed_size);
+        let inner = if entry.method == 8 { Inner::Deflate(flate2::read::DeflateDecoder::new(raw)) } else { Inner::Stored(raw) };
         Ok(Self {
             inner,
             limit,
@@ -556,7 +584,7 @@ impl<'a> EntryReader<'a> {
         if ratio_exceeded {
             return Err(fault(codes::COMPRESSION_RATIO_EXCEEDED, "The ZIP contains an entry with an excessive compression ratio."));
         }
-        if self.read != self.expected_size || self.crc.clone().finalize() != self.expected_crc {
+        if self.read != self.expected_size || self.crc.clone().finalize() != self.expected_crc || !self.inner.consumed_all(self.compressed_size) {
             return Err(fault(codes::INVALID_ARCHIVE, "The ZIP entry data does not match its declared size or CRC."));
         }
         Ok(())

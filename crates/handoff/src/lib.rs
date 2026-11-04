@@ -151,14 +151,29 @@ pub struct OperationalError(#[from] pub io::Error);
 
 /// Validates the package at `path`.
 pub fn validate_file(path: &Path) -> Result<Report, OperationalError> {
-    let file = std::fs::File::open(path)?;
-    validate(file, false)
+    validate(open_regular(path)?, false)
 }
 
 /// Validates a package and, when it is valid, also returns its TIN surface.
 pub fn read_surface_file(path: &Path) -> Result<Report, OperationalError> {
-    let file = std::fs::File::open(path)?;
-    validate(file, true)
+    validate(open_regular(path)?, true)
+}
+
+/// Opens `path` for reading only if it is a regular file. On unix the open is nonblocking, so a
+/// FIFO without a writer cannot hang it; the type check then refuses FIFOs and devices.
+fn open_regular(path: &Path) -> io::Result<std::fs::File> {
+    let mut options = std::fs::OpenOptions::new();
+    options.read(true);
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::OpenOptionsExt;
+        options.custom_flags(libc::O_NONBLOCK);
+    }
+    let file = options.open(path)?;
+    if !file.metadata()?.is_file() {
+        return Err(io::Error::new(io::ErrorKind::InvalidInput, format!("{} is not a regular file", path.display())));
+    }
+    Ok(file)
 }
 
 /// Validates a package read from `source`. With `keep_surface`, a valid package's TIN

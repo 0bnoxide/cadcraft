@@ -137,3 +137,114 @@ fn ntfs_reparse_entry_is_not_regular() {
     let report = cadcraft_handoff::validate(std::io::Cursor::new(bytes), false).unwrap();
     assert_eq!(report.issues.first().map(|i| i.code), Some("ZIP007"));
 }
+
+/// One entry for [`build_zip`]: name, compression method, and the stored data span.
+struct Part {
+    name: &'static str,
+    method: u16,
+    span: Vec<u8>,
+    plain: Vec<u8>,
+}
+
+/// Writes a minimal ZIP; `central_slack` bytes are appended inside the central directory.
+fn build_zip(parts: &[Part], central_slack: usize) -> Vec<u8> {
+    let mut out = Vec::new();
+    let mut central = Vec::new();
+    for p in parts {
+        let offset = out.len() as u32;
+        let crc = crc32fast::hash(&p.plain);
+        let fields = |sig: u32, central: bool| {
+            let mut h = sig.to_le_bytes().to_vec();
+            if central {
+                h.extend_from_slice(&20u16.to_le_bytes());
+            }
+            for v in [20u16, 0, p.method, 0, 0] {
+                h.extend_from_slice(&v.to_le_bytes());
+            }
+            for v in [crc, p.span.len() as u32, p.plain.len() as u32] {
+                h.extend_from_slice(&v.to_le_bytes());
+            }
+            h.extend_from_slice(&(p.name.len() as u16).to_le_bytes());
+            h.extend_from_slice(&0u16.to_le_bytes());
+            if central {
+                for v in [0u16, 0, 0] {
+                    h.extend_from_slice(&v.to_le_bytes());
+                }
+                h.extend_from_slice(&0u32.to_le_bytes());
+                h.extend_from_slice(&offset.to_le_bytes());
+            }
+            h.extend_from_slice(p.name.as_bytes());
+            h
+        };
+        out.extend(fields(0x0403_4b50, false));
+        out.extend_from_slice(&p.span);
+        central.extend(fields(0x0201_4b50, true));
+    }
+    central.extend(std::iter::repeat_n(0u8, central_slack));
+    let start = out.len() as u32;
+    out.extend_from_slice(&central);
+    out.extend_from_slice(&0x0605_4b50u32.to_le_bytes());
+    for v in [0u16, 0, parts.len() as u16, parts.len() as u16] {
+        out.extend_from_slice(&v.to_le_bytes());
+    }
+    out.extend_from_slice(&(central.len() as u32).to_le_bytes());
+    out.extend_from_slice(&start.to_le_bytes());
+    out.extend_from_slice(&0u16.to_le_bytes());
+    out
+}
+
+/// The valid fixture's entries, with the manifest deflated and `junk` appended to its span.
+fn rebuilt(junk: &[u8]) -> Vec<Part> {
+    use std::io::{Read, Write};
+    let bytes = std::fs::read(fixtures().join("valid/known-vertical-datum.zip")).unwrap();
+    let entry = |at: usize, len: usize| bytes[at..at + len].to_vec();
+    let manifest = entry(30 + "handoff.json".len(), 636);
+    let surface = entry(678 + 30 + "surface.landxml".len(), 558);
+    let mut encoder = flate2::write::DeflateEncoder::new(Vec::new(), flate2::Compression::default());
+    encoder.write_all(&manifest).unwrap();
+    let mut span = encoder.finish().unwrap();
+    let mut check = Vec::new();
+    flate2::read::DeflateDecoder::new(&span[..]).read_to_end(&mut check).unwrap();
+    assert_eq!(check, manifest);
+    span.extend_from_slice(junk);
+    vec![
+        Part { name: "handoff.json", method: 8, span, plain: manifest },
+        Part { name: "surface.landxml", method: 0, span: surface.clone(), plain: surface },
+    ]
+}
+
+fn primary(zip: Vec<u8>) -> (Status, Option<&'static str>) {
+    let report = cadcraft_handoff::validate(std::io::Cursor::new(zip), false).unwrap();
+    (report.status, report.issues.first().map(|i| i.code))
+}
+
+#[test]
+fn rebuilt_package_is_valid() {
+    assert_eq!(primary(build_zip(&rebuilt(&[]), 0)), (Status::Valid, None));
+}
+
+/// Bytes after the end of a DEFLATE stream, inside its declared span, could hide data.
+#[test]
+fn trailing_bytes_after_deflate_stream_are_refused() {
+    assert_eq!(primary(build_zip(&rebuilt(b"PK\x03\x04hidden"), 0)), (Status::Invalid, Some("ZIP001")));
+}
+
+/// Central-directory bytes beyond the declared records could hide entries from this reader.
+#[test]
+fn unparsed_central_directory_bytes_are_refused() {
+    assert_eq!(primary(build_zip(&rebuilt(&[]), 46)), (Status::Invalid, Some("ZIP001")));
+}
+
+/// A FIFO is refused at open without blocking.
+#[cfg(unix)]
+#[test]
+fn fifo_path_is_refused_without_blocking() {
+    let dir = std::env::temp_dir().join(format!("cadcraft-handoff-fifo-{}", std::process::id()));
+    std::fs::create_dir_all(&dir).unwrap();
+    let fifo = dir.join("package.zip");
+    let made = std::process::Command::new("mkfifo").arg(&fifo).status().unwrap();
+    assert!(made.success());
+    let err = validate_file(&fifo).unwrap_err();
+    assert!(err.to_string().contains("not a regular file"), "{err}");
+    std::fs::remove_dir_all(&dir).ok();
+}

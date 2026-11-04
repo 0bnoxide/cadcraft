@@ -38,7 +38,12 @@ fn validate(p: &Value) -> Result<cadcraft_handoff::Report> {
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let report = validate(p)?;
     if report.status == cadcraft_handoff::Status::Invalid {
-        let first = report.issues.first().map(|i| format!("[{}] {}", i.code, i.message)).unwrap_or_default();
+        let first = report
+            .issues
+            .iter()
+            .find(|i| i.severity == cadcraft_handoff::Severity::Error)
+            .map(|i| format!("[{}] {}", i.code, i.message))
+            .unwrap_or_default();
         return Err(bad(ID, format!("the package is invalid: {first}")));
     }
     let tin = report.surface.ok_or_else(|| bad(ID, "the package has no surface"))?;

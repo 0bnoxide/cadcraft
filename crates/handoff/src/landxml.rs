@@ -73,71 +73,156 @@ impl Stop {
         if let Some(issue) = crate::archive::fault_of(e) {
             return Stop::Stage(StageError::Entry(issue));
         }
-        if e.get_ref().is_some_and(|inner| inner.is::<Forbidden>()) {
-            return Stop::Doctype;
+        if e.get_ref().is_some_and(|inner| inner.is::<BadEncoding>()) {
+            return Stop::Malformed;
         }
         Stop::Stage(StageError::Io(io::Error::new(e.kind(), e.to_string())))
     }
 }
 
-/// Marker error: the byte stream contains `<!DOCTYPE`.
+/// Marker error: the bytes are not valid in the detected encoding.
 #[derive(Debug)]
-struct Forbidden;
+struct BadEncoding;
 
-impl std::fmt::Display for Forbidden {
+impl std::fmt::Display for BadEncoding {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        f.write_str("LandXML document type declarations are forbidden.")
+        f.write_str("surface.landxml is not valid in its detected encoding.")
     }
 }
 
-impl std::error::Error for Forbidden {}
+impl std::error::Error for BadEncoding {}
 
-/// Passes bytes through and fails as soon as `<!DOCTYPE` appears in UTF-16 or UTF-32, which the
-/// UTF-8 parser cannot read. In UTF-8 documents only a real declaration (a `DocType` event) is
-/// refused, so the text inside a comment or CDATA section is allowed. The reference validator
-/// rejects the byte sequence anywhere; this port is deliberately more permissive there.
-struct DoctypeScanner<R> {
+fn bad_encoding() -> io::Error {
+    io::Error::new(io::ErrorKind::InvalidData, BadEncoding)
+}
+
+/// A UTF-16 or UTF-32 byte order.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct Wide {
+    width: usize,
+    big_endian: bool,
+}
+
+/// Detects the encoding from the byte order mark or, without one, from how `<` is encoded (XML
+/// 1.0 appendix F), and returns a UTF-8 stream without the mark. UTF-8 passes through unchanged.
+/// The declared `encoding` is not consulted, as the parser reads only UTF-8.
+fn decode<'a, R: Read + 'a>(mut input: R) -> io::Result<Box<dyn BufRead + 'a>> {
+    let mut head = [0u8; 4];
+    let mut n = 0;
+    while let Some(free) = head.get_mut(n..).filter(|f| !f.is_empty()) {
+        let k = input.read(free)?;
+        if k == 0 {
+            break;
+        }
+        n += k;
+    }
+    let seen = head.get(..n).unwrap_or_default();
+    let (wide, skip) = match seen {
+        [0xEF, 0xBB, 0xBF, ..] => (None, 3),
+        [0xFF, 0xFE, 0, 0] => (Some(Wide { width: 4, big_endian: false }), 4),
+        [0, 0, 0xFE, 0xFF] => (Some(Wide { width: 4, big_endian: true }), 4),
+        [0xFF, 0xFE, ..] => (Some(Wide { width: 2, big_endian: false }), 2),
+        [0xFE, 0xFF, ..] => (Some(Wide { width: 2, big_endian: true }), 2),
+        [0x3C, 0, 0, 0] => (Some(Wide { width: 4, big_endian: false }), 0),
+        [0, 0, 0, 0x3C] => (Some(Wide { width: 4, big_endian: true }), 0),
+        [0x3C, 0, ..] => (Some(Wide { width: 2, big_endian: false }), 0),
+        [0, 0x3C, ..] => (Some(Wide { width: 2, big_endian: true }), 0),
+        _ => (None, 0),
+    };
+    let rest = io::Cursor::new(seen.get(skip..).unwrap_or_default().to_vec()).chain(input);
+    Ok(match wide {
+        None => Box::new(BufReader::new(rest)),
+        Some(wide) => Box::new(BufReader::new(Transcoder { inner: rest, wide, carry: Vec::new(), out: Vec::new(), pos: 0, high: None })),
+    })
+}
+
+/// Streams UTF-16 or UTF-32 as UTF-8. Unpaired surrogates, invalid code points and a partial
+/// final code unit are encoding errors.
+struct Transcoder<R> {
     inner: R,
-    tail: Vec<u8>,
-    found: bool,
-    patterns: Vec<Vec<u8>>,
+    wide: Wide,
+    /// Raw bytes of an incomplete code unit.
+    carry: Vec<u8>,
+    out: Vec<u8>,
+    pos: usize,
+    /// A UTF-16 high surrogate waiting for its low half.
+    high: Option<u32>,
 }
 
-impl<R: Read> DoctypeScanner<R> {
-    fn new(inner: R) -> Self {
-        let text = "<!DOCTYPE";
-        let utf16le: Vec<u8> = text.encode_utf16().flat_map(u16::to_le_bytes).collect();
-        let utf16be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
-        let utf32le: Vec<u8> = text.chars().flat_map(|c| u32::from(c).to_le_bytes()).collect();
-        let utf32be: Vec<u8> = text.chars().flat_map(|c| u32::from(c).to_be_bytes()).collect();
-        Self { inner, tail: Vec::new(), found: false, patterns: vec![utf16le, utf16be, utf32le, utf32be] }
+impl<R: Read> Transcoder<R> {
+    fn unit(&self, bytes: &[u8]) -> u32 {
+        let mut value = 0u32;
+        let mut push = |b: &u8| value = (value << 8) | u32::from(*b);
+        if self.wide.big_endian {
+            bytes.iter().for_each(&mut push)
+        } else {
+            bytes.iter().rev().for_each(&mut push)
+        }
+        value
+    }
+
+    fn push_unit(&mut self, unit: u32) -> io::Result<()> {
+        let code = if self.wide.width == 2 {
+            match (self.high.take(), unit) {
+                (None, 0xD800..=0xDBFF) => {
+                    self.high = Some(unit);
+                    return Ok(());
+                }
+                (Some(high), 0xDC00..=0xDFFF) => 0x10000 + ((high - 0xD800) << 10) + (unit - 0xDC00),
+                (None, _) if !(0xDC00..=0xDFFF).contains(&unit) => unit,
+                _ => return Err(bad_encoding()),
+            }
+        } else {
+            unit
+        };
+        let c = char::from_u32(code).ok_or_else(bad_encoding)?;
+        let mut utf8 = [0u8; 4];
+        self.out.extend_from_slice(c.encode_utf8(&mut utf8).as_bytes());
+        Ok(())
+    }
+
+    /// Converts more input; returns false at the end of input.
+    fn refill(&mut self) -> io::Result<bool> {
+        self.out.clear();
+        self.pos = 0;
+        let mut raw = [0u8; 8192];
+        while self.out.is_empty() {
+            let n = self.inner.read(&mut raw)?;
+            if n == 0 {
+                if !self.carry.is_empty() || self.high.is_some() {
+                    return Err(bad_encoding());
+                }
+                return Ok(false);
+            }
+            self.carry.extend_from_slice(raw.get(..n).unwrap_or_default());
+            let whole = self.carry.len() - self.carry.len() % self.wide.width;
+            let units: Vec<u32> = self.carry.get(..whole).unwrap_or_default().chunks(self.wide.width).map(|c| self.unit(c)).collect();
+            self.carry.drain(..whole);
+            for unit in units {
+                self.push_unit(unit)?;
+            }
+        }
+        Ok(true)
     }
 }
 
-impl<R: Read> Read for DoctypeScanner<R> {
+impl<R: Read> Read for Transcoder<R> {
     fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
-        if self.found {
-            return Err(io::Error::other(Forbidden));
+        if self.pos >= self.out.len() && !self.refill()? {
+            return Ok(0);
         }
-        let n = self.inner.read(buf)?;
-        let fresh = buf.get(..n).unwrap_or_default();
-        let mut window = std::mem::take(&mut self.tail);
-        window.extend_from_slice(fresh);
-        if self.patterns.iter().any(|p| window.windows(p.len()).any(|w| w == p.as_slice())) {
-            self.found = true;
-            return Err(io::Error::other(Forbidden));
-        }
-        let keep = 36usize.min(window.len());
-        self.tail = window.split_off(window.len() - keep);
+        let ready = self.out.get(self.pos..).unwrap_or_default();
+        let n = ready.len().min(buf.len());
+        buf.get_mut(..n).unwrap_or_default().copy_from_slice(ready.get(..n).unwrap_or_default());
+        self.pos += n;
         Ok(n)
     }
 }
 
 /// Parses the surface stream. `Ok(Err(issue))` is an invalid surface.
-pub(crate) fn parse<R: Read>(input: R, keep_geometry: bool) -> Result<Result<Summary, Issue>, StageError> {
-    let mut buffered = BufReader::new(DoctypeScanner::new(input));
-    match skip_bom(&mut buffered) {
-        Ok(()) => {}
+pub(crate) fn parse<'a, R: Read + 'a>(input: R, keep_geometry: bool) -> Result<Result<Summary, Issue>, StageError> {
+    let decoded = match decode(input) {
+        Ok(decoded) => decoded,
         Err(e) => {
             return match Stop::from_io(&e) {
                 Stop::Stage(stage) => Err(stage),
@@ -145,8 +230,8 @@ pub(crate) fn parse<R: Read>(input: R, keep_geometry: bool) -> Result<Result<Sum
                 Stop::Malformed => Ok(Err(malformed())),
             };
         }
-    }
-    let mut reader = NsReader::from_reader(buffered);
+    };
+    let mut reader = NsReader::from_reader(decoded);
     {
         let config = reader.config_mut();
         config.check_end_names = true;
@@ -160,14 +245,6 @@ pub(crate) fn parse<R: Read>(input: R, keep_geometry: bool) -> Result<Result<Sum
         Err(Stop::Doctype) => Ok(Err(doctype())),
         Err(Stop::Stage(stage)) => Err(stage),
     }
-}
-
-fn skip_bom<R: BufRead>(reader: &mut R) -> io::Result<()> {
-    let has_bom = reader.fill_buf()?.starts_with(b"\xEF\xBB\xBF");
-    if has_bom {
-        reader.consume(3);
-    }
-    Ok(())
 }
 
 fn malformed() -> Issue {
@@ -716,6 +793,77 @@ mod doctype_tests {
         assert_eq!(code(&surface("", "")), None);
         assert_eq!(code(&surface("<!-- an old <!DOCTYPE note -->", "")), None);
         assert_eq!(code(&surface("", "<Project name=\"p\"><![CDATA[<!DOCTYPE x>]]></Project>")), None);
+    }
+
+    fn utf16(xml: &str, big_endian: bool, bom: bool) -> Vec<u8> {
+        let mut out = if bom { "\u{FEFF}".to_owned() } else { String::new() };
+        out.push_str(xml);
+        out.encode_utf16().flat_map(|u| if big_endian { u.to_be_bytes() } else { u.to_le_bytes() }).collect()
+    }
+
+    fn utf32(xml: &str, big_endian: bool, bom: bool) -> Vec<u8> {
+        let mut out = if bom { "\u{FEFF}".to_owned() } else { String::new() };
+        out.push_str(xml);
+        out.chars().flat_map(|c| if big_endian { u32::from(c).to_be_bytes() } else { u32::from(c).to_le_bytes() }).collect()
+    }
+
+    fn bytes_code(bytes: &[u8]) -> Option<&'static str> {
+        match parse(bytes, true) {
+            Ok(Ok(summary)) => {
+                assert_eq!(summary.surface_name, "S\u{e9}\u{1F600}");
+                assert_eq!(summary.point_count, 3);
+                None
+            }
+            Ok(Err(issue)) => Some(issue.code),
+            Err(_) => Some("stage"),
+        }
+    }
+
+    #[test]
+    fn utf16_and_utf32_documents_are_read() {
+        let xml = surface("", "").replace("encoding=\"utf-8\"", "encoding=\"utf-16\"").replace("name=\"S\"", "name=\"S\u{e9}\u{1F600}\"");
+        for big_endian in [false, true] {
+            for bom in [false, true] {
+                assert_eq!(bytes_code(&utf16(&xml, big_endian, bom)), None, "utf-16 be={big_endian} bom={bom}");
+                assert_eq!(bytes_code(&utf32(&xml, big_endian, bom)), None, "utf-32 be={big_endian} bom={bom}");
+            }
+        }
+        let mut utf8 = b"\xEF\xBB\xBF".to_vec();
+        utf8.extend_from_slice(surface("", "").replace("name=\"S\"", "name=\"S\u{e9}\u{1F600}\"").as_bytes());
+        assert_eq!(bytes_code(&utf8), None);
+    }
+
+    #[test]
+    fn wide_documents_follow_the_utf8_rules() {
+        let comment = surface("<!-- an old <!DOCTYPE note -->", "");
+        let declared = surface("<!DOCTYPE LandXML>", "");
+        assert_eq!(code_bytes(&utf16(&comment, false, true)), None);
+        assert_eq!(code_bytes(&utf16(&declared, true, true)), Some(codes::LANDXML_FORBIDDEN_DTD));
+        assert_eq!(code_bytes(&utf32(&declared, false, false)), Some(codes::LANDXML_FORBIDDEN_DTD));
+    }
+
+    #[test]
+    fn invalid_wide_encodings_are_malformed() {
+        let xml = surface("", "");
+        let mut odd = utf16(&xml, false, true);
+        odd.push(0x20);
+        let mut lone_high = utf16(&xml, false, true);
+        lone_high.extend_from_slice(&[0x00, 0xD8, 0x20, 0x00]);
+        let mut lone_low = utf16(&xml, true, true);
+        lone_low.extend_from_slice(&[0xDC, 0x00]);
+        let mut beyond = utf32(&xml, false, true);
+        beyond.extend_from_slice(&0x0011_0000u32.to_le_bytes());
+        for bad in [odd, lone_high, lone_low, beyond] {
+            assert_eq!(code_bytes(&bad), Some(codes::LANDXML_MALFORMED));
+        }
+    }
+
+    fn code_bytes(bytes: &[u8]) -> Option<&'static str> {
+        match parse(bytes, false) {
+            Ok(Ok(_)) => None,
+            Ok(Err(issue)) => Some(issue.code),
+            Err(_) => Some("stage"),
+        }
     }
 
     #[test]
