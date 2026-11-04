@@ -1,0 +1,5 @@
+AIGIS3D SYNTHETIC PIX4D QA v1
+RMSE X: 0.1 m
+RMSE X: 0.2 ft
+RMSE Y: nan ft
+Images total: many

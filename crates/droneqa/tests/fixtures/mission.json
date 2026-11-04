@@ -1,0 +1,49 @@
+{
+  "global_id": "11111111-1111-4111-8111-111111111111",
+  "mission_id": "SYNTHETIC-001",
+  "mission_date": "2026-09-12",
+  "aircraft": "synthetic aircraft",
+  "sensor": "synthetic sensor",
+  "horizontal_crs": "EPSG:26913",
+  "horizontal_datum": "NAD83",
+  "horizontal_units": "metre",
+  "vertical_crs": "NAVD88 height",
+  "vertical_datum": "NAVD88",
+  "vertical_units": "foot",
+  "geoid_model": "synthetic-geoid",
+  "gcp_count": 3,
+  "checkpoint_count": 2,
+  "checkpoints_independent": true,
+  "control_accuracy_feet": 0.03,
+  "checkpoint_accuracy_feet": 0.03,
+  "rmse_x_feet": 0.1,
+  "rmse_y_feet": 0.2,
+  "rmse_z_feet": 0.3,
+  "planned_altitude_agl_feet": 100.0,
+  "actual_altitude_agl_feet": 104.0,
+  "planned_speed_mph": 5.0,
+  "actual_speed_mph": 5.5,
+  "planned_front_overlap_percent": 80.0,
+  "front_overlap_percent": 82.0,
+  "planned_side_overlap_percent": 70.0,
+  "side_overlap_percent": 72.0,
+  "planned_image_count": 100,
+  "actual_image_count": 100,
+  "planned_flight_pattern": "grid",
+  "flight_pattern": "grid",
+  "rtk_ppk_status": "RTK_FIXED",
+  "correction_source": "synthetic local base",
+  "present_deliverables": [
+    "orthomosaic",
+    "QA report"
+  ],
+  "attachments": [
+    {
+      "id": 1,
+      "name": "quality_report.txt",
+      "size": 164,
+      "sha256": "ae5fa1e39467fa5f9fe2324886db81c74afb0116c5c585644c78b87f558c03cd",
+      "content_type": "text/plain"
+    }
+  ]
+}

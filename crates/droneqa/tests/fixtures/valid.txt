@@ -1,0 +1,8 @@
+AIGIS3D SYNTHETIC PIX4D QA v1
+RMSE X: 0.10 ft
+RMSE Y: 0.20 ft
+RMSE Z: 0.30 ft
+Images calibrated: 90
+Images total: 100
+Software: Pix4D synthetic
+Version: fixture-1

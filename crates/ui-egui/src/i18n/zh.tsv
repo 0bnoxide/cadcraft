@@ -4,6 +4,9 @@
 # UTF-8: context<TAB>English source<TAB>Chinese translation.
 # Empty context = ordinary label; @plural = one|other forms with {n}.
 # Command IDs, typed keywords, technology/product names and user data stay unchanged.
+	Drone Survey QA	无人机测量质检
+	Import PIX4D Report	导入PIX4D报告
+	QA Review	质检审核
 	Create TIN Surface	创建TIN曲面
 	Export TIN to LandXML	导出TIN为LandXML
 	Create Contours	创建等高线
