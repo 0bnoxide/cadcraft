@@ -86,24 +86,50 @@ fn inside_or_on(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
     odd
 }
 
-/// Do segments `pq` and `rs` cross at a point interior to both?
-fn cross(p: [f64; 2], q: [f64; 2], r: [f64; 2], s: [f64; 2]) -> bool {
-    // Orientation as -1, 0 or 1 (`f64::signum` maps 0.0 to 1.0, which would count touching as crossing).
-    let o = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
-        let v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
-        i8::from(v > 0.0) - i8::from(v < 0.0)
+/// Does segment `rs` pass through the open interior of triangle `c` (more than `ON` inside)?
+/// Clips the segment to the triangle's three half-planes and tests the clipped piece's midpoint,
+/// which covers proper crossings, boundary vertices inside, and chords between touch points.
+fn enters(c: [[f64; 2]; 3], r: [f64; 2], s: [f64; 2]) -> bool {
+    const ON: f64 = 1e-9;
+    let turn = (c[1][0] - c[0][0]) * (c[2][1] - c[0][1]) - (c[1][1] - c[0][1]) * (c[2][0] - c[0][0]);
+    let sign = if turn < 0.0 { -1.0 } else { 1.0 };
+    // Signed distance of `p` inside side i (positive = towards the triangle).
+    let dist = |i: usize, p: [f64; 2]| {
+        let (a, b) = (c[i], c[(i + 1) % 3]);
+        let len = (b[0] - a[0]).hypot(b[1] - a[1]);
+        sign * ((b[0] - a[0]) * (p[1] - a[1]) - (b[1] - a[1]) * (p[0] - a[0])) / len
     };
-    o(p, q, r) * o(p, q, s) < 0 && o(r, s, p) * o(r, s, q) < 0
+    let (mut lo, mut hi) = (0.0f64, 1.0f64);
+    for i in 0..3 {
+        let (d0, d1) = (dist(i, r), dist(i, s));
+        if d0 < 0.0 && d1 < 0.0 {
+            return false;
+        }
+        if d0 != d1 {
+            let t = d0 / (d0 - d1);
+            if d0 < 0.0 {
+                lo = lo.max(t);
+            } else if d1 < 0.0 {
+                hi = hi.min(t);
+            }
+        }
+    }
+    if lo >= hi {
+        return false;
+    }
+    let t = (lo + hi) / 2.0;
+    let m = [r[0] + t * (s[0] - r[0]), r[1] + t * (s[1] - r[1])];
+    (0..3).all(|i| dist(i, m) > ON)
 }
 
 /// Whole-triangle clipping: kept only when every corner is inside (or on) the boundary and no
-/// side crosses a boundary edge, so nothing of a kept triangle lies outside.
+/// boundary edge passes through its interior, so nothing of a kept triangle lies outside.
 // shortcut: O(triangles x boundary edges); index the boundary edges (rstar) if big boundaries get slow.
 fn within(poly: &[[f64; 2]], t: [[f64; 3]; 3]) -> bool {
     let c = t.map(|p| [p[0], p[1]]);
     c.iter().all(|p| inside_or_on(poly, p[0], p[1]))
         && inside_or_on(poly, (c[0][0] + c[1][0] + c[2][0]) / 3.0, (c[0][1] + c[1][1] + c[2][1]) / 3.0)
-        && [(c[0], c[1]), (c[1], c[2]), (c[2], c[0])].iter().all(|&(p, q)| ring(poly).all(|(r, s)| !cross(p, q, r, s)))
+        && ring(poly).all(|(r, s)| !enters(c, r, s))
 }
 
 /// Builds a constrained Delaunay TIN. Every input coordinate must be finite.

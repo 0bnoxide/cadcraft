@@ -116,3 +116,17 @@ fn boundary_keeps_only_triangles_wholly_inside() {
         }
     }
 }
+
+#[test]
+fn boundary_touching_a_triangle_side_at_vertices_still_clips_it() {
+    // Codex's follow-up: the notch meets the hypotenuse exactly at boundary vertices (2,8) and (1,9).
+    let one = [[0.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 10.0, 0.0]];
+    let notch = vec![[0.0, 0.0], [10.0, 0.0], [10.0, 10.0], [2.0, 10.0], [2.0, 8.0], [2.0, 1.0], [1.0, 1.0], [1.0, 9.0], [1.0, 10.0], [0.0, 10.0]];
+    assert!(build(&one, &[], &BuildOptions { boundary: Some(notch), ..Default::default() }).is_err());
+    // A boundary chord between two points on the triangle's sides, with no vertex strictly inside.
+    let chord = vec![[0.0, 0.0], [10.0, 0.0], [5.0, 5.0], [0.0, 5.0], [0.0, 10.0], [-1.0, 10.0], [-1.0, -1.0]];
+    assert!(build(&one, &[], &BuildOptions { boundary: Some(chord), ..Default::default() }).is_err());
+    // Boundary edges running along the triangle's sides do not clip it.
+    let same = vec![[0.0, 0.0], [10.0, 0.0], [0.0, 10.0]];
+    assert_eq!(build(&one, &[], &BuildOptions { boundary: Some(same), ..Default::default() }).unwrap().tin.triangles.len(), 1);
+}
