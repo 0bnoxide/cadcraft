@@ -28,6 +28,8 @@ mod merge;
 mod mleader_content;
 mod mleader_edit;
 mod modify;
+mod surface_build;
+mod surface_contour;
 mod survey_level;
 mod survey_points;
 pub(crate) use modify::Erased;
@@ -207,6 +209,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(handoff::specs());
         v.extend(survey_points::specs());
         v.extend(survey_level::specs());
+        v.extend(surface_build::specs());
+        v.extend(surface_contour::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());

@@ -1,0 +1,12 @@
+[package]
+name = "cadcraft-surface"
+description = "TIN surfaces for CADCraft: triangulation, contours, comparison and LandXML export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+spade = "2"

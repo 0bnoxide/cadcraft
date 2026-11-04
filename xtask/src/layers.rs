@@ -38,6 +38,7 @@ pub const TABLE: &[(&str, Class)] = &[
     ("dwg", Class::Standalone),
     ("handoff", Class::Standalone),
     ("survey", Class::Standalone),
+    ("surface", Class::Standalone),
     ("color", Class::Layer(0)),
     ("doc", Class::Layer(1)),
     ("constraints", Class::Layer(2)),
