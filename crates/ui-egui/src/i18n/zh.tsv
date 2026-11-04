@@ -4,6 +4,11 @@
 # UTF-8: context<TAB>English source<TAB>Chinese translation.
 # Empty context = ordinary label; @plural = one|other forms with {n}.
 # Command IDs, typed keywords, technology/product names and user data stay unchanged.
+	Process Level Loop	处理水准环线
+	Export Survey Points	导出测量点
+	Import Handoff Surface	导入交接曲面
+	Import RTK Points	导入RTK测量点
+	RTK Control Check	RTK控制点检查
 	  Cancel  	取消
 	  OK  	确定
 	 or [	 或 [

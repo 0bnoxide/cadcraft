@@ -812,6 +812,9 @@ dependencies = [
 [[package]]
 name = "cadcraft-survey"
 version = "0.17.0"
+dependencies = [
+ "chrono",
+]
 
 [[package]]
 name = "cadcraft-ui-egui"
