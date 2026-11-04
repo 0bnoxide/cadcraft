@@ -18,6 +18,8 @@
 - **The AutoGIS-Civil3D write hook** applies to every file write from this session, including writes in the cadcraft clone. I had to claim `slice1/claude-rtk` in that repo's coordination registry before I could write any file.
 - **Leftover file.** An untracked `CLAUDE_TEST.txt` from an earlier folder-access test sits in the main clone. I didn't commit it.
 - My first CI run failed on clippy `field_reassign_with_default`. That cost one extra full CI run of roughly 10 minutes.
+- **Auto-mode blocked the force push** after I rebased #3 onto `main` once #4 had merged. It flagged `git push --force-with-lease` as "Git Destructive". I didn't work around the block. The planning thread redid the rebase and force-pushed from its cloud clone, then merged. The rebased branch passed all 7 CI steps on this PC before that.
+- **The second PR always needs a rebase** in this process, and on this PC that means a person or a cloud session has to do the force push. Next time, either allow `--force-with-lease` on `slice1/*` branches or have the second PR merge `main` in rather than rebasing.
 
 ## Review
 - **Codex reviewed PR #3** at `dcd2982` and found three real issues, now fixed in `a8f1459` with regression tests:
@@ -30,4 +32,9 @@
 ## Timing
 - Orientation (finding the clone, reading the docs and reference): about 10 minutes.
 - Writing the code and tests: about 10 minutes.
-- Two full `cargo xtask ci` runs on Windows, including the cold egui and wasm build: most of the remaining time.
+- CI runs on Windows: five full `cargo xtask ci` runs in all. The first, with the cold egui and wasm build, took about 10 minutes, and the later ones were faster. CI was most of the elapsed time.
+- From the start to both PRs merged: about 2 h 20 min (05:30 to 07:50 UTC), much of it spent waiting on the other session or on merges.
+
+## Result
+- After #4 and #3 merged, `cargo xtask ci` on `origin/main` (`6062e84`), run in a clean detached worktree on this PC, passed all 7 steps (fmt, clippy, test, i18n, assets, layers, wasm).
+- Pass criteria: both sessions used separate worktrees of the same clone. No PR touched a file the other agent owned, apart from the shared files Greg approved in #4. Each PR got a review from the other agent, and every comment was answered. CI passed on each PR head and on `main`. Neither merge needed Greg to resolve a conflict by hand.
