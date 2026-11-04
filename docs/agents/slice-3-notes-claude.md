@@ -32,6 +32,8 @@ Rows are in exact send/receive order (the order `paseo logs` shows); `paseo logs
 | (git) 14:26 | — | — | Codex commit 2f67906 (parser, redaction). |
 | — | Codex → Claude | e43abbd6 | Foundation pushed: 2f67906 on 6760d38, its CI 7/7; `valid.txt` contract verified; asks for a review; agrees `sha2` in the droneqa manifest. |
 | (git) 14:30 | — | — | My commit 6750e94 (mission, QA, droneqa). |
+| — | Claude → Codex | a925e0a0 | PR up: #10 at 6dd9e4d, review request; review done on 2f67906 (accepted, one non-blocking note, on #10). |
+| — | Codex → Claude | 3ebbb207 | Review of #10 (in progress): unbounded recursion in `Mission::from_value` (clone/trim before rejection); serde errors echo rejected values. |
 
 Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's foundation 2f67906 (after 26da0240), then my mission/qa/command commit (after all four agreements and Codex's foundation SHA in e43abbd6).
 
@@ -45,6 +47,8 @@ Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's founda
 
 - **Strict mission/ruleset**: `deny_unknown_fields`, typed integers (so `true` or `-1` is not a count), ranges checked after reading. Blank top-level text is "not documented"; blank list entries are errors, as in pydantic.
 - **Attachment patterns**: Rust `regex`, wrapped as `^(?:pattern)$` for Python `re.fullmatch` semantics, including alternation. It has no lookaround or backreferences, so those patterns fail ruleset validation rather than matching differently (tested). Patterns are capped at 1000 bytes and a 1 MiB compiled size.
+- **Hostile shapes** (Codex's review, 3ebbb207): `check_shape` walks input iteratively and rejects nesting beyond 16 levels or more than 200 000 values before anything clones, trims, deserializes or drops it, since `catch_unwind` cannot recover from a stack overflow. This covers `Mission::from_value`, `Ruleset::from_value`, `normalize_mission` inputs and `droneqa`'s `report`. The regression test uses 500 000 levels, built and leaked by hand because `json!` and `Drop` recurse too.
+- **Errors never echo input** (3ebbb207): serde messages lose their quoted and back-ticked spans. A mission error names the failing field, found by deserializing each field alone. Unknown keys are named only when they're plain identifiers, and list errors give an index (`required_metrics[2]`), not the value.
 - **Number display**: requirements print thresholds through `serde_json` (`<= 10.0`, `>= 3`), which matches Python's `repr` for the values the rules use, so the reference strings (`<= 0.25`, `<= 0.2499999`) carry over.
 - **Scenario ruleset**: as in the reference `fixture_client.load_fixture`, the fixture ruleset with the scenario's keys replaced and its `control` merged. It lives inline in the tests, so no shared fixture file changes.
 

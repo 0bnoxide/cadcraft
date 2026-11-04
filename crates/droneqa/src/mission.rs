@@ -16,6 +16,52 @@ pub const MAX_TEXT: usize = 2000;
 pub const MAX_LIST: usize = 10_000;
 /// Longest attachment pattern, in bytes; patterns compile under a size limit too.
 pub const MAX_PATTERN: usize = 1000;
+/// Deepest nesting a mission or ruleset may have (they need 3), checked before any recursion.
+pub const MAX_DEPTH: usize = 16;
+/// Most JSON values a mission or ruleset may hold, checked before any copy.
+pub const MAX_NODES: usize = 200_000;
+
+/// Reject hostile shapes iteratively (depth `MAX_DEPTH`, `MAX_NODES` values), before anything recurses into (clones, trims or drops) them.
+pub fn check_shape(what: &str, v: &Value) -> Result<(), String> {
+    let mut stack = vec![(v, 0usize)];
+    let mut nodes = 0usize;
+    while let Some((v, depth)) = stack.pop() {
+        nodes = nodes.saturating_add(1);
+        if depth > MAX_DEPTH || nodes > MAX_NODES {
+            return Err(format!("{what}: input is nested too deeply or is too large"));
+        }
+        match v {
+            Value::Array(a) => stack.extend(a.iter().map(|x| (x, depth.saturating_add(1)))),
+            Value::Object(o) => stack.extend(o.values().map(|x| (x, depth.saturating_add(1)))),
+            _ => {}
+        }
+    }
+    Ok(())
+}
+
+/// A key worth naming in an error: a plain identifier, never arbitrary input text.
+fn safe_name(key: &str) -> Option<&str> {
+    (!key.is_empty() && key.len() <= 64 && key.bytes().all(|b| b.is_ascii_lowercase() || b.is_ascii_digit() || b == b'_')).then_some(key)
+}
+
+/// A serde error without the rejected input: quoted and back-ticked spans are dropped.
+fn structural(what: &str, e: &serde_json::Error) -> String {
+    let text = e.to_string();
+    if text.starts_with("unknown field") {
+        return format!("{what}: unknown field");
+    }
+    let mut out = String::new();
+    let mut close = None;
+    for c in text.chars() {
+        match close {
+            Some(end) if c == end => close = None,
+            Some(_) => {}
+            None if c == '"' || c == '`' => close = Some(c),
+            None => out.push(c),
+        }
+    }
+    format!("{what}: {}", out.replace(" ,", ",").trim())
+}
 
 /// One file attached to a mission record.
 #[derive(Debug, Clone, PartialEq, Serialize, Deserialize)]
@@ -155,7 +201,15 @@ impl Mission {
 
     /// Strict read of a canonical mission (the JSON form of `fixtures/mission.json`).
     pub fn from_value(value: &Value) -> Result<Mission, String> {
+        check_shape("mission", value)?;
         let Value::Object(map) = value else { return Err("mission: expected a JSON object".into()) };
+        let known = Mission::field_names();
+        if let Some(k) = map.keys().find(|k| !known.contains(k)) {
+            return Err(match safe_name(k) {
+                Some(k) => format!("mission: unknown field `{k}`"),
+                None => "mission: unknown field".into(),
+            });
+        }
         let mut map = map.clone();
         for v in map.values_mut() {
             trim_strings(v);
@@ -166,7 +220,10 @@ impl Mission {
                 *v = Value::Null;
             }
         }
-        let mut m: Mission = serde_json::from_value(Value::Object(map)).map_err(|e| format!("mission: {e}"))?;
+        let mut m: Mission = match serde_json::from_value(Value::Object(map.clone())) {
+            Ok(m) => m,
+            Err(e) => return Err(mission_error(&map, &e)),
+        };
         m.global_id = canonical_uuid(&m.global_id).ok_or("mission: global_id is not a UUID")?;
         if m.mission_date.as_deref().is_some_and(|d| !is_iso_date(d)) {
             return Err("mission: mission_date is not an ISO date".into());
@@ -214,6 +271,18 @@ impl Mission {
             }
         }
         Ok(())
+    }
+}
+
+/// Name the first field that fails on its own, never echoing its value.
+fn mission_error(map: &Map<String, Value>, e: &serde_json::Error) -> String {
+    let field = map.iter().find(|(k, v)| {
+        let alone = serde_json::json!({ "global_id": "", k.as_str(): v });
+        k.as_str() != "global_id" && serde_json::from_value::<Mission>(alone).is_err()
+    });
+    match field.map(|(k, _)| k.as_str()).or_else(|| map.get("global_id").map(|_| "global_id")) {
+        Some(k) => structural(&format!("mission: `{k}`"), e),
+        None => structural("mission", e),
     }
 }
 
@@ -294,14 +363,21 @@ pub fn normalize_mission(
     global_id_field: &str,
 ) -> Result<Mission, String> {
     let mut values = Map::new();
-    values.insert("global_id".into(), attributes.get(global_id_field).cloned().unwrap_or(Value::Null));
+    let gid = attributes.get(global_id_field).unwrap_or(&Value::Null);
+    check_shape("mission", gid)?;
+    values.insert("global_id".into(), gid.clone());
     values.insert("attachments".into(), serde_json::to_value(attachments).map_err(|e| e.to_string())?);
     for (canonical, source) in mapping {
-        let mut value = attributes.get(source).cloned().unwrap_or(Value::Null);
+        let raw = attributes.get(source).unwrap_or(&Value::Null);
+        check_shape("mission", raw)?;
+        let mut value = raw.clone();
         if let Some(domain) = coded_domains.and_then(|d| d.get(canonical))
             && !value.is_null()
         {
-            value = domain.get(&domain_key(&value)).cloned().ok_or_else(|| format!("{canonical}: unknown configured coded-domain value"))?;
+            let name = safe_name(canonical).unwrap_or("field");
+            let coded = domain.get(&domain_key(&value)).ok_or_else(|| format!("{name}: unknown configured coded-domain value"))?;
+            check_shape("coded domain", coded)?;
+            value = coded.clone();
         }
         if (canonical == "present_deliverables" || canonical == "intended_deliverables")
             && let Some(s) = value.as_str().filter(|s| !s.trim().is_empty())
@@ -321,8 +397,8 @@ pub fn normalize_mission(
 /// Check configured sensitive field names: each must be a canonical mission field.
 pub fn check_field_names(what: &str, names: &[String]) -> Result<(), String> {
     let known = Mission::field_names();
-    match names.iter().find(|n| !known.contains(n)) {
-        Some(n) => Err(format!("{what}: `{n}` is not a mission field")),
+    match names.iter().position(|n| !known.contains(n)) {
+        Some(i) => Err(format!("{what}[{i}] is not a mission field")),
         None => Ok(()),
     }
 }
@@ -412,13 +488,14 @@ pub fn attachment_pattern(pattern: &str) -> Result<regex::Regex, String> {
 impl Ruleset {
     /// Strict read of a ruleset from JSON text.
     pub fn from_json(text: &str) -> Result<Ruleset, String> {
-        let v: Value = serde_json::from_str(text).map_err(|e| format!("ruleset: {e}"))?;
+        let v: Value = serde_json::from_str(text).map_err(|e| structural("ruleset", &e))?;
         Ruleset::from_value(&v)
     }
 
     /// Strict read of a ruleset from a JSON value.
     pub fn from_value(value: &Value) -> Result<Ruleset, String> {
-        let r: Ruleset = serde_json::from_value(value.clone()).map_err(|e| format!("ruleset: {e}"))?;
+        check_shape("ruleset", value)?;
+        let r: Ruleset = serde_json::from_value(value.clone()).map_err(|e| structural("ruleset", &e))?;
         r.check()?;
         Ok(r)
     }
@@ -430,11 +507,11 @@ impl Ruleset {
             return bad("version must be 1 to 2000 characters");
         }
         check_field_names("ruleset: required_properties", &self.required_properties)?;
-        if let Some(k) = self.coordinates.keys().find(|k| !COORDINATE_REQUIREMENTS.contains(&k.as_str())) {
-            return bad(&format!("unknown coordinate requirement `{k}`"));
+        if self.coordinates.keys().any(|k| !COORDINATE_REQUIREMENTS.contains(&k.as_str())) {
+            return bad("coordinates has an unknown requirement");
         }
-        if let Some(m) = self.processing.required_metrics.iter().find(|m| !PROCESSING_METRICS.contains(&m.as_str())) {
-            return bad(&format!("unknown processing metric `{m}`"));
+        if let Some(i) = self.processing.required_metrics.iter().position(|m| !PROCESSING_METRICS.contains(&m.as_str())) {
+            return bad(&format!("processing.required_metrics[{i}] is not a known metric"));
         }
         let lists = [&self.required_properties, &self.required_deliverables, &self.required_attachment_patterns, &self.allowed_correction_statuses];
         if lists.iter().any(|l| l.len() > MAX_LIST) || self.coordinates.len() > MAX_LIST {

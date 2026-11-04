@@ -207,3 +207,78 @@ fn sensitive_field_names_must_be_canonical() {
     assert!(check_field_names("sensitive_fields", &["Pilot".into()]).is_err());
     assert!(Mission::field_names().contains(&"attachments".to_string()));
 }
+
+/// A value nested `depth` deep, built without recursion.
+fn deep(depth: usize) -> Value {
+    let mut v = Value::Null;
+    for _ in 0..depth {
+        v = Value::Array(vec![v]);
+    }
+    v
+}
+
+/// `{key: deep(500_000)}` plus `extra`, built by hand: `json!` would serialize it recursively.
+fn with_deep(extra: &[(&str, Value)], key: &str) -> Map<String, Value> {
+    let mut m: Map<String, Value> = extra.iter().map(|(k, v)| (k.to_string(), v.clone())).collect();
+    m.insert(key.into(), deep(500_000));
+    m
+}
+
+#[test]
+fn hostile_nesting_is_rejected_before_any_recursion() {
+    // Deep enough that a recursive clone, trim or serde walk would overflow the stack; the values
+    // are leaked, not dropped, because `Value`'s own drop recurses too.
+    let m = Value::Object(with_deep(&[("global_id", json!(GID))], "extra"));
+    assert!(Mission::from_value(&m).unwrap_err().contains("nested too deeply"));
+    std::mem::forget(m);
+    let r = Value::Object(with_deep(&[("version", json!("v")), ("required_properties", json!([]))], "accuracy"));
+    assert!(Ruleset::from_value(&r).unwrap_err().contains("nested too deeply"));
+    std::mem::forget(r);
+    let a = with_deep(&[("GlobalID", json!(GID))], "Outputs");
+    assert!(normalize_mission(&a, &mapping(&[("present_deliverables", "Outputs")]), Vec::new(), None, "GlobalID").is_err());
+    std::mem::forget(a);
+    // Wide input is capped too.
+    let wide = json!({"global_id": GID, "present_deliverables": vec![Value::Null; 300_000]});
+    assert!(Mission::from_value(&wide).unwrap_err().contains("too large"));
+}
+
+#[test]
+fn errors_name_the_field_but_never_echo_rejected_values() {
+    let secret = "token=SYNTHETIC_PRIVATE_31337";
+    let cases = [
+        json!({"global_id": GID, "rmse_x_feet": secret}),
+        json!({"global_id": GID, "gcp_count": secret}),
+        json!({"global_id": GID, "present_deliverables": [secret, 1]}),
+        json!({"global_id": GID, "attachments": [{"id": 1, "name": "a", "size": secret}]}),
+        json!({"global_id": GID, secret: 1}),
+        json!({"global_id": secret}),
+        json!({"global_id": GID, "mission_date": secret}),
+    ];
+    for m in cases {
+        let e = Mission::from_value(&m).unwrap_err();
+        assert!(!e.contains("SYNTHETIC_PRIVATE"), "{e}");
+    }
+    let e = Mission::from_value(&json!({"global_id": GID, "rmse_x_feet": secret})).unwrap_err();
+    assert!(e.contains("rmse_x_feet"), "{e}");
+    let e = Mission::from_value(&json!({"global_id": GID, "extra_field": 1})).unwrap_err();
+    assert!(e.contains("unknown field `extra_field`"), "{e}");
+
+    let mut bad_rules = Vec::new();
+    for (path, value) in [
+        ("/accuracy/maximum_rmse_x_feet", json!(secret)),
+        ("/processing/required_metrics", json!([secret])),
+        ("/coordinates", json!({secret: "x"})),
+        ("/accuracy", json!({secret: 1})),
+        ("/required_properties", json!([secret])),
+    ] {
+        let mut r = fixture_ruleset_json();
+        *r.pointer_mut(path).unwrap() = value;
+        bad_rules.push(r);
+    }
+    for r in bad_rules {
+        let e = Ruleset::from_value(&r).unwrap_err();
+        assert!(!e.contains("SYNTHETIC_PRIVATE"), "{e}");
+    }
+    assert!(!Ruleset::from_json(&format!("{{\"version\": \"{secret}\" ")).unwrap_err().contains("SYNTHETIC_PRIVATE"));
+    assert!(!check_field_names("sensitive_fields", &[secret.into()]).unwrap_err().contains("SYNTHETIC_PRIVATE"));
+}

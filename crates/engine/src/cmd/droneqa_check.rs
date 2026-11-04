@@ -2,7 +2,7 @@
 //! `docs/agents/slice-3-droneqa.md`). Parser API (`pix4d::parse`) and the redaction boundary were
 //! agreed with Codex by Paseo message (see `docs/agents/slice-3-notes-claude.md`).
 
-use cadcraft_droneqa::mission::{Mission, Ruleset, check_field_names};
+use cadcraft_droneqa::mission::{Mission, Ruleset, check_field_names, check_shape};
 use cadcraft_droneqa::qa::{analyze, summarize};
 use cadcraft_droneqa::{ParseResult, pix4d};
 use serde_json::{Value, json};
@@ -27,14 +27,22 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
     let ruleset = Ruleset::from_value(p.get("ruleset").ok_or_else(|| bad(ID, "`ruleset` (object) is required"))?).map_err(|e| bad(ID, e))?;
     let sensitive: Vec<String> = match p.get("sensitive_fields") {
         None | Some(Value::Null) => DEFAULT_SENSITIVE.iter().map(|s| s.to_string()).collect(),
-        Some(v) => serde_json::from_value(v.clone()).map_err(|_| bad(ID, "`sensitive_fields` must be an array of mission field names"))?,
+        Some(v) => v
+            .as_array()
+            .filter(|a| a.len() <= 1000)
+            .and_then(|a| a.iter().map(|x| x.as_str().map(str::to_string)).collect::<Option<Vec<_>>>())
+            .ok_or_else(|| bad(ID, "`sensitive_fields` must be an array of mission field names"))?,
     };
     check_field_names("sensitive_fields", &sensitive).map_err(|e| bad(ID, e))?;
     let text = opt_str(p, "report_text")?;
     let content_type = opt_str(p, "content_type")?.unwrap_or("text/plain");
     let report: Option<ParseResult> = match (p.get("report").filter(|v| !v.is_null()), text) {
         (Some(_), Some(_)) => return Err(bad(ID, "give `report` or `report_text`, not both")),
-        (Some(r), None) => Some(serde_json::from_value(r.clone()).map_err(|e| bad(ID, format!("`report` is not a parse result: {e}")))?),
+        (Some(r), None) => {
+            check_shape("report", r).map_err(|e| bad(ID, e))?;
+            // The serde error would quote the rejected input, so it is not passed on.
+            Some(serde_json::from_value(r.clone()).map_err(|_| bad(ID, "`report` is not a parse result"))?)
+        }
         (None, Some(text)) => Some(pix4d::parse(text.as_bytes(), content_type)),
         (None, None) => None,
     };
@@ -145,6 +153,23 @@ mod tests {
             json!({"mission": mission, "ruleset": ruleset, "report_text": "x", "content_type": ["text/plain"]}),
         ] {
             assert!(s.execute(ID, &p).is_err(), "accepted {p}");
+        }
+    }
+
+    #[test]
+    fn errors_never_echo_rejected_values() {
+        let mut s = Session::new();
+        let (mission, ruleset) = scenario("pass");
+        let secret = "token=SYNTHETIC_PRIVATE_31337";
+        let mut bad_mission = mission.clone();
+        bad_mission["rmse_x_feet"] = json!(secret);
+        for p in [
+            json!({"mission": bad_mission, "ruleset": ruleset}),
+            json!({"mission": mission, "ruleset": ruleset, "sensitive_fields": [secret]}),
+            json!({"mission": mission, "ruleset": ruleset, "report": {"profile": secret, "metrics": secret}}),
+        ] {
+            let e = s.execute(ID, &p).unwrap_err().to_string();
+            assert!(!e.contains("SYNTHETIC_PRIVATE"), "{e}");
         }
     }
 }
