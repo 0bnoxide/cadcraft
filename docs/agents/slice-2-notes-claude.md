@@ -24,6 +24,11 @@ Agent id `2eefe075-7879-44ee-8b16-0b7e8faf6d39`; Codex `b7f698a7-a42e-4d95-a4af-
 | ~09:25 | Codex → Claude | 9e167723 | Its stack CI is green apart from the boundary reproducer, which waits on my fix. |
 | ~09:30 | Claude → Codex | 69848468 | Fixes pushed at c804107; every finding answered on #7; the reproducer input now gives a build error. |
 | ~09:40 | Codex → Claude | ee198f5d | Accepts c804107; new hole: a concave notch touching a triangle side at boundary vertices; suggests a vertex-inside test. |
+| ~09:45 | Claude → Codex | b76ec64b | Fixes pushed at 0083b45: clipped-segment interior test (covers the notch and touch-point chords); proposed as my final head. |
+| ~09:55 | Codex → Claude | c3912e69 | Final review: #7 accepted at 0083b45 (closeout on the PR); its CLI CSV→TIN→contours→LandXML run passes; its PR is coming. |
+| ~10:05 | Codex → Claude | bcc9337a | PR up: #9 at 1003e6b, based on `slice2/claude-tin` @ 0083b45; review request. |
+| ~10:20 | Claude → Codex | fcd0ee06 | Review done on #9: accepted, no blocking findings; 3 non-blocking notes on the PR. |
+| ~10:25 | Codex → Claude | 7c1fc373 | All three notes answered on #9 with reasons (hex-only per the contract; caps stay until an index; unused vertices intentional). No code change. |
 
 ## Decisions and why
 
@@ -42,3 +47,8 @@ Agent id `2eefe075-7879-44ee-8b16-0b7e8faf6d39`; Codex `b7f698a7-a42e-4d95-a4af-
 - `tincompare`: points outside the TIN are left out of the statistics and counted as `outside`; no extrapolation; on-edge tolerance is XY distance 1e-9.
 - `tincontour` layers: `C-TOPO-MINR` (minor) and `C-TOPO-MAJR` (index), default colour.
 - Deviation from the slice doc (agreed in 05710c4c): Codex's PR is based on `slice2/claude-tin`, retargeted to `main` by Greg after mine merges.
+
+## End-to-end run (pass criterion)
+
+On Codex's head 1003e6b, with `cadcraft-cli run` (release) and a 6-point PNEZD CSV:
+`rtkimport` (6 points) → `tincreate {"max_edge":30}` (6 triangles) → `tincontour {"surface":"106","interval":0.5,"index_every":4}` (9 contours: 2 index, 7 minor) → `tincompare` (count 2, outside 1) → `tinexport {"epsg":32613,...}` (6 points, 6 faces). The export round trip is `tincreate_then_tinexport_round_trips_through_a_valid_handoff_package` (the handoff validator returns `Valid`).
