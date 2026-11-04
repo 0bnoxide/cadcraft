@@ -145,6 +145,7 @@ pub fn process_level_loop(observations: &[Observation], options: &LoopOptions) -
                         .push(Finding::error(format!("missing_foresight: a new backsight at point={} replaces an unfinished setup", obs.point_id)));
                 }
                 hi = Some(finite(elevation + bs)?);
+                closing = None;
                 row.hi = hi;
                 setup_open = true;
                 setups += 1; // Bounded by MAX_ROWS.

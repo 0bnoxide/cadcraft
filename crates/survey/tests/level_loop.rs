@@ -152,6 +152,19 @@ fn closed_setups_require_a_new_backsight_before_further_sights() {
 }
 
 #[test]
+fn an_earlier_benchmark_closure_cannot_authorize_a_later_unclosed_setup() {
+    let rows =
+        [obs("BM", Some(2.0), None, None), obs("BM", None, Some(1.9), None), obs("BM", Some(2.0), None, None), obs("W", None, Some(1.0), None)];
+    let result = process_level_loop(&rows, &options(Some(0.5))).unwrap();
+    assert_eq!(result.run.misclosure, None);
+    assert!(result.run.has_errors);
+    assert!(result.findings.iter().any(|f| f.message.starts_with("unclosed_loop:")));
+    let plan = select_elevations_for_update(&result.run, &result.observations, &BTreeSet::from(["W".into()])).unwrap();
+    assert!(plan.block_reason.is_some());
+    assert!(plan.updates.is_empty());
+}
+
+#[test]
 fn promotion_excludes_benchmark_uses_last_elevation_and_deduplicates_skips() {
     let mut result = process_level_loop(&loop_rows(2.9), &options(Some(0.5))).unwrap();
     result.observations.extend([
