@@ -73,21 +73,10 @@ fn escape(s: &str) -> String {
         .collect()
 }
 
-/// `YYYY-MM-DD` and `hh:mm:ss` for seconds since 1970, after Howard Hinnant's public-domain
-/// days-to-civil algorithm.
-fn date_time(secs: u64) -> (String, String) {
-    let days = i64::try_from(secs / 86_400).unwrap_or(0);
-    let (h, m, s) = ((secs % 86_400) / 3600, (secs % 3600) / 60, secs % 60);
-    let z = days + 719_468;
-    let era = z.div_euclid(146_097);
-    let doe = z.rem_euclid(146_097);
-    let yoe = (doe - doe / 1460 + doe / 36_524 - doe / 146_096) / 365;
-    let doy = doe - (365 * yoe + yoe / 4 - yoe / 100);
-    let mp = (5 * doy + 2) / 153;
-    let day = doy - (153 * mp + 2) / 5 + 1;
-    let month = if mp < 10 { mp + 3 } else { mp - 9 };
-    let year = yoe + era * 400 + i64::from(month <= 2);
-    (format!("{year:04}-{month:02}-{day:02}"), format!("{h:02}:{m:02}:{s:02}"))
+/// `YYYY-MM-DD` and `hh:mm:ss` (UTC) for seconds since 1970; `None` past chrono's range.
+fn date_time(secs: u64) -> Option<(String, String)> {
+    let t = chrono::DateTime::from_timestamp(i64::try_from(secs).ok()?, 0)?;
+    Some((t.format("%Y-%m-%d").to_string(), t.format("%H:%M:%S").to_string()))
 }
 
 /// The TIN as a LandXML 1.2 document. Every vertex is written (ids are 1-based vertex indices);
@@ -118,7 +107,7 @@ pub fn export(tin: &Tin, opts: &ExportOptions) -> Result<String, ExportError> {
             ("USSurveyFoot", "feet", "Imperial", r#"areaUnit="squareFoot" volumeUnit="cubicFeet" temperatureUnit="fahrenheit" pressureUnit="inHG""#)
         }
     };
-    let stamp = opts.unix_time.map(date_time).map(|(d, t)| format!(r#" date="{d}" time="{t}""#)).unwrap_or_default();
+    let stamp = opts.unix_time.and_then(date_time).map(|(d, t)| format!(r#" date="{d}" time="{t}""#)).unwrap_or_default();
     let mut x = String::with_capacity(200 + tin.vertices.len() * 48 + tin.triangles.len() * 24);
     // Writing to a String cannot fail.
     let _ = write!(
@@ -151,7 +140,8 @@ mod tests {
 
     #[test]
     fn dates_from_unix_seconds() {
-        assert_eq!(date_time(0), ("1970-01-01".into(), "00:00:00".into()));
-        assert_eq!(date_time(1_793_784_896), ("2026-11-04".into(), "09:34:56".into()));
+        assert_eq!(date_time(0), Some(("1970-01-01".into(), "00:00:00".into())));
+        assert_eq!(date_time(1_793_784_896), Some(("2026-11-04".into(), "09:34:56".into())));
+        assert_eq!(date_time(u64::MAX), None);
     }
 }

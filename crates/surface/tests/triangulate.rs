@@ -86,3 +86,33 @@ fn hostile_input_is_an_error_not_a_panic() {
         &o,
     );
 }
+
+#[test]
+fn boundary_keeps_only_triangles_wholly_inside() {
+    // Codex's review case: the centroid (3.33, 3.33) is inside, but the triangle reaches x = 10.
+    let one = [[0.0, 0.0, 0.0], [10.0, 0.0, 10.0], [0.0, 10.0, 0.0]];
+    let square = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 4.0], [0.0, 4.0]];
+    assert!(build(&one, &[], &BuildOptions { boundary: Some(square.clone()), ..Default::default() }).is_err());
+    // Corners on the boundary count as inside; triangles to the far point go.
+    let mut pts = grid(5);
+    pts.push([10.0, 10.0, 0.0]);
+    let b = build(&pts, &[], &BuildOptions { boundary: Some(square), ..Default::default() }).unwrap();
+    assert_eq!((b.tin.triangles.len(), b.tin.vertices.len()), (32, 25));
+    // Concave L: nothing of a kept triangle lies in the cut-out (2..4, 2..4).
+    let l = vec![[0.0, 0.0], [4.0, 0.0], [4.0, 2.0], [2.0, 2.0], [2.0, 4.0], [0.0, 4.0]];
+    let b = build(&grid(5), &[], &BuildOptions { boundary: Some(l), ..Default::default() }).unwrap();
+    assert_eq!(b.tin.triangles.len(), 24);
+    for t in &b.tin.triangles {
+        let p = t.map(|k| b.tin.vertices[k as usize]);
+        let (cx, cy) = ((p[0][0] + p[1][0] + p[2][0]) / 3.0, (p[0][1] + p[1][1] + p[2][1]) / 3.0);
+        assert!(!(cx > 2.0 && cy > 2.0), "{p:?}");
+    }
+    // A boundary that cuts through triangles drops them rather than keeping them whole.
+    let diamond = vec![[2.0, -0.5], [4.5, 2.0], [2.0, 4.5], [-0.5, 2.0]];
+    let b = build(&grid(5), &[], &BuildOptions { boundary: Some(diamond.clone()), ..Default::default() }).unwrap();
+    for t in &b.tin.triangles {
+        for v in t.map(|k| b.tin.vertices[k as usize]) {
+            assert!((v[0] - 2.0).abs() + (v[1] - 2.0).abs() <= 2.5 + 1e-9, "{v:?}");
+        }
+    }
+}

@@ -16,12 +16,18 @@ Agent id `2eefe075-7879-44ee-8b16-0b7e8faf6d39`; Codex `b7f698a7-a42e-4d95-a4af-
 | 08:59 | Claude → Codex | dbdb31ec | Conversion pushed at 6b2db119; dead-code note until the commands land. |
 | ~09:05 | Claude → Codex | d4d80855 | Shared-file request: `sha2` and `crc32fast` as engine dev-dependencies for the handoff test. |
 | ~09:07 | Codex → Claude | 3735d7f1 | Approves the dev-dependencies; has rebased onto 6b2db119; will rebase onto my final head. |
+| ~09:09 | Codex → Claude | 2e52716d | Its command tests pass on my prerequisite; flags rustfmt in `surface_build.rs` (already fixed by my `cargo fmt`). |
+| 09:11 | Claude → Codex | 27ecf5fe | PR up: #7 at 99d1291; review request. |
+| ~09:12 | Codex → Claude | 61339e9d | Rebased onto 99d1291; reviewing. |
+| ~09:15 | Codex → Claude | 50edd1f9 | Must-fix: hand-rolled calendar (AGENTS.md chrono rule); centroid clipping leaks outside the boundary. Approves `chrono` in the surface manifest. |
+| ~09:20 | Codex → Claude | e74c9912 | Review done (findings on #7); asks for "fixes pushed" with the new SHA. |
 
 ## Decisions and why
 
 - **Duplicate XY**: breaklines go in first, so a breakline's elevation beats a point's; otherwise the first point wins. Exact XY matches only. Near-duplicates make slivers, which the contract-v1 degeneracy filter drops.
 - **Crossing breaklines**: skipped and counted (`skipped_segments`), never forced. spade's `add_constraint` panics on crossings, so the code uses `try_add_constraint`.
-- **Boundary**: clips by triangle centroid. It does not insert boundary edges, since a boundary has no elevations. Triangles that straddle the boundary are kept whole or dropped whole.
+- **Boundary**: keeps whole triangles only: every corner inside or on the boundary (1e-9), and no side crossing a boundary edge. Nothing is cut, and no boundary edges are inserted, since a boundary has no elevations. Centroid-only clipping leaked outside the boundary (Codex's review), so it was replaced. A bug found on the way: `f64::signum(0.0)` is `1.0`, so the orientation sign is computed by hand.
+- **Dates**: through `chrono` (AGENTS.md), added to `cadcraft-surface` as agreed in 50edd1f9.
 - **Unused vertices** after clipping are removed, so LandXML point ids are dense.
 - **Handoff test**: a hand-built stored ZIP. The manifest uses a known vertical datum (EPSG 5703), so the expected status is `Valid`, not `ValidWithWarnings`.
 

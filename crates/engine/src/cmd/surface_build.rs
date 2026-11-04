@@ -67,7 +67,13 @@ fn run_create(s: &mut Session, p: &Value) -> Result<Value> {
             picked.iter().filter_map(|&h| d.entity(h)).filter_map(|e| from(e)).collect()
         };
     }
-    let breaklines = list(CREATE, p, "breaklines")?
+    let lines = list(CREATE, p, "breaklines")?;
+    // Check the combined size before converting anything, so hostile input can't allocate past the cap.
+    let total = lines.iter().try_fold(points.len(), |n, l| n.checked_add(l.as_array().map_or(0, Vec::len)));
+    if total.is_none_or(|n| n > triangulate::MAX_VERTICES) {
+        return Err(bad(CREATE, format!("too many vertices (the limit is {})", triangulate::MAX_VERTICES)));
+    }
+    let breaklines = lines
         .iter()
         .map(|line| match line.as_array() {
             Some(a) => a.iter().map(|v| xyz(CREATE, "breaklines", v, false)).collect(),
@@ -357,6 +363,10 @@ mod tests {
         assert!(s.execute(CREATE, &json!({ "points": "x" })).is_err());
         assert!(s.execute(CREATE, &json!({ "points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "breaklines": [5] })).is_err());
         assert!(s.execute(CREATE, &json!({ "points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "max_edge": -2 })).is_err());
+        // Many breaklines, each under the cap, together over it: refused before conversion.
+        let line = Value::Array(vec![json!([0, 0, 0]); 1000]);
+        let e = s.execute(CREATE, &json!({ "points": [], "breaklines": vec![line; triangulate::MAX_VERTICES / 1000 + 1] })).unwrap_err();
+        assert!(e.to_string().contains("too many vertices"), "{e}");
         let v = s.execute(CREATE, &json!({ "points": [[0, 0, 0], [1, 0, 0], [0, 1, 0]], "boundary": [[-1, -1], [5, -1], [-1, 5]] })).unwrap();
         let h = v["handle"].as_str().unwrap().to_owned();
         assert!(s.execute(EXPORT, &json!({ "surface": h })).is_err(), "no epsg");

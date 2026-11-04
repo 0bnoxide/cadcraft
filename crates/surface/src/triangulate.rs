@@ -33,7 +33,8 @@ impl std::error::Error for BuildError {}
 pub struct BuildOptions {
     /// Drop triangles with any side longer than this (XY). `None` keeps the whole convex hull.
     pub max_edge: Option<f64>,
-    /// Outer boundary (closed implicitly). Triangles whose centroid lies outside are dropped.
+    /// Outer boundary (closed implicitly). Only triangles wholly inside it are kept (no triangle is
+    /// cut, so the edge of the TIN follows the triangulation, inside the boundary).
     pub boundary: Option<Vec<[f64; 2]>>,
 }
 
@@ -62,20 +63,47 @@ pub fn signed_area2(a: [f64; 3], b: [f64; 3], c: [f64; 3]) -> (f64, bool) {
     (cross, cross.is_nan() || cross.abs() <= 1e-12 * longest)
 }
 
-/// Even-odd point in polygon.
-fn inside(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
+/// Boundary edges as `(a, b)` pairs, closing the ring.
+fn ring(poly: &[[f64; 2]]) -> impl Iterator<Item = ([f64; 2], [f64; 2])> + '_ {
+    poly.iter().zip(poly.iter().cycle().skip(1)).map(|(a, b)| (*a, *b))
+}
+
+/// Inside the polygon (even-odd) or within `ON` of its edge.
+fn inside_or_on(poly: &[[f64; 2]], x: f64, y: f64) -> bool {
+    const ON: f64 = 1e-9;
     let mut odd = false;
-    let mut j = poly.len().wrapping_sub(1);
-    for (i, a) in poly.iter().enumerate() {
-        if let Some(b) = poly.get(j)
-            && (a[1] > y) != (b[1] > y)
-            && x < (b[0] - a[0]) * (y - a[1]) / (b[1] - a[1]) + a[0]
-        {
+    for (a, b) in ring(poly) {
+        let (dx, dy) = (b[0] - a[0], b[1] - a[1]);
+        let len2 = dx * dx + dy * dy;
+        let t = if len2 > 0.0 { (((x - a[0]) * dx + (y - a[1]) * dy) / len2).clamp(0.0, 1.0) } else { 0.0 };
+        if (x - a[0] - t * dx).hypot(y - a[1] - t * dy) <= ON {
+            return true;
+        }
+        if (a[1] > y) != (b[1] > y) && x < dx * (y - a[1]) / dy + a[0] {
             odd = !odd;
         }
-        j = i;
     }
     odd
+}
+
+/// Do segments `pq` and `rs` cross at a point interior to both?
+fn cross(p: [f64; 2], q: [f64; 2], r: [f64; 2], s: [f64; 2]) -> bool {
+    // Orientation as -1, 0 or 1 (`f64::signum` maps 0.0 to 1.0, which would count touching as crossing).
+    let o = |a: [f64; 2], b: [f64; 2], c: [f64; 2]| {
+        let v = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        i8::from(v > 0.0) - i8::from(v < 0.0)
+    };
+    o(p, q, r) * o(p, q, s) < 0 && o(r, s, p) * o(r, s, q) < 0
+}
+
+/// Whole-triangle clipping: kept only when every corner is inside (or on) the boundary and no
+/// side crosses a boundary edge, so nothing of a kept triangle lies outside.
+// shortcut: O(triangles x boundary edges); index the boundary edges (rstar) if big boundaries get slow.
+fn within(poly: &[[f64; 2]], t: [[f64; 3]; 3]) -> bool {
+    let c = t.map(|p| [p[0], p[1]]);
+    c.iter().all(|p| inside_or_on(poly, p[0], p[1]))
+        && inside_or_on(poly, (c[0][0] + c[1][0] + c[2][0]) / 3.0, (c[0][1] + c[1][1] + c[2][1]) / 3.0)
+        && [(c[0], c[1]), (c[1], c[2]), (c[2], c[0])].iter().all(|&(p, q)| ring(poly).all(|(r, s)| !cross(p, q, r, s)))
 }
 
 /// Builds a constrained Delaunay TIN. Every input coordinate must be finite.
@@ -148,7 +176,7 @@ pub fn build(points: &[[f64; 3]], breaklines: &[Vec<[f64; 3]>], opts: &BuildOpti
         let (_, degenerate) = signed_area2(a, b, c);
         let d2 = |p: [f64; 3], q: [f64; 3]| (p[0] - q[0]).powi(2) + (p[1] - q[1]).powi(2);
         let too_long = max2.is_some_and(|m| d2(a, b) > m || d2(b, c) > m || d2(c, a) > m);
-        let outside = opts.boundary.as_deref().is_some_and(|poly| !inside(poly, (a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0));
+        let outside = opts.boundary.as_deref().is_some_and(|poly| !within(poly, [a, b, c]));
         if degenerate || too_long || outside {
             out.dropped_triangles += 1;
             continue;

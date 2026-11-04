@@ -10,3 +10,5 @@ workspace = true
 
 [dependencies]
 spade = "2"
+# LandXML date/time stamps (AGENTS.md: time goes through chrono); agreed with Codex (Paseo 50edd1f9).
+chrono = { workspace = true }

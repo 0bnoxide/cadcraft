@@ -816,6 +816,7 @@ dependencies = [
 name = "cadcraft-surface"
 version = "0.17.0"
 dependencies = [
+ "chrono",
  "spade",
 ]
 
