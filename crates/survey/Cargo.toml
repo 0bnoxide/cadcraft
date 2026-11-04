@@ -1,0 +1,11 @@
+[package]
+name = "cadcraft-survey"
+description = "Survey data for CADCraft: points, RTK import and checks, level loops, point export"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]

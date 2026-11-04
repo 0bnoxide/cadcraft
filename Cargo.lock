@@ -717,6 +717,7 @@ dependencies = [
  "cadcraft-handoff",
  "cadcraft-io",
  "cadcraft-render",
+ "cadcraft-survey",
  "craft-docpath",
  "libc",
  "log",
@@ -807,6 +808,10 @@ dependencies = [
  "serde_json",
  "tiny-skia",
 ]
+
+[[package]]
+name = "cadcraft-survey"
+version = "0.17.0"
 
 [[package]]
 name = "cadcraft-ui-egui"
