@@ -42,6 +42,13 @@ Rows are in exact send/receive order (the order `paseo logs` shows); `paseo logs
 | (git) — | — | — | My fix commits c84c436 (recursion bound, structural errors) and 5522d42 (`validate_report`). |
 | — | Claude → Codex | c7bce2aa | Fixes pushed at 5522d42 (answers on #10); `validate_report` signature; **agrees** JSONL history. |
 | — | Codex → Claude | 7048d63b | Sonar secrets scan flags the synthetic `token=…` test literal at `droneqa_check.rs:166`; Codex stops until it is removed. |
+| — | Claude → Codex | 201e195c | Cleared: the synthetic marker lost its `token=` prefix; all my files scan clean; head 40d2c19, CI 7/7. |
+| — | Codex → Claude | a2715d62 | Review closed on #10 at 40d2c19: all three fixes accepted (verdict on #10); its workflow uses `check_shape` and `validate_report`; its stacked PR is next. |
+| — | Codex → Claude | 42b3e205 | PR up: #11 at f69a659, stacked on 40d2c19; review request with the command params. |
+| — | Claude → Codex | 75b576c7 | Review done on #11: accepted; independent CLI chain green; two non-blocking findings (stale lock message, `content_type: null`). |
+| — | Codex → Claude | ccf6a389 | Both findings fixed locally: the HISTORY_BUSY message explains verified lock removal; `content_type: null` = default. No PID/age lock breaking (reason: it could release an active writer). SHA to follow after CI. |
+| — | Codex → Claude | 1afb4fdc | Fixes pushed: #11 head 9c9f3e8, its CI 7/7, scans clean. |
+| — | Claude → Codex | 0a571f34 | Closeout: #11 accepted at 9c9f3e8 (comment on #11); my final head is this notes commit. |
 
 Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's foundation 2f67906 (after 26da0240), then my mission/qa/command commit (after all four agreements and Codex's foundation SHA in e43abbd6).
 
@@ -67,6 +74,10 @@ Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's founda
 - Through the CLI (`cadcraft-cli run --cmd "droneqa {mission, ruleset, report_text: valid.txt}"`): pass → PASS, fail → FAIL, insufficient-data → INSUFFICIENT_DATA.
 - `pix4d::parse(valid.txt)` is pinned to the scenario fixture (`real_parser_reads_valid_txt_as_the_scenario_fixture_assumes`).
 - Pitfall: `xtask` and fixture-reading test binaries bake in `CARGO_MANIFEST_DIR`; a target dir reused after deleting a worktree fails with `os error 267` / `NotFound` until those packages are cleaned.
+
+## Review of Codex's #11 (f69a659)
+
+Accepted with no blockers (posted on #11). I ran the independent CLI chain, one `cadcraft-cli run --cmd` process per step: `pix4dimport` (`valid.txt`, 0 diagnostics) → `droneqa` (PASS) → `qareview` draft (analysis identical to the preview) → APPROVED → COMMITTED → history `[DRAFT, APPROVED, COMMITTED]`. The pilot name never reaches the history bytes. Adversarial runs gave SOURCE_CHANGED, PAYLOAD_HASH_MISMATCH, SENSITIVE_INPUT, ALREADY_COMMITTED and INVALID_HISTORY (edited line). Non-blocking: a stale lock left by a killed writer gives HISTORY_BUSY forever with a "retry" message; `pix4dimport` rejects `content_type: null`.
 
 ## Review of Codex's foundation (2f67906)
 
