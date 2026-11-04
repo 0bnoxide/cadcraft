@@ -1,0 +1,22 @@
+[package]
+name = "cadcraft-handoff"
+description = "Validator for the AutoGIS LandXML handoff package (contract v1): ZIP safety, manifest, TIN surface and cross-checks"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+thiserror = { workspace = true }
+log = { workspace = true }
+serde_json = { workspace = true }
+quick-xml = { workspace = true }
+chrono = { workspace = true }
+flate2 = { version = "1", default-features = false, features = ["rust_backend"] }
+crc32fast = "1"
+sha2 = "0.10"
+
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"

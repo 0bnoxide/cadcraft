@@ -17,6 +17,7 @@ pub mod file;
 mod gripcmds;
 mod griphot;
 pub(crate) mod groups;
+mod handoff;
 pub(crate) mod hatch;
 mod image;
 mod inquiry;
@@ -201,6 +202,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(layer::specs());
         v.extend(layout::specs());
         v.extend(exchange::specs());
+        v.extend(handoff::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());

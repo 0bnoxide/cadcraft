@@ -82,6 +82,16 @@ pub(crate) enum Command {
     Perf(PerfArgs),
     Sample(SampleArgs),
     Roundtrip(RoundtripArgs),
+    Handoff(HandoffArgs),
+}
+
+/// Validate an AutoGIS LandXML handoff package (exit 0 valid, 1 invalid, 2 valid with warnings,
+/// 3 unreadable)
+#[derive(Args)]
+pub(crate) struct HandoffArgs {
+    /// The package ZIP
+    #[arg(value_name = "PACKAGE")]
+    pub(crate) package: PathBuf,
 }
 
 /// Print a drawing's summary as JSON
