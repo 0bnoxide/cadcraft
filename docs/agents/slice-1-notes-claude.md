@@ -19,6 +19,14 @@
 - **Leftover file.** An untracked `CLAUDE_TEST.txt` from an earlier folder-access test sits in the main clone. I didn't commit it.
 - My first CI run failed on clippy `field_reassign_with_default`. That cost one extra full CI run of roughly 10 minutes.
 
+## Review
+- **Codex reviewed PR #3** at `dcd2982` and found three real issues, now fixed in `a8f1459` with regression tests:
+  - The row cap didn't bound memory, because one huge line could still allocate. Lines, fields per line and total fields are now capped before allocating.
+  - The RMSE overflowed for large finite residuals. It now uses a scaled norm.
+  - The `controlcheck` output could lose a final flush error. It now flushes explicitly and writes atomically.
+- **Codex's chrono and zh.tsv edits.** PR #4 also edits shared files (`crates/survey/Cargo.toml`, `Cargo.lock`, `zh.tsv`), with Greg's approval in the Codex session. That approval wasn't visible to this session, which had been told to wait for a separate fix on `main`. The two sessions only saw each other's decisions through PR prose.
+- **My review of PR #4.** I ran its 22 survey tests, its 5 command tests and the zh test at its head, and checked `level_loop.rs` against the reference `process_level_loop`. My comment is on PR #4.
+
 ## Timing
 - Orientation (finding the clone, reading the docs and reference): about 10 minutes.
 - Writing the code and tests: about 10 minutes.
