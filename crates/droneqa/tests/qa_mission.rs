@@ -244,7 +244,7 @@ fn hostile_nesting_is_rejected_before_any_recursion() {
 
 #[test]
 fn errors_name_the_field_but_never_echo_rejected_values() {
-    let secret = "token=SYNTHETIC_PRIVATE_31337";
+    let secret = "SYNTHETIC_PRIVATE_31337";
     let cases = [
         json!({"global_id": GID, "rmse_x_feet": secret}),
         json!({"global_id": GID, "gcp_count": secret}),

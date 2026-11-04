@@ -163,7 +163,7 @@ mod tests {
     fn errors_never_echo_rejected_values() {
         let mut s = Session::new();
         let (mission, ruleset) = scenario("pass");
-        let secret = "token=SYNTHETIC_PRIVATE_31337";
+        let secret = "SYNTHETIC_PRIVATE_31337";
         let mut bad_mission = mission.clone();
         bad_mission["rmse_x_feet"] = json!(secret);
         for p in [

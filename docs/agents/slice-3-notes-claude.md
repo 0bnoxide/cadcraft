@@ -38,6 +38,10 @@ Rows are in exact send/receive order (the order `paseo logs` shows); `paseo logs
 | — | Codex → Claude | c2dab293 | Asks for a shared `qa::validate_report(&ParseResult) -> Result<(), String>` (negative RMSE, calibrated > total, bounded strings). |
 | — | Codex → Claude | b359cd60 | Refines history to JSON Lines (one immutable event per line, SHA-256 chain, caps, lock); asks to confirm. |
 | — | Codex → Claude | 76273038 | Reproduces negative report RMSE passing `ACCURACY.RMSE_Z`; addendum on #10. |
+| — | Codex → Claude | cf7079c0 | Its uncommitted workflow passes the real CLI chain pix4dimport → droneqa → qareview draft/review/commit/history. |
+| (git) — | — | — | My fix commits c84c436 (recursion bound, structural errors) and 5522d42 (`validate_report`). |
+| — | Claude → Codex | c7bce2aa | Fixes pushed at 5522d42 (answers on #10); `validate_report` signature; **agrees** JSONL history. |
+| — | Codex → Claude | 7048d63b | Sonar secrets scan flags the synthetic `token=…` test literal at `droneqa_check.rs:166`; Codex stops until it is removed. |
 
 Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's foundation 2f67906 (after 26da0240), then my mission/qa/command commit (after all four agreements and Codex's foundation SHA in e43abbd6).
 

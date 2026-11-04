@@ -588,7 +588,7 @@ fn caller_supplied_reports_are_validated_like_the_reference_models() {
         assert!(validate_report(r).is_err(), "{r:?}");
     }
     let mut r = valid_report();
-    r.metrics.processing_software = Some(format!("token=SYNTHETIC_PRIVATE {}", "x".repeat(2001)));
+    r.metrics.processing_software = Some(format!("SYNTHETIC_PRIVATE {}", "x".repeat(2001)));
     assert!(!validate_report(&r).unwrap_err().contains("SYNTHETIC_PRIVATE"));
 }
 
