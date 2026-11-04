@@ -28,6 +28,8 @@ mod merge;
 mod mleader_content;
 mod mleader_edit;
 mod modify;
+mod survey_level;
+mod survey_points;
 pub(crate) use modify::Erased;
 mod modify2;
 mod mtext_opts;
@@ -203,6 +205,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(layout::specs());
         v.extend(exchange::specs());
         v.extend(handoff::specs());
+        v.extend(survey_points::specs());
+        v.extend(survey_level::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());
