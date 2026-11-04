@@ -116,22 +116,46 @@ pub struct Import {
 /// One CSV row and its 1-based line number.
 pub(crate) type Row = (usize, Vec<String>);
 
-/// Reads non-blank CSV rows, refusing more than [`MAX_ROWS`] of them.
+/// Longest line, most fields on one line, and most fields kept from one file.
+pub const MAX_LINE_BYTES: usize = 64 * 1024;
+pub const MAX_FIELDS: usize = 256;
+pub const MAX_CELLS: usize = 16_000_000;
+
+/// Reads non-blank CSV rows, refusing more than [`MAX_ROWS`] rows, a line over
+/// [`MAX_LINE_BYTES`] or [`MAX_FIELDS`] fields, and more than [`MAX_CELLS`] fields in all, each
+/// checked before the memory is taken.
 // shortcut: a quoted field cannot span lines; switch to a full CSV reader if field software
 // starts writing multi-line descriptions.
 pub(crate) fn read_rows(r: impl Read) -> Result<Vec<Row>, ParseError> {
+    let mut reader = BufReader::new(r);
     let mut rows = Vec::new();
-    for (i, line) in BufReader::new(r).lines().enumerate() {
-        let line = line.map_err(|e| ParseError(format!("line {}: {e}", i + 1)))?;
-        let line = if i == 0 { line.strip_prefix('\u{feff}').unwrap_or(&line) } else { &line };
-        let cells = split_csv_line(line);
-        if cells.iter().all(|c| c.trim().is_empty()) {
+    let mut cells_kept = 0usize;
+    let mut buf = Vec::new();
+    for line_no in 1usize.. {
+        buf.clear();
+        let limit = u64::try_from(MAX_LINE_BYTES).unwrap_or(u64::MAX).saturating_add(1);
+        let n = reader.by_ref().take(limit).read_until(b'\n', &mut buf).map_err(|e| ParseError(format!("line {line_no}: {e}")))?;
+        if n == 0 {
+            break;
+        }
+        if buf.len() > MAX_LINE_BYTES {
+            return err(format!("line {line_no} is longer than {MAX_LINE_BYTES} bytes"));
+        }
+        let text = std::str::from_utf8(&buf).map_err(|_| ParseError(format!("line {line_no} is not UTF-8")))?;
+        let text = text.trim_end_matches(['\n', '\r']);
+        let text = if line_no == 1 { text.strip_prefix('\u{feff}').unwrap_or(text) } else { text };
+        let fields = text.bytes().filter(|&b| b == b',').count().saturating_add(1);
+        if fields > MAX_FIELDS {
+            return err(format!("line {line_no} has more than {MAX_FIELDS} fields"));
+        }
+        if text.trim().trim_matches(|c: char| c == ',' || c.is_whitespace()).is_empty() {
             continue;
         }
-        if rows.len() >= MAX_ROWS {
-            return err(format!("the file has more than {MAX_ROWS} rows"));
+        cells_kept = cells_kept.saturating_add(fields);
+        if rows.len() >= MAX_ROWS || cells_kept > MAX_CELLS {
+            return err(format!("the file has more than {MAX_ROWS} rows or {MAX_CELLS} fields"));
         }
-        rows.push((i + 1, cells));
+        rows.push((line_no, split_csv_line(text)));
     }
     Ok(rows)
 }

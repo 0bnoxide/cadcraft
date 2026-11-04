@@ -117,3 +117,27 @@ fn writes_results_csv() {
     assert!(text.contains("CP-1,"));
     assert!(text.contains("\"CP,2\",0,0,0,0,0,True"), "{text}");
 }
+
+#[test]
+fn rmse_of_large_finite_residuals_stays_finite() {
+    let mut p = cp("CP-1", 0.0, 0.0, 0.0);
+    (p.published_x, p.surveyed_x) = (0.0, 1e200);
+    let (s, _) = evaluate(&[p.clone(), p], H, V);
+    assert_eq!(s.rmse_horizontal, 1e200);
+}
+
+#[test]
+fn write_errors_are_reported() {
+    struct Full;
+    impl std::io::Write for Full {
+        fn write(&mut self, _: &[u8]) -> std::io::Result<usize> {
+            Err(std::io::Error::other("disk full"))
+        }
+        fn flush(&mut self) -> std::io::Result<()> {
+            Err(std::io::Error::other("disk full"))
+        }
+    }
+    let (s, _) = evaluate(&[cp("CP-1", 0.0, 0.0, 0.0)], H, V);
+    // Buffered, so the error only appears at the final flush.
+    assert!(write_results_csv(&s, std::io::BufWriter::new(Full)).is_err());
+}

@@ -125,8 +125,8 @@ fn run_control(_: &mut Session, p: &Value) -> Result<Value> {
     let (sum, findings) = control::evaluate(&points, h_tol, v_tol);
     if let Some(out) = str_param(p, "output") {
         #[cfg(not(target_arch = "wasm32"))]
-        std::fs::File::create(out)
-            .and_then(|f| control::write_results_csv(&sum, std::io::BufWriter::new(f)))
+        // Written whole, then renamed into place, so a failed write keeps any earlier report.
+        crate::atomic_write::write_atomic_with(std::path::Path::new(out), None, |f| control::write_results_csv(&sum, std::io::BufWriter::new(f)))
             .map_err(|e| bad(CONTROL, format!("{out}: {e}")))?;
         #[cfg(target_arch = "wasm32")]
         return Err(bad(CONTROL, format!("{out}: paths are not available on the web")));

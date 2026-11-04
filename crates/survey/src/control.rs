@@ -114,8 +114,13 @@ pub fn evaluate(points: &[ControlPoint], horizontal_tolerance: f64, vertical_tol
         });
     }
     let n = results.len();
+    // Scaled by the largest value so squaring a large finite residual cannot overflow.
     let rms = |f: fn(&ControlResult) -> f64| {
-        if n == 0 { 0.0 } else { (results.iter().map(|r| f(r).powi(2)).sum::<f64>() / n as f64).sqrt() }
+        let max = results.iter().map(f).fold(0.0, f64::max);
+        if n == 0 || max == 0.0 || !max.is_finite() {
+            return max;
+        }
+        max * (results.iter().map(|r| (f(r) / max).powi(2)).sum::<f64>() / n as f64).sqrt()
     };
     let (rmse_h, rmse_v) = (rms(|r| r.horizontal_distance), rms(|r| r.vertical_distance));
     let n_pass = results.iter().filter(|r| r.point_pass).count();
@@ -168,5 +173,5 @@ pub fn write_results_csv(summary: &ControlSummary, mut w: impl Write) -> io::Res
             if r.point_pass { "True" } else { "False" }
         )?;
     }
-    Ok(())
+    w.flush()
 }

@@ -284,3 +284,11 @@ fn custom_thresholds() {
     let f = validate(&[pt("MW-01", 0.05, 0.04, "RTK_FIXED")], 0.02, 0.02);
     assert!(has(&f, "hrms_exceeds_threshold"));
 }
+
+#[test]
+fn long_lines_and_wide_rows_are_refused_before_allocating() {
+    let long = format!("1,2,3,4,{}\n", "x".repeat(cadcraft_survey::rtk::MAX_LINE_BYTES));
+    assert!(fail(&long, ImportOptions::default()).contains("longer than"));
+    let wide = ",".repeat(cadcraft_survey::rtk::MAX_FIELDS);
+    assert!(fail(&wide, ImportOptions::default()).contains("fields"));
+}
