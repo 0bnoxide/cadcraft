@@ -730,11 +730,13 @@ dependencies = [
  "cadcraft-surface",
  "cadcraft-survey",
  "craft-docpath",
+ "crc32fast",
  "libc",
  "log",
  "rstar",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
@@ -824,6 +826,7 @@ dependencies = [
 name = "cadcraft-surface"
 version = "0.17.0"
 dependencies = [
+ "chrono",
  "spade",
 ]
 

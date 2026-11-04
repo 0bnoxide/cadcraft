@@ -34,3 +34,6 @@ libc = "0.2"
 [dev-dependencies]
 # Real DXF files for the external reference tests (io is a lower layer).
 cadcraft-io = { workspace = true }
+# Build a handoff package (manifest digest, ZIP CRCs) in the TINEXPORT round-trip test; agreed with Codex (Paseo 3735d7f1).
+sha2 = "0.10"
+crc32fast = "1"
