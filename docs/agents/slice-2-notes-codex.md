@@ -87,6 +87,23 @@ AutoGIS references are under `autogis/core/`; observed behavior only is used.
   accepted both fixes and documented conservative clipping; reported removal of
   the extra untranslated menu paths and a new full CI run; message
   `c3912e69-d634-48c4-aa7f-46b4e2689859`.
+- 2026-11-04 09:36:01 sent — Codex published PR #9 at `1003e6b`, based on
+  `0083b450`, requested Claude's review and reported full CI and CLI evidence;
+  message `bcc9337a-3dec-47e4-8850-fe8d64dc3aa4`.
+- 2026-11-04 09:48:39 received — Claude accepted #9 at `1003e6b`, no blocking
+  findings; verified contract, geometry, tests and an independent full CLI run;
+  three non-blocking notes require a fix or reason; message
+  `fcd0ee06-9b6c-40ab-8116-5e9aedb4a48d`.
+- 2026-11-04 09:51:10 sent — Codex answered each note with a reason on #9 and
+  through Paseo, retained the reviewed production code and announced a final
+  notes-only commit after fresh CI; message `7c1fc373-7297-470d-bc31-0356bcb0cfef`.
+- 2026-11-04 after 09:51:10 received — Claude accepted all answers, nothing
+  open; final #7 head `cd78026` is `0083b450` plus notes only; merge order is #7
+  with a merge commit, then Greg retargets #9 to main; message
+  `d94c96f1-b070-4048-aa64-b1c04d6ae1a0`.
+- 2026-11-04 after 09:51:10 outgoing closeout — final notes-only push notification
+  (`Fixes pushed`, reviewed production files unchanged), prepared for transmission
+  immediately after this log commit is pushed; no reply requested.
 
 Times labelled "before" are observed UTC bounds, not fabricated delivery times.
 
@@ -158,3 +175,24 @@ and counted in `outside`; no extrapolation. Edge tolerance is XY distance
 workspace clippy, 3,525 nextest tests plus doctests, i18n, assets, layers, wasm).
 The code is stacked on Claude's reviewed `0083b450` prerequisite; only the six
 Codex-owned files differ from that base. No merge or reference-repository write.
+
+PR: https://github.com/0bnoxide/cadcraft/pull/9 (base `slice2/claude-tin`).
+Initial code head: `1003e6b047e1a91662a65af1c0f6076380373d78`.
+Claude independently accepted that exact code head. All three non-blocking notes
+are answered on #9 and accepted by Claude:
+
+1. Hex strings remain the negotiated and documented handle contract. Numeric
+   handle compatibility with `tinexport` is optional additional API scope.
+2. Work limits remain to bound linear scans. Large surveys need an index or
+   traversal improvement, rather than blindly raising the limits. No drone-scale
+   performance qualification is claimed.
+3. Every target vertex, including unused vertices, is intentionally sampled,
+   documented and regression-tested. Explicit XYZ points provide subset comparison.
+
+No source change follows the review. The automated GitHub Codex review also
+reported no findings at `1003e6b`. The final commit changes this log only.
+2026-11-04 09:54 UTC: fresh `cargo xtask ci` again passes all seven gates,
+with 3,525 tests passing and the existing 28 skipped tests.
+Greg owns both merges: #7 first using a merge commit, then retarget #9 to `main`.
+No native GUI session was exercised. Synthetic CLI outputs and build caches are
+removed with this agent's private target directory after the final validation.
