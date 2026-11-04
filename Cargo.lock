@@ -647,6 +647,7 @@ name = "cadcraft-cli"
 version = "0.17.0"
 dependencies = [
  "cadcraft-engine",
+ "cadcraft-handoff",
  "cadcraft-io",
  "cadcraft-mcp",
  "cadcraft-render",
@@ -713,6 +714,7 @@ dependencies = [
  "cadcraft-dxf",
  "cadcraft-fonts",
  "cadcraft-geom",
+ "cadcraft-handoff",
  "cadcraft-io",
  "cadcraft-render",
  "craft-docpath",
@@ -740,6 +742,20 @@ name = "cadcraft-geom"
 version = "0.17.0"
 dependencies = [
  "serde",
+]
+
+[[package]]
+name = "cadcraft-handoff"
+version = "0.17.0"
+dependencies = [
+ "chrono",
+ "crc32fast",
+ "flate2",
+ "log",
+ "quick-xml 0.42.0",
+ "serde_json",
+ "sha2",
+ "thiserror 2.0.21",
 ]
 
 [[package]]

@@ -1,0 +1,37 @@
+//! Stable issue codes of handoff contract v1.
+
+pub const INVALID_ARCHIVE: &str = "ZIP001";
+pub const MISSING_REQUIRED_ENTRY: &str = "ZIP003";
+pub const UNEXPECTED_ENTRY: &str = "ZIP004";
+pub const UNSAFE_ENTRY_NAME: &str = "ZIP005";
+pub const DUPLICATE_ENTRY_NAME: &str = "ZIP006";
+pub const NON_REGULAR_ENTRY: &str = "ZIP007";
+pub const ENCRYPTED_ENTRY: &str = "ZIP008";
+pub const UNSUPPORTED_COMPRESSION: &str = "ZIP009";
+pub const MANIFEST_TOO_LARGE: &str = "ZIP010";
+pub const SURFACE_TOO_LARGE: &str = "ZIP011";
+pub const COMPRESSION_RATIO_EXCEEDED: &str = "ZIP012";
+pub const STREAM_LIMIT_EXCEEDED: &str = "ZIP013";
+pub const LANDXML_MALFORMED: &str = "XML001";
+pub const LANDXML_FORBIDDEN_DTD: &str = "XML002";
+pub const LANDXML_UNSUPPORTED_VERSION: &str = "XML003";
+pub const LANDXML_INVALID_SURFACE_COUNT: &str = "XML004";
+pub const LANDXML_INVALID_DEFINITION_COUNT: &str = "XML005";
+pub const LANDXML_INVALID_POINT: &str = "XML006";
+pub const LANDXML_DUPLICATE_POINT_ID: &str = "XML007";
+pub const LANDXML_NONFINITE_COORDINATE: &str = "XML008";
+pub const LANDXML_INVALID_FACE: &str = "XML009";
+pub const LANDXML_UNKNOWN_POINT_REFERENCE: &str = "XML010";
+pub const LANDXML_REPEATED_FACE_VERTEX: &str = "XML011";
+pub const LANDXML_DEGENERATE_FACE: &str = "XML012";
+pub const MANIFEST_INVALID_JSON: &str = "MAN001";
+pub const MANIFEST_SCHEMA_VIOLATION: &str = "MAN002";
+pub const MANIFEST_SEMANTIC_VIOLATION: &str = "MAN003";
+pub const CHECKSUM_MISMATCH: &str = "INT001";
+pub const SURFACE_NAME_MISMATCH: &str = "XCK001";
+pub const POINT_COUNT_MISMATCH: &str = "XCK002";
+pub const FACE_COUNT_MISMATCH: &str = "XCK003";
+pub const EPSG_MISMATCH: &str = "XCK004";
+pub const HORIZONTAL_UNIT_MISMATCH: &str = "XCK005";
+pub const VERTICAL_UNIT_FAMILY_MISMATCH: &str = "XCK006";
+pub const UNKNOWN_VERTICAL_DATUM: &str = "WRN001";

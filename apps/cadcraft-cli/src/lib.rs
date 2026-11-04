@@ -12,6 +12,7 @@ mod args;
 mod commands;
 mod convert;
 mod error;
+mod handoff;
 mod info;
 mod mcp;
 mod output;
@@ -102,9 +103,11 @@ where
         Command::Run(a) => a.settings.apply(),
         Command::Mcp(a) => a.settings.apply(),
         Command::Sample(a) => a.settings.apply(),
-        Command::Info(_) | Command::Commands(_) | Command::Perf(_) | Command::Roundtrip(_) => {}
+        Command::Info(_) | Command::Commands(_) | Command::Perf(_) | Command::Roundtrip(_) | Command::Handoff(_) => {}
     }
     let mut io = Streams::new(out, err);
+    // `handoff` keeps the reference validator's exit codes (0/1/2/3).
+    let mut handoff_code = None;
     let result = match &cli.command {
         Command::Info(a) => info(a, &mut io),
         Command::Convert(a) => convert(a, &mut io),
@@ -114,6 +117,10 @@ where
         Command::Perf(a) => perf(a.target.as_ref(), &mut io),
         Command::Sample(a) => sample(a, &mut io),
         Command::Roundtrip(a) => roundtrip(a, &mut io),
+        Command::Handoff(a) => {
+            handoff_code = Some(handoff::handoff(a, &mut io));
+            Ok(())
+        }
     };
     let mut code = 0;
     if let Err(e) = result {
@@ -121,7 +128,12 @@ where
         code = 1;
     }
     io.finish();
-    if io.stdout_failed() { 1 } else { code }
+    match (io.stdout_failed(), handoff_code) {
+        (true, Some(_)) => 3,
+        (true, None) => 1,
+        (false, Some(c)) => c,
+        (false, None) => code,
+    }
 }
 
 #[cfg(test)]

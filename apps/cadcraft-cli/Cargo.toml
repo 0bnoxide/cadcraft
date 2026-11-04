@@ -19,6 +19,7 @@ workspace = true
 
 [dependencies]
 cadcraft-engine = { workspace = true }
+cadcraft-handoff = { workspace = true }
 cadcraft-io = { workspace = true }
 cadcraft-mcp = { workspace = true }
 cadcraft-render = { workspace = true }
