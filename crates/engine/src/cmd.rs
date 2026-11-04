@@ -11,6 +11,8 @@ pub mod constraints;
 mod draw;
 mod draw2;
 mod draworder;
+mod droneqa_check;
+mod droneqa_review;
 mod edit;
 mod exchange;
 pub mod file;
@@ -211,6 +213,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(survey_level::specs());
         v.extend(surface_build::specs());
         v.extend(surface_contour::specs());
+        v.extend(droneqa_check::specs());
+        v.extend(droneqa_review::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());

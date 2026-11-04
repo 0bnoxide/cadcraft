@@ -1,0 +1,33 @@
+{
+  "field_mapping": {"checkpoints_bare_ground": "CheckpointsBareGround"},
+  "ruleset": {
+    "version": "synthetic-scenarios-1",
+    "accuracy": {"maximum_rmse_horizontal_feet": 0.25, "maximum_rmse_z_feet": 0.25},
+    "control": {"require_bare_ground_checkpoints": true}
+  },
+  "scenarios": {
+    "pass": {
+      "mission_id": "SYNTHETIC-PASS",
+      "rmse_x_feet": 0.15,
+      "rmse_y_feet": 0.2,
+      "rmse_z_feet": 0.2,
+      "checkpoints_bare_ground": true
+    },
+    "fail": {
+      "mission_id": "SYNTHETIC-FAIL",
+      "rmse_x_feet": 0.3,
+      "rmse_y_feet": 0.4,
+      "rmse_z_feet": 0.4,
+      "checkpoints_bare_ground": true
+    },
+    "insufficient-data": {
+      "mission_id": "SYNTHETIC-INSUFFICIENT-DATA",
+      "rmse_x_feet": 0.01,
+      "rmse_y_feet": 0.01,
+      "rmse_z_feet": 0.01,
+      "checkpoint_count": null,
+      "checkpoints_independent": null,
+      "checkpoints_bare_ground": null
+    }
+  }
+}

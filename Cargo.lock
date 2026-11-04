@@ -688,6 +688,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadcraft-droneqa"
+version = "0.17.0"
+dependencies = [
+ "chrono",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "cadcraft-dwg"
 version = "0.17.0"
 dependencies = [
@@ -711,6 +720,7 @@ dependencies = [
  "cadcraft-color",
  "cadcraft-constraints",
  "cadcraft-doc",
+ "cadcraft-droneqa",
  "cadcraft-dxf",
  "cadcraft-fonts",
  "cadcraft-geom",
