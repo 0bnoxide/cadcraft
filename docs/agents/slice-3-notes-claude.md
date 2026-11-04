@@ -4,30 +4,36 @@ Agent id `aaf07392-8686-403a-9168-ece6112f9ee7`; Codex `0d8d85c3-3711-4535-bfc4-
 
 ## Message log (UTC, 2026-11-04)
 
+Rows are in exact send/receive order (the order `paseo logs` shows); `paseo logs` carries no timestamps, so times are from my shell clock where I measured them and `—` otherwise. Commit times are from git.
+
 | Time | Direction | Message id | Summary |
 |---|---|---|---|
 | 10:19 | Claude → Codex | 04114147 | Hello; redaction boundary proposal (item 3); expected parser shape. |
-| ~10:19 | Codex → Claude | c337baca | Crossed: proposes `parse_report(&[u8], &str) -> ParseResult` and an append-only JSON sidecar history with the draft schema. |
-| ~10:20 | Claude → Codex | ace85317 | Agrees items 1 and 2; asks for `sensitive_fields` in the draft record. |
-| ~10:20 | Codex → Claude | 26da0240 | **Agrees item 3** (redaction, `redact(&Value, &[String]) -> Value`, fail-closed `None`); renames parser to `pix4d::parse`. |
-| ~10:20 | Claude → Codex | a94ec918 | Confirms all three items; names my public API (`analyze`, `summarize`, `Mission`, `Ruleset::from_json`). |
-| ~10:21 | Codex → Claude | a982cfff | Confirms `sensitive_fields` in the draft schema; all three contracts agreed. |
-| 10:22 | Claude → Codex | e941d8fc | (A) staged merge order; (B) shared-file request: `regex` dependency. |
-| ~10:30 | Codex → Claude | df090d26 | **Agrees (A) and (B)**: real full-match semantics; reject (not reinterpret) unsupported Python syntax. |
-| ~10:35 | Codex → Claude | 5f76ca13 | Asks for the regex dependency as its own commit. |
-| ~10:40 | Claude → Codex | e8e33bcb | Dependency commit 6760d38; CI running. |
-| ~10:45 | Codex → Claude | 57ed821d | Its reviewer blocked moving onto 6760d38 pending operator approval. |
+| — | Codex → Claude | c337baca | Crossed: proposes `parse_report(&[u8], &str) -> ParseResult` and an append-only JSON sidecar history with the draft schema. |
+| — | Claude → Codex | ace85317 | Agrees items 1 and 2; asks for `sensitive_fields` in the draft record. |
+| — | Codex → Claude | 26da0240 | **Agrees item 3** (redaction, `redact(&Value, &[String]) -> Value`, fail-closed `None`); renames parser to `pix4d::parse`. |
+| — | Claude → Codex | a94ec918 | Confirms all three items; names my public API (`analyze`, `summarize`, `Mission`, `Ruleset::from_json`). |
+| — | Codex → Claude | a982cfff | Confirms `sensitive_fields` in the draft schema; all three contracts agreed. |
+| 10:20 | Claude → Codex | e941d8fc | (A) staged merge order; (B) shared-file request: `regex` dependency. |
+| — | Codex → Claude | df090d26 | **Agrees (A) and (B)**: real full-match semantics; reject (not reinterpret) unsupported Python syntax. |
+| — | Codex → Claude | 5f76ca13 | Asks for the regex dependency as its own commit. |
+| (git) 10:24 | — | — | Commit 6760d38 (regex). |
+| — | Claude → Codex | e8e33bcb | Dependency commit 6760d38; CI running. |
+| — | Codex → Claude | 57ed821d | Its reviewer blocked moving onto 6760d38 pending operator approval. |
 | 11:16 | Claude → Codex | 923bc28f | 6760d38 pushed, `cargo xtask ci` 7/7; waiting for the foundation SHA. |
-| ~11:20 | Codex → Claude | 8f0219f1 | Ack; operator approval for the rebase still pending; will send the foundation SHA. |
-| ~11:35 | Claude → Codex | 9221c4ce | Proposal: `qareview draft` takes the `droneqa` inputs and calls `analyze` itself; states the `valid.txt` parse my fixtures assume. |
-| ~11:25 | Codex → Claude | 230a2ce3 | **Agrees** `qareview draft` inputs (same as `droneqa`, report XOR report_text, draft calls `analyze`); review/commit bind the stored draft; its parser targets my `valid.txt` expectations (unverified). |
-| ~11:30 | Claude → Codex | 407fab21 | Agrees the review/commit binding; all four interfaces settled; holding for the foundation SHA. |
-| ~11:40 | Codex → Claude | 7c25a0cc | Operator approved the rebase; Codex now on 6760d38; foundation SHA after its mapper and CI. |
-| ~11:55 | Codex → Claude | e1d7fe67 | Its parser on `valid.txt` matches my `valid_report()` exactly, with zero diagnostics; full CI rerun pending; the scrubber matches ASCII-only case-insensitively (no `unicode-case` feature). |
-| ~12:05 | Codex → Claude | d0dbabd4 | Shared-file request: `sha2` for workflow SHA-256 binding, in its later workflow commit; describes its fail-closed sidecar locking. |
-| ~12:06 | Claude → Codex | 6431abec | **Agrees** `sha2`; suggests `sha2 = "0.10"` in the droneqa manifest only (already in the lock); I make no further Cargo edits after 6760d38. |
+| — | Codex → Claude | 8f0219f1 | Ack; operator approval for the rebase still pending; will send the foundation SHA. |
+| 11:19 | Claude → Codex | 9221c4ce | Proposal: `qareview draft` takes the `droneqa` inputs and calls `analyze` itself; states the `valid.txt` parse my fixtures assume. |
+| — | Codex → Claude | 230a2ce3 | **Agrees** `qareview draft` inputs (same as `droneqa`, report XOR report_text, draft calls `analyze`); review/commit bind the stored draft; its parser targets my `valid.txt` expectations (unverified). |
+| — | Claude → Codex | 407fab21 | Agrees the review/commit binding; all four interfaces settled; holding for the foundation SHA. |
+| — | Codex → Claude | 7c25a0cc | Operator approved the rebase; Codex now on 6760d38; foundation SHA after its mapper and CI. |
+| — | Codex → Claude | e1d7fe67 | Its parser on `valid.txt` matches my `valid_report()` exactly, with zero diagnostics; full CI rerun pending; the scrubber matches ASCII-only case-insensitively (no `unicode-case` feature). |
+| — | Codex → Claude | d0dbabd4 | Shared-file request: `sha2` for workflow SHA-256 binding, in its later workflow commit; describes its fail-closed sidecar locking. |
+| — | Claude → Codex | 6431abec | **Agrees** `sha2`; suggests `sha2 = "0.10"` in the droneqa manifest only (already in the lock); I make no further Cargo edits after 6760d38. |
+| (git) 14:26 | — | — | Codex commit 2f67906 (parser, redaction). |
+| — | Codex → Claude | e43abbd6 | Foundation pushed: 2f67906 on 6760d38, its CI 7/7; `valid.txt` contract verified; asks for a review; agrees `sha2` in the droneqa manifest. |
+| (git) 14:30 | — | — | My commit 6750e94 (mission, QA, droneqa). |
 
-First commit touching shared files: 6760d38 (after df090d26). No commit calling `redact` or `pix4d::parse` until Codex's foundation commit exists.
+Commits, in order: 6760d38 (regex; shared files, after df090d26), Codex's foundation 2f67906 (after 26da0240), then my mission/qa/command commit (after all four agreements and Codex's foundation SHA in e43abbd6).
 
 ## Agreed contracts
 
@@ -42,8 +48,13 @@ First commit touching shared files: 6760d38 (after df090d26). No commit calling 
 - **Number display**: requirements print thresholds through `serde_json` (`<= 10.0`, `>= 3`), which matches Python's `repr` for the values the rules use, so the reference strings (`<= 0.25`, `<= 0.2499999`) carry over.
 - **Scenario ruleset**: as in the reference `fixture_client.load_fixture`, the fixture ruleset with the scenario's keys replaced and its `control` merged. It lives inline in the tests, so no shared fixture file changes.
 
-## Pending when Codex's foundation lands
+## Verification
 
-- Rebase onto it; restore `scrub` (the local stub is never committed: `grep LOCAL-STUB` must be empty).
-- Add a `qa*.rs` test pinning `pix4d::parse(valid.txt)` to the `valid_report()` fixture (no diagnostics, independence `None`).
-- `cargo check -p cadcraft-engine`, then `cargo xtask ci`; replace the `~` times above with exact ones from `paseo logs`.
+- `cargo xtask ci`: 7/7 on 6760d38 and on my mission/qa/command head (Windows).
+- Through the CLI (`cadcraft-cli run --cmd "droneqa {mission, ruleset, report_text: valid.txt}"`): pass → PASS, fail → FAIL, insufficient-data → INSUFFICIENT_DATA.
+- `pix4d::parse(valid.txt)` is pinned to the scenario fixture (`real_parser_reads_valid_txt_as_the_scenario_fixture_assumes`).
+- Pitfall: `xtask` and fixture-reading test binaries bake in `CARGO_MANIFEST_DIR`; a target dir reused after deleting a worktree fails with `os error 267` / `NotFound` until those packages are cleaned.
+
+## Review of Codex's foundation (2f67906)
+
+Checked `parse` against `parsers.py`: exact `text/plain`, PDF diagnostic, byte limit, duplicate and unknown lines. Checked `redact` against `redaction.py`: key list, the four string scrubs, depth cap, no mutation. No blocking issue. Non-blocking: `scrub` compiles its four regexes on every string; a `LazyLock` would help on large audit histories.
