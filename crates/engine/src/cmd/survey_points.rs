@@ -55,13 +55,13 @@ fn findings_json(f: &[Finding]) -> Value {
 }
 
 fn options(p: &Value) -> Result<rtk::ImportOptions> {
-    let mut o = rtk::ImportOptions::default();
-    o.order = match str_param(p, "format").map(str::to_ascii_lowercase).as_deref() {
+    let order = match str_param(p, "format").map(str::to_ascii_lowercase).as_deref() {
         None | Some("auto") => rtk::CoordOrder::Auto,
         Some("pnezd") => rtk::CoordOrder::Pnezd,
         Some("penzd") => rtk::CoordOrder::Penzd,
         Some(other) => return Err(bad(RTK, format!("`format` must be auto, pnezd or penzd, not '{other}'"))),
     };
+    let mut o = rtk::ImportOptions { order, ..Default::default() };
     if let Some(v) = p.get("extra_columns").filter(|v| !v.is_null()) {
         let names = v.as_array().and_then(|a| a.iter().map(|n| n.as_str().map(String::from)).collect::<Option<Vec<_>>>());
         o.extra_columns = Some(names.ok_or_else(|| bad(RTK, "`extra_columns` must be a list of names"))?);
