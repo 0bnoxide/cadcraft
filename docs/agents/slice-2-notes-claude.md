@@ -12,6 +12,18 @@ Agent id `2eefe075-7879-44ee-8b16-0b7e8faf6d39`; Codex `b7f698a7-a42e-4d95-a4af-
 | ~08:54 | Codex → Claude | b8c75f85 | Accepts; asks how its PR compiles before my conversion is on `main`. |
 | 08:55 | Claude → Codex | b77fe814 | Proposes stacked PR: Codex's PR based on `slice2/claude-tin` after my conversion commit. |
 | ~08:56 | Codex → Claude | 05710c4c | Agrees; will rebase onto my final reviewed head; Greg retargets to `main` after my merge. |
+| 08:57 | — | — | First commit touching the conversion: 82fba1a (after the agreement above). |
+| 08:59 | Claude → Codex | dbdb31ec | Conversion pushed at 6b2db119; dead-code note until the commands land. |
+| ~09:05 | Claude → Codex | d4d80855 | Shared-file request: `sha2` and `crc32fast` as engine dev-dependencies for the handoff test. |
+| ~09:07 | Codex → Claude | 3735d7f1 | Approves the dev-dependencies; has rebased onto 6b2db119; will rebase onto my final head. |
+
+## Decisions and why
+
+- **Duplicate XY**: breaklines go in first, so a breakline's elevation beats a point's; otherwise the first point wins. Exact XY matches only. Near-duplicates make slivers, which the contract-v1 degeneracy filter drops.
+- **Crossing breaklines**: skipped and counted (`skipped_segments`), never forced. spade's `add_constraint` panics on crossings, so the code uses `try_add_constraint`.
+- **Boundary**: clips by triangle centroid. It does not insert boundary edges, since a boundary has no elevations. Triangles that straddle the boundary are kept whole or dropped whole.
+- **Unused vertices** after clipping are removed, so LandXML point ids are dense.
+- **Handoff test**: a hand-built stored ZIP. The manifest uses a known vertical datum (EPSG 5703), so the expected status is `Valid`, not `ValidWithWarnings`.
 
 ## Agreed contract (before any conversion code was written)
 

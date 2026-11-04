@@ -720,11 +720,13 @@ dependencies = [
  "cadcraft-surface",
  "cadcraft-survey",
  "craft-docpath",
+ "crc32fast",
  "libc",
  "log",
  "rstar",
  "serde",
  "serde_json",
+ "sha2",
  "thiserror 2.0.21",
 ]
 
