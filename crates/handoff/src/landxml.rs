@@ -92,8 +92,10 @@ impl std::fmt::Display for Forbidden {
 
 impl std::error::Error for Forbidden {}
 
-/// Passes bytes through and fails as soon as `<!DOCTYPE` appears in any common encoding, so a
-/// DTD is refused even where the XML parser would fail on something else first.
+/// Passes bytes through and fails as soon as `<!DOCTYPE` appears in UTF-16 or UTF-32, which the
+/// UTF-8 parser cannot read. In UTF-8 documents only a real declaration (a `DocType` event) is
+/// refused, so the text inside a comment or CDATA section is allowed. The reference validator
+/// rejects the byte sequence anywhere; this port is deliberately more permissive there.
 struct DoctypeScanner<R> {
     inner: R,
     tail: Vec<u8>,
@@ -108,7 +110,7 @@ impl<R: Read> DoctypeScanner<R> {
         let utf16be: Vec<u8> = text.encode_utf16().flat_map(u16::to_be_bytes).collect();
         let utf32le: Vec<u8> = text.chars().flat_map(|c| u32::from(c).to_le_bytes()).collect();
         let utf32be: Vec<u8> = text.chars().flat_map(|c| u32::from(c).to_be_bytes()).collect();
-        Self { inner, tail: Vec::new(), found: false, patterns: vec![text.as_bytes().to_vec(), utf16le, utf16be, utf32le, utf32be] }
+        Self { inner, tail: Vec::new(), found: false, patterns: vec![utf16le, utf16be, utf32le, utf32be] }
     }
 }
 
@@ -686,5 +688,39 @@ mod tests {
         assert_eq!(power_of_two_below(1.0), 1.0);
         assert_eq!(power_of_two_below(0.75), 0.5);
         assert_eq!(power_of_two_below(f64::from_bits(5)), f64::from_bits(4));
+    }
+}
+
+#[cfg(test)]
+mod doctype_tests {
+    use super::parse;
+    use crate::codes;
+
+    fn surface(prolog: &str, inside: &str) -> String {
+        format!(
+            r#"<?xml version="1.0" encoding="utf-8"?>{prolog}
+<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2"><Units><Metric linearUnit="meter" elevationUnit="meter"/></Units><CoordinateSystem epsgCode="26913"/>{inside}<Surfaces><Surface name="S"><Definition surfType="TIN"><Pnts><P id="1">0 0 1</P><P id="2">0 10 1</P><P id="3">10 0 1</P></Pnts><Faces><F>1 2 3</F></Faces></Definition></Surface></Surfaces></LandXML>"#
+        )
+    }
+
+    fn code(xml: &str) -> Option<&'static str> {
+        match parse(xml.as_bytes(), false) {
+            Ok(Ok(_)) => None,
+            Ok(Err(issue)) => Some(issue.code),
+            Err(_) => Some("stage"),
+        }
+    }
+
+    #[test]
+    fn doctype_text_in_comments_and_cdata_is_allowed() {
+        assert_eq!(code(&surface("", "")), None);
+        assert_eq!(code(&surface("<!-- an old <!DOCTYPE note -->", "")), None);
+        assert_eq!(code(&surface("", "<Project name=\"p\"><![CDATA[<!DOCTYPE x>]]></Project>")), None);
+    }
+
+    #[test]
+    fn a_real_declaration_is_refused() {
+        assert_eq!(code(&surface("<!DOCTYPE LandXML>", "")), Some(codes::LANDXML_FORBIDDEN_DTD));
+        assert_eq!(code(&surface("<!DOCTYPE LandXML [<!ENTITY x \"y\">]>", "")), Some(codes::LANDXML_FORBIDDEN_DTD));
     }
 }
