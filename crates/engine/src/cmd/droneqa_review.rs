@@ -18,7 +18,7 @@ pub fn specs() -> Vec<CommandSpec> {
 fn import(_: &mut Session, params: &Value) -> Result<Value> {
     let id = "pix4dimport";
     let content_type = match params.get("content_type") {
-        None => "text/plain",
+        None | Some(Value::Null) => "text/plain",
         Some(Value::String(value)) => value,
         _ => return Err(bad(id, "content_type must be a string")),
     };
@@ -64,6 +64,10 @@ mod tests {
             std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
         ));
         let report = session.execute("pix4dimport", &json!({"text":include_str!("../../../droneqa/tests/fixtures/valid.txt")})).expect("import");
+        let defaulted = session
+            .execute("pix4dimport", &json!({"text":include_str!("../../../droneqa/tests/fixtures/valid.txt"),"content_type":null}))
+            .expect("null content type defaults");
+        assert_eq!(defaulted, report);
         assert_eq!(report["diagnostics"], json!([]));
         let mut params = json!({"mission":{"global_id":"11111111-1111-4111-8111-111111111111","mission_id":"synthetic-engine","pilot":"Private Person"},"ruleset":{"version":"fixture-1","required_properties":[]},"report":report});
         let preview = session.execute("droneqa", &params).expect("preview");

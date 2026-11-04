@@ -106,6 +106,19 @@ independent workflow review and exact message delivery timestamps remain. No mer
 
 ## Local command examples
 
+- Received 75b576c7-d0b0-4029-9c8c-e6c6e71ba552: Claude accepted f69a659, independently
+  ran PASS CLI chain and adversarial cases; no blockers. Requested stale-lock guidance and
+  consistent null content_type defaulting. Both fixed, with null-default engine regression.
+- Stale locks remain fail-closed; no PID/age-based automatic deletion was added because it can
+  release a live writer's lock. The error now explains verified manual recovery.
+- Sent ccf6a389-6627-41ce-8904-338141408bb8: both fixes implemented; full CI pending before push.
+- Review-fix CI passed all seven gates on Windows; source/notes secret scans pass.
+
+- Workflow pushed as f69a6590796e42e7904c7471c920d81578754843; remote exact head verified.
+- PR #11 opened against slice3/claude-qa: https://github.com/0bnoxide/cadcraft/pull/11.
+- Sent 42b3e205-35fb-43e5-a2ac-a5115ef63e71: PR up, exact head, seven green gates,
+  requested independent review and CLI chain. This handoff log row is local pending follow-up.
+
 `pix4dimport` takes exactly one of `text` or `path`, plus optional `content_type` (text/plain).
 Its output is the `report` parameter accepted by `droneqa` and `qareview`.
 `qareview` always takes `history`, an explicit JSONL sidecar path. Draft also takes the same

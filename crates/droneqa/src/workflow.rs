@@ -214,7 +214,7 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
     lock_name.push(".lock");
     let lock_path = PathBuf::from(lock_name);
     let lock_file =
-        OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|_| "HISTORY_BUSY: lock unavailable; retry when writer finishes")?;
+        OpenOptions::new().write(true).create_new(true).open(&lock_path).map_err(|_| "HISTORY_BUSY: lock unavailable; retry after the writer finishes. If a writer was terminated, confirm no review is running before deleting the history .lock file.")?;
     let _lock = Lock(lock_path);
     drop(lock_file);
     let events = load(path)?;
