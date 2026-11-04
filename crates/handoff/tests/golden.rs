@@ -121,3 +121,19 @@ fn mutated_packages_never_panic() {
         }
     }
 }
+
+/// A reparse point is refused whether the ZIP says it came from MS-DOS or NTFS.
+#[test]
+fn ntfs_reparse_entry_is_not_regular() {
+    let mut bytes = std::fs::read(fixtures().join("invalid/dos-reparse-entry.zip")).unwrap();
+    // Set "version made by" host (high byte) to NTFS (10) in every central-directory record.
+    let mut at = 0;
+    while at + 6 <= bytes.len() {
+        if bytes[at..at + 4] == [0x50, 0x4b, 0x01, 0x02] {
+            bytes[at + 5] = 10;
+        }
+        at += 1;
+    }
+    let report = cadcraft_handoff::validate(std::io::Cursor::new(bytes), false).unwrap();
+    assert_eq!(report.issues.first().map(|i| i.code), Some("ZIP007"));
+}

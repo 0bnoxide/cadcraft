@@ -22,20 +22,21 @@ pub fn specs() -> Vec<CommandSpec> {
     )]
 }
 
-fn read(p: &Value) -> Result<Vec<u8>> {
+/// Validates the package named by `path` (streamed from disk, never read whole) or `data`.
+fn validate(p: &Value) -> Result<cadcraft_handoff::Report> {
     if let Some(path) = str_param(p, "path") {
         #[cfg(not(target_arch = "wasm32"))]
-        return std::fs::read(path).map_err(|e| bad(ID, format!("{path}: {e}")));
+        return cadcraft_handoff::read_surface_file(std::path::Path::new(path)).map_err(|e| bad(ID, format!("{path}: {e}")));
         #[cfg(target_arch = "wasm32")]
         return Err(bad(ID, format!("{path}: paths are not available on the web; pass `data`")));
     }
     let data = str_param(p, "data").ok_or_else(|| bad(ID, "`path` or `data` (base64) is required"))?;
-    base64_decode(data).ok_or_else(|| bad(ID, "invalid base64"))
+    let bytes = base64_decode(data).ok_or_else(|| bad(ID, "invalid base64"))?;
+    cadcraft_handoff::validate(Cursor::new(bytes), true).map_err(|e| bad(ID, e.to_string()))
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
-    let bytes = read(p)?;
-    let report = cadcraft_handoff::validate(Cursor::new(bytes), true).map_err(|e| bad(ID, e.to_string()))?;
+    let report = validate(p)?;
     if report.status == cadcraft_handoff::Status::Invalid {
         let first = report.issues.first().map(|i| format!("[{}] {}", i.code, i.message)).unwrap_or_default();
         return Err(bad(ID, format!("the package is invalid: {first}")));

@@ -106,7 +106,9 @@ impl Entry {
         if self.is_directory() {
             return false;
         }
-        if self.host == HOST_MSDOS && self.external_attrs & DOS_NON_REGULAR != 0 {
+        // Stricter than the reference validator, which checks MS-DOS hosts only: an NTFS-host
+        // entry with the reparse-point or device attribute is not a regular file either.
+        if (self.host == HOST_MSDOS || self.host == HOST_NTFS) && self.external_attrs & DOS_NON_REGULAR != 0 {
             return false;
         }
         let file_type = (self.external_attrs >> 16) & UNIX_TYPE_MASK;
