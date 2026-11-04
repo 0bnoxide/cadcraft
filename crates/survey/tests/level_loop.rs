@@ -90,6 +90,40 @@ fn repeated_turning_point_warns() {
 }
 
 #[test]
+fn revisited_turning_points_keep_each_occurrence_correction_when_promoting_side_shots() {
+    for combined in [true, false] {
+        let book = [
+            obs("BM", Some(2.0), None, None),
+            obs("A", Some(2.0), Some(1.0), None),
+            obs("W1", None, None, Some(1.0)),
+            obs("B", Some(2.0), Some(1.0), None),
+            obs("A", Some(2.0), Some(1.0), None),
+            obs("W2", None, None, Some(1.0)),
+            obs("BM", None, Some(4.9), None),
+        ];
+        let mut rows = Vec::new();
+        for row in book {
+            if !combined && row.backsight.is_some() && row.foresight.is_some() {
+                rows.push(Observation { backsight: None, ..row.clone() });
+                rows.push(Observation { foresight: None, ..row });
+            } else {
+                rows.push(row);
+            }
+        }
+        let result = process_level_loop(&rows, &options(Some(0.5))).unwrap();
+        assert!(!result.run.has_errors);
+        close(result.run.misclosure, 0.1);
+        let a_shots: Vec<_> = result.observations.iter().filter(|r| r.point_id == "A" && r.foresight.is_some()).collect();
+        close(a_shots[0].elevation, 100.975);
+        close(a_shots[1].elevation, 102.925);
+        let plan = select_elevations_for_update(&result.run, &result.observations, &BTreeSet::from(["W1".into(), "W2".into()])).unwrap();
+        assert_eq!(plan.block_reason, None);
+        close(plan.updates.get("W1").copied(), 101.975);
+        close(plan.updates.get("W2").copied(), 103.925);
+    }
+}
+
+#[test]
 fn promotion_excludes_benchmark_uses_last_elevation_and_deduplicates_skips() {
     let mut result = process_level_loop(&loop_rows(2.9), &options(Some(0.5))).unwrap();
     result.observations.extend([

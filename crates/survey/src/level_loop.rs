@@ -117,7 +117,7 @@ pub fn process_level_loop(observations: &[Observation], options: &LoopOptions) -
     let mut closing = None;
     let mut setup_open = false;
     let mut rows = Vec::new();
-    for obs in observations {
+    for (row_index, obs) in observations.iter().enumerate() {
         let mut row = Observation { hi: None, elevation: None, ..obs.clone() };
         if let Some(fs) = obs.foresight.filter(|r| *r >= 0.0) {
             if let Some(height) = hi {
@@ -131,7 +131,7 @@ pub fn process_level_loop(observations: &[Observation], options: &LoopOptions) -
                     if !used.insert(obs.point_id.as_str()) {
                         findings.push(Finding::warning(format!("duplicate_turning_point: point {:?} used more than once", obs.point_id)));
                     }
-                    turning_points.push(obs.point_id.as_str());
+                    turning_points.push(row_index);
                 }
             } else {
                 findings.push(Finding::error(format!("missing_backsight: foresight at point={} has no HI", obs.point_id)));
@@ -174,27 +174,28 @@ pub fn process_level_loop(observations: &[Observation], options: &LoopOptions) -
     if options.tolerance.is_none() {
         findings.push(info(format!("closure_tolerance_default: 0.05 * sqrt({setups}) = {tolerance:.6} (input units)")));
     }
+    let misclosure_text = misclosure.map_or_else(|| "N/A".into(), |m| format!("{m:.6}"));
     if misclosure.is_some_and(|m| m.abs() > tolerance) {
-        findings.push(Finding::error(format!("misclosure_exceeds_tolerance: {misclosure:?} exceeds {tolerance}")));
+        findings.push(Finding::error(format!("misclosure_exceeds_tolerance: {misclosure_text} exceeds {tolerance:.6}")));
     }
     let adjusted = misclosure.is_some_and(|m| m != 0.0) && setups > 0;
     if adjusted {
         let correction = -misclosure.unwrap_or_default() / f64::from(setups);
         let mut corrections = BTreeMap::new();
-        for (i, point) in turning_points.into_iter().enumerate() {
-            corrections.insert(point, finite((i + 1) as f64 * correction)?);
+        for (i, row_index) in turning_points.into_iter().enumerate() {
+            corrections.insert(row_index, finite((i + 1) as f64 * correction)?);
         }
         let mut active = 0.0;
-        for row in &mut rows {
+        for (row_index, row) in rows.iter_mut().enumerate() {
             if row.foresight.is_some() && row.point_id != options.benchmark_id {
-                active = corrections.get(row.point_id.as_str()).copied().unwrap_or(active);
+                active = corrections.get(&row_index).copied().unwrap_or(active);
                 row.elevation = row.elevation.map(|e| finite(e + active)).transpose()?;
             } else if row.intermediate_sight.is_some() {
                 row.elevation = row.elevation.map(|e| finite(e + active)).transpose()?;
             }
         }
     }
-    findings.push(info(format!("level_loop_complete: run={} setups={setups} misclosure={misclosure:?} adjusted={adjusted}", options.run_id)));
+    findings.push(info(format!("level_loop_complete: run={} setups={setups} misclosure={misclosure_text} adjusted={adjusted}", options.run_id)));
     Ok(LoopResult {
         run: LevelLoopRun {
             run_id: options.run_id.clone(),
