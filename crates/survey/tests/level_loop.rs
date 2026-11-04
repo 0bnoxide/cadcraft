@@ -124,6 +124,34 @@ fn revisited_turning_points_keep_each_occurrence_correction_when_promoting_side_
 }
 
 #[test]
+fn closed_setups_require_a_new_backsight_before_further_sights() {
+    for rows in [
+        vec![
+            obs("BM", Some(2.0), None, None),
+            obs("A", None, Some(3.0), None),
+            obs("B", Some(4.0), Some(2.0), None),
+            obs("W", None, None, Some(1.0)),
+            obs("BM", None, Some(3.9), None),
+        ],
+        vec![
+            obs("BM", Some(2.0), None, None),
+            obs("A", None, Some(3.0), None),
+            obs("W", None, None, Some(1.0)),
+            obs("A", Some(4.0), None, None),
+            obs("BM", None, Some(2.9), None),
+        ],
+    ] {
+        let result = process_level_loop(&rows, &options(Some(0.5))).unwrap();
+        assert!(result.run.has_errors);
+        assert_eq!(result.observations[2].elevation, None);
+        assert!(result.findings.iter().any(|f| f.severity == Severity::Error && f.message.starts_with("missing_backsight:")));
+        let plan = select_elevations_for_update(&result.run, &result.observations, &BTreeSet::from(["W".into()])).unwrap();
+        assert!(plan.block_reason.is_some());
+        assert!(plan.updates.is_empty());
+    }
+}
+
+#[test]
 fn promotion_excludes_benchmark_uses_last_elevation_and_deduplicates_skips() {
     let mut result = process_level_loop(&loop_rows(2.9), &options(Some(0.5))).unwrap();
     result.observations.extend([

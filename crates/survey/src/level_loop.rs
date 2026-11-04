@@ -124,6 +124,7 @@ pub fn process_level_loop(observations: &[Observation], options: &LoopOptions) -
                 let elevation = finite(height - fs)?;
                 row.elevation = Some(elevation);
                 setup_open = false;
+                hi = None;
                 if obs.point_id == options.benchmark_id {
                     closing = Some(elevation);
                 } else {
