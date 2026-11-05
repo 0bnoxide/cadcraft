@@ -11,6 +11,8 @@ use super::{CommandSpec, bad, size_param, str_param};
 use crate::{Result, Session};
 
 const ID: &str = "surfaceaudit";
+/// Cap on point × (wildcard key + extent vertex) tests in one preflight.
+const MAX_WORK: usize = 200_000_000;
 
 pub fn specs() -> Vec<CommandSpec> {
     vec![CommandSpec::new(ID, "Surface Audit", run).noundo().params(
@@ -23,12 +25,26 @@ pub fn specs() -> Vec<CommandSpec> {
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let (mut a, inputs) = match str_param(p, "mode") {
-        Some("preflight") => (audit::preflight(&points(p)?, &preflight_options(p)?), vec![]),
+        Some("preflight") => {
+            let (points, opts) = (points(p)?, preflight_options(p)?);
+            // Each point is tested against every wildcard key and every extent edge.
+            let per_point = audit::wildcard_keys(opts.keys.as_deref().unwrap_or(&[])) + opts.extent.as_ref().map_or(0, |r| r.outer.len());
+            if points.len().checked_mul(per_point).is_none_or(|w| w > MAX_WORK) {
+                return Err(bad(ID, format!("too much work: points × (wildcard keys + extent vertices) must be at most {MAX_WORK}")));
+            }
+            (audit::preflight(&points, &opts), vec![])
+        }
         Some("tin") => {
             let handle = handle_param(p, "surface").ok_or_else(|| bad(ID, "`surface` must be a TIN polyface handle"))?;
             let tin = tin_from_handle(s.doc()?, handle)?;
             let boundary = ring(p, "boundary")?.map(|outer| Region { outer, holes: vec![] });
-            let breaklines = list(p, "breaklines")?
+            let lines = list(p, "breaklines")?;
+            // Check the combined size before converting anything, so hostile input can't allocate past the cap.
+            let total = lines.iter().try_fold(0usize, |n, l| n.checked_add(l.as_array().map_or(0, Vec::len)));
+            if total.is_none_or(|n| n > MAX_VERTICES) {
+                return Err(bad(ID, format!("too many breakline vertices (the limit is {MAX_VERTICES})")));
+            }
+            let breaklines = lines
                 .iter()
                 .map(|l| l.as_array().ok_or_else(|| bad(ID, "`breaklines` must be an array of point arrays"))?.iter().map(|v| xyz(v, 3)).collect())
                 .collect::<Result<Vec<Vec<_>>>>()?;
@@ -181,6 +197,7 @@ mod tests {
         assert_eq!(codes, ["PF-DUP-NUMBER", "PF-CODE-UNKEYED", "PF-ELEV-BAND", "PF-CODE-UNKEYED"]);
         assert_eq!(out["receipt"]["counts"]["points"], 3);
         assert_eq!(out["receipt"]["thresholds"]["elevation_max"], 50.0);
+        assert!(out["receipt"]["thresholds"].get("elevation_min").is_none(), "an open band side is left out, not null");
     }
 
     #[test]
@@ -193,6 +210,7 @@ mod tests {
             json!({"mode": "preflight", "points": [[1, 2]]}),
             json!({"mode": "preflight", "points": [], "extent": [[0, 0], [1, 1]]}),
             json!({"mode": "preflight", "points": [], "neighbor_tolerance": -1}),
+            json!({"mode": "preflight", "points": vec![json!([0, 0, 0]); 1001], "keys": vec![json!("A*"); 200_000]}),
             json!({"mode": "tin"}),
             json!({"mode": "tin", "surface": "FFFF"}),
         ] {

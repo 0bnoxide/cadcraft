@@ -6,7 +6,7 @@
 //! change anything. Issue codes and the receipt shape were agreed with Codex by Paseo message
 //! (Claude 6201272a, Codex 4530efb7); `tinvolume` reuses [`Receipt`] for its report header.
 
-use std::collections::{BTreeMap, HashMap};
+use std::collections::{BTreeMap, HashMap, HashSet};
 
 use spade::{DelaunayTriangulation, Point2, Triangulation};
 
@@ -142,6 +142,7 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
         issues.push(PF_DUP_NUMBER, Severity::Error, format!("point number {n} is used {count} times"), at, vec![n.to_owned()]);
     }
 
+    let keys = opts.keys.as_deref().map(KeySet::new);
     let finite = |p: &SurveyPoint| p.xyz.iter().all(|v| v.is_finite());
     let mut good = Vec::with_capacity(points.len());
     for p in points {
@@ -151,9 +152,9 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
             continue;
         }
         good.push(p);
-        if let Some(keys) = &opts.keys {
+        if let Some(keys) = &keys {
             let code = p.description.split_whitespace().next().unwrap_or("");
-            if !keys.iter().any(|k| key_matches(k, code)) {
+            if !keys.matches(code) {
                 let what = if code.is_empty() { "has no description code".to_owned() } else { format!("code {code:?} matches no description key") };
                 issues.push(PF_CODE_UNKEYED, Severity::Warning, format!("point {} {what}", p.number), Some(p.xyz), refs.clone());
             }
@@ -184,8 +185,8 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
     inputs.insert("expected_crs".into(), opts.expected_crs.clone().unwrap_or_else(|| "none".into()));
     let mut thresholds = BTreeMap::new();
     if let Some((lo, hi)) = opts.elevation_band {
-        thresholds.insert("elevation_min".into(), lo);
-        thresholds.insert("elevation_max".into(), hi);
+        // An open side of the band is left out rather than written as an infinity.
+        thresholds.extend([("elevation_min", lo), ("elevation_max", hi)].into_iter().filter(|(_, v)| v.is_finite()).map(|(k, v)| (k.to_owned(), v)));
     }
     if let Some(t) = opts.neighbor_tolerance {
         thresholds.insert("neighbor_tolerance".into(), t);
@@ -193,13 +194,37 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
     finish("preflight", inputs, thresholds, [("points", points.len())], issues)
 }
 
-/// Civil 3D style description-key match: case-insensitive, `*` at the end matches any suffix.
-fn key_matches(key: &str, code: &str) -> bool {
-    let (key, code) = (key.trim().to_ascii_uppercase(), code.to_ascii_uppercase());
-    match key.strip_suffix('*') {
-        Some(prefix) => code.starts_with(prefix),
-        None => !code.is_empty() && key == code,
+/// Civil 3D style description keys: case-insensitive, `*` at the end matches any suffix. Exact
+/// keys are a set lookup; only wildcard keys are scanned per point.
+struct KeySet {
+    exact: HashSet<String>,
+    prefixes: Vec<String>,
+}
+
+impl KeySet {
+    fn new(keys: &[String]) -> Self {
+        let mut set = KeySet { exact: HashSet::new(), prefixes: Vec::new() };
+        for k in keys {
+            let k = k.trim().to_ascii_uppercase();
+            match k.strip_suffix('*') {
+                Some(prefix) => set.prefixes.push(prefix.to_owned()),
+                None => {
+                    set.exact.insert(k);
+                }
+            }
+        }
+        set
     }
+
+    fn matches(&self, code: &str) -> bool {
+        let code = code.to_ascii_uppercase();
+        (!code.is_empty() && self.exact.contains(&code)) || self.prefixes.iter().any(|p| code.starts_with(p.as_str()))
+    }
+}
+
+/// How many wildcard keys `keys` holds: the per-point cost of the key check.
+pub fn wildcard_keys(keys: &[String]) -> usize {
+    keys.iter().filter(|k| k.trim().ends_with('*')).count()
 }
 
 /// Points whose elevation is more than `tol` from the median of their Delaunay neighbours, with
