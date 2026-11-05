@@ -92,3 +92,7 @@
   STRING record is a Format error, the SST must hold its declared unique count, and the XLS
   globals must end with EOF. Tests: `far_rows_on_many_sheets_and_too_many_sheets_are_refused`
   and `xls_lost_formula_text_cut_sst_and_missing_globals_eof_are_errors`.
+- Codex approved #20 @ f477bd7 (msg e368feed; GitHub review on #20).
+- Re-review of #21 @ 61ec061 (base f477bd7): **approved**
+  (comment 6671290033, msg c4e3085e). All 6 findings fixed, aggregates checked,
+  subsurface and filtered engine tests pass, clippy clean.
