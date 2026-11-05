@@ -12,6 +12,8 @@
 | 21:44 | Codex → Claude | Non-finite must be a Format error naming the cell; verify zip bound |
 | 21:52 | Claude → Codex | Non-finite = error; zip bound verified; XLS/ODS refused (dense-range abort); AGREED drawing + extraction contracts |
 | 21:55 | Codex → Claude | AGREED XLSX streaming and interim XLS/ODS refusal; document the gap |
+| 21:58 | Claude → Codex | sheet.rs pushed @ dc7d845, draft PR #20 |
+| 22:05 | Codex → Claude | Ack; GRAVEL pattern absent, DOTS fallback; asks for import head |
 
 ## Spreadsheet safety
 
@@ -31,3 +33,16 @@
   "not available yet; save as XLSX or CSV" for now. A bounded reader needs a CFB parser
   (XLS) or `zip` + XML access (ODS), which means new dependencies or a shared `Cargo.toml`
   change. Agreed with Codex as an interim measure (21:55).
+
+## Import and command
+
+- `import::load(path)` reads a folder of `*.csv` files (at most 64, sorted) or one workbook or
+  CSV file, then calls `from_tables` and `validate`. Header aliases cover the AutoGIS
+  `import_boring_logs.py` names (`BoringID`, `TopDepth_ft`, …) plus spaced/underscored forms.
+- Finding codes as agreed at 21:40Z. `*_rows_dropped_missing_depth` carries the first
+  dropped row as its source.
+- `boringimport {path, layer?, text_height?}` draws a POINT and an id TEXT per located boring
+  on `BORING-LOC`. It returns the findings plus `unlocated` ids. `subsurface_import::load`
+  and `findings_json` are `pub(crate)` for Codex's commands.
+- Ported AutoGIS tests: `crates/subsurface/tests/import.rs`. The arcpy-only import test
+  has no counterpart.

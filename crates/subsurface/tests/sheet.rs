@@ -73,6 +73,11 @@ fn csv_quotes_crlf_bom_and_blank_cells() {
 }
 
 #[test]
+fn csv_unterminated_quote_is_an_error() {
+    assert!(matches!(sheet::read(b"a,\"open\nb,c\n", "q.csv"), Err(SheetError::Format(m)) if m.contains("never closed")));
+}
+
+#[test]
 fn csv_caps() {
     let wide = ",".repeat(MAX_COLS);
     assert!(matches!(sheet::read(wide.as_bytes(), "w.csv"), Err(SheetError::TooLarge(_))));

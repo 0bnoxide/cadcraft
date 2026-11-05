@@ -14,6 +14,8 @@ use std::path::Path;
 
 /// Most CSV files read from one package folder.
 pub const MAX_FILES: usize = 64;
+/// Most directory entries looked at in one package folder.
+pub const MAX_ENTRIES: usize = 10_000;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum ImportError {
@@ -41,35 +43,53 @@ impl From<SheetError> for ImportError {
 /// Load a package from a folder of CSV files or from one workbook or CSV file.
 pub fn load(path: &Path) -> Result<(BoringSet, Vec<Finding>), ImportError> {
     let io = |e: std::io::Error| ImportError::Io(format!("{}: {e}", path.display()));
+    let too_large = |m: String| ImportError::Sheet(SheetError::TooLarge(m));
     let mut tables = Vec::new();
     if path.is_dir() {
-        let mut files: Vec<_> = std::fs::read_dir(path)
-            .map_err(io)?
-            .filter_map(Result::ok)
-            .map(|e| e.path())
-            .filter(|p| p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("csv")))
-            .collect();
-        if files.len() > MAX_FILES {
-            return Err(SheetError::TooLarge(format!("more than {MAX_FILES} CSV files")).into());
+        let mut files = Vec::new();
+        for (n, entry) in std::fs::read_dir(path).map_err(io)?.enumerate() {
+            if n >= MAX_ENTRIES {
+                return Err(too_large(format!("more than {MAX_ENTRIES} entries in the package folder")));
+            }
+            let p = entry.map_err(io)?.path();
+            if p.is_file() && p.extension().is_some_and(|x| x.eq_ignore_ascii_case("csv")) {
+                if files.len() >= MAX_FILES {
+                    return Err(too_large(format!("more than {MAX_FILES} CSV files")));
+                }
+                files.push(p);
+            }
         }
         files.sort();
+        // The whole package shares one byte and cell budget, as if it were one workbook.
+        let mut budget = sheet::MAX_BYTES;
+        let mut cells = 0usize;
         for f in files {
-            tables.extend(read_file(&f)?);
+            let bytes = read_file(&f, budget)?;
+            budget -= bytes.len();
+            for t in sheet::read(&bytes, &f.to_string_lossy())? {
+                cells = cells.saturating_add(t.rows.iter().map(Vec::len).sum());
+                if cells > sheet::MAX_CELLS {
+                    return Err(too_large("package has more than 2,000,000 cells".into()));
+                }
+                tables.push(t);
+            }
         }
     } else {
-        tables = read_file(path)?;
+        tables = sheet::read(&read_file(path, sheet::MAX_BYTES)?, &path.to_string_lossy())?;
     }
     Ok(from_tables(&tables))
 }
 
-fn read_file(path: &Path) -> Result<Vec<Table>, ImportError> {
+/// The file's bytes, refused once more than `limit` arrive (reads at most `limit + 1`).
+fn read_file(path: &Path, limit: usize) -> Result<Vec<u8>, ImportError> {
+    use std::io::Read;
     let io = |e: std::io::Error| ImportError::Io(format!("{}: {e}", path.display()));
-    let len = std::fs::metadata(path).map_err(io)?.len();
-    if len > sheet::MAX_BYTES as u64 {
-        return Err(SheetError::TooLarge(format!("{} is over 64 MiB", path.display())).into());
+    let mut bytes = Vec::new();
+    std::fs::File::open(path).map_err(io)?.take(limit as u64 + 1).read_to_end(&mut bytes).map_err(io)?;
+    if bytes.len() > limit {
+        return Err(SheetError::TooLarge(format!("{} goes past the 64 MiB package limit", path.display())).into());
     }
-    let bytes = std::fs::read(path).map_err(io)?;
-    Ok(sheet::read(&bytes, &path.to_string_lossy())?)
+    Ok(bytes)
 }
 
 /// Lower-case letters and digits only, without a trailing `ft` unit.
@@ -246,7 +266,7 @@ pub fn from_tables(tables: &[Table]) -> (BoringSet, Vec<Finding>) {
             let Some((top_depth, bottom_depth)) = depths(s, row, at, &mut dropped) else { continue };
             set.wells.push(WellComponent {
                 boring_id,
-                component: s.text(row, &["component", "type"]),
+                component: s.text(row, &["component", "componenttype", "type"]),
                 top_depth,
                 bottom_depth,
                 diameter: s.num(row, &["diameter", "diameterin"]),
@@ -261,9 +281,9 @@ pub fn from_tables(tables: &[Table]) -> (BoringSet, Vec<Finding>) {
             let Some(boring_id) = id_of(s, row, at, &mut found) else { continue };
             set.water.push(WaterLevel {
                 boring_id,
-                observed: s.text(row, &["observed", "date", "datetime", "measured"]),
+                observed: s.text(row, &["observed", "observationdatetime", "observationdate", "date", "datetime", "measured"]),
                 depth_to_water: s.num(row, &["depthtowater", "dtw", "waterdepth"]),
-                kind: s.text(row, &["kind", "type"]),
+                kind: s.text(row, &["kind", "observationtype", "type"]),
             });
         }
     }

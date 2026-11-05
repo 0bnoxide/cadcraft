@@ -87,8 +87,8 @@ fn short_location_row_does_not_crash() {
 fn missing_ids_duplicates_inverted_orphans_and_coordinates() {
     let loc = "Boring ID,Northing,Easting\nB-1,10,20\nB-1,11,21\nB-2,,\n,1,1\n";
     let lith = "boring id,Top Depth,Bottom Depth\nB-1,5,2\n";
-    let wells = "BoringID,Component,Top,Bottom\nB-3,Screen,10,20\n";
-    let water = "BoringID,Date,DTW\nB-4,2026-01-02,7.5\n";
+    let wells = "BoringID,Component_Type,Top,Bottom\nB-3,Screen,10,20\n";
+    let water = "BoringID,Observation_DateTime,Observation_Type,DTW\nB-4,2026-01-02,static,7.5\n";
     let (set, f) = from_tables(&[csv("Borings", loc), csv("Lithology", lith), csv("well_construction", wells), csv("water_levels", water)]);
     let c = codes(&f);
     for want in [
@@ -105,6 +105,8 @@ fn missing_ids_duplicates_inverted_orphans_and_coordinates() {
     let missing = f.iter().find(|f| f.code == "missing_boring_id").unwrap();
     assert_eq!(missing.source, Some(("Borings".into(), 5)));
     assert_eq!(set.water[0].depth_to_water, Some(7.5));
+    assert_eq!((set.water[0].observed.as_str(), set.water[0].kind.as_str()), ("2026-01-02", "static"));
+    assert_eq!((set.water[0].observed.as_str(), set.water[0].kind.as_str()), ("2026-01-02", "static"));
     assert_eq!(set.wells[0].component, "Screen");
 }
 
@@ -144,6 +146,18 @@ fn numbers_and_text_cells_both_parse() {
     };
     let (set, _) = from_tables(&[t]);
     assert_eq!(set.lithology[0].bottom_depth, 2.5);
+}
+
+#[test]
+fn package_folder_shares_one_byte_budget() {
+    let dir = tmp("budget");
+    // One cell per file, so only the shared byte budget can trip.
+    let half = "a".repeat(sheet::MAX_BYTES / 2 + 1);
+    for n in ["a.csv", "b.csv"] {
+        std::fs::write(dir.join(n), &half).unwrap();
+    }
+    assert!(matches!(import::load(&dir), Err(import::ImportError::Sheet(sheet::SheetError::TooLarge(m))) if m.contains("package limit")));
+    let _ = std::fs::remove_dir_all(&dir);
 }
 
 fn tmp(name: &str) -> PathBuf {

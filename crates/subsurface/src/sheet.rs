@@ -229,6 +229,9 @@ fn read_csv(bytes: &[u8], name: &str) -> Result<Table, SheetError> {
             (false, c) => field.push(c),
         }
     }
+    if quoted {
+        return Err(SheetError::Format(format!("{name}: a quoted field is never closed")));
+    }
     if !field.is_empty() || !row.is_empty() {
         push_field(&mut row, &mut field)?;
         if rows.len() >= MAX_ROWS {
