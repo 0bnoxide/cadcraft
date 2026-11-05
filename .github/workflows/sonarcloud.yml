@@ -16,6 +16,8 @@ concurrency:
 
 jobs:
   sonarcloud:
+    # Needs storytold's SonarCloud secrets; forks have none, so it would fail every run.
+    if: github.repository_owner == 'storytold'
     # Tracked at @main so org-wide CI improvements propagate without PR churn.
     uses: storytold/craft-common-actions/.github/workflows/sonarcloud.yml@main
     secrets: inherit
