@@ -23,7 +23,9 @@ jobs:
     with:
       # Same craft-fonts commit as release.yml.
       craft-fonts-ref: b076417b5880bd4154bd22f00695b1d28c6bea83
-      timeout-minutes: 90
+      timeout-minutes: 120
+      # The fork gates on Windows too (Greg's dev machine); rust-cache saves on main only.
+      os: '["ubuntu-24.04","windows-latest"]'
       packages: >-
         pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
         libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
