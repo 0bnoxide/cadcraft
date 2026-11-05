@@ -1,4 +1,20 @@
 use cadcraft_droneqa::pix4d::parse;
+
+#[test]
+fn rounded_percentages_use_exact_display_precision() {
+    for (calibrated, total, percent, valid) in [
+        (1u64, 3u64, "33.33", true),
+        (1, 3, "33.4", false),
+        (1, 8, "12", true),
+        (1, 8, "13", true),
+        (1, 8, "12.49", false),
+        (u64::MAX, u64::MAX, "100.00000000000000000000", true),
+        (u64::MAX - 1, u64::MAX, "100.00000000000000000000", false),
+    ] {
+        let report = REPORT.replace("20 out of 20", &format!("{calibrated} out of {total}")).replace("(100%)", &format!("({percent}%)"));
+        assert_eq!(parse(report.as_bytes(), "text/plain").metrics.calibrated_images.is_some(), valid, "{calibrated}/{total} {percent}");
+    }
+}
 const REPORT: &str = r###"Generated with PIX4Dmapper version 4.10.0
 Quality Report
 Summary

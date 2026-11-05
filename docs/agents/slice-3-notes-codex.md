@@ -59,6 +59,71 @@ No commit, push, PR, independent review, or end-to-end workflow acceptance yet.
 
 ## Remaining
 
-Full reference adversarial test coverage, precise rounded-decimal mapper comparisons, bounded recursive
-redaction, workflow/history implementation, engine commands, full CI, peer review and PR remain.
-The mapper's displayed decimal consistency currently uses f64; qualify exact boundary cases before acceptance.
+## Workflow and peer review progress (recorded after rebase onto 6dd9e4d)
+
+- Foundation pushed as 2f67906b49e8afe389176933f88436c377e35a26; remote head verified.
+- Sent e43abbd6-5d62-4f72-abb9-832957399401 with foundation SHA and CI result.
+- Received a925e0a0-6793-4288-90ec-fcb5fd7f8b13: Claude PR #10 head 6dd9e4d,
+  accepted foundation with a nonblocking regex-cache suggestion.
+- Sent 3ebbb207-3702-4ba8-b96f-e8baada2459d: review concerns on unbounded recursion and error-value disclosure.
+- Posted review https://github.com/0bnoxide/cadcraft/pull/10#issuecomment-6633642065.
+- Sent 0bb90b40-5cc8-479b-9716-bfbc0ff1a306: review done, two boundary findings; all crate tests pass.
+- Sent c2dab293-d82c-475e-acda-fe9913c9ab7c: requested common report validation; agreed Claude may add validation-only model helper.
+- Sent b359cd60-b278-409c-a6a6-dd9ed2d81887: concrete JSONL event representation, command params and limits proposed for confirmation.
+- Confirmed temporary test: invalid rmse_x_feet string echoes synthetic credential in Mission validation error.
+- Confirmed temporary test: negative report Z RMSE gets ACCURACY.RMSE_Z PASS when checkpoint independence is established.
+- Posted addendum https://github.com/0bnoxide/cadcraft/pull/10#issuecomment-6633724402.
+- Sent 76273038-a0a7-423a-95c0-f9fc4927d79e: reproduced negative metric, engine chain test passes; awaiting validator/fix head.
+- SHA-256 dependency added only to droneqa manifest/lock, agreed by message 6431abec-e823-4f3f-9ee3-c1e666e623f2.
+- First three workflow tests and the engine command integration test passed on Windows.
+- Workflow has bounded JSONL reads, hash chain, exclusive create_new lock, durable append,
+  exact draft-hash approval, source/config recheck, and analysis recomputation on commit.
+- A crashed writer leaves its lock file. Recovery requires confirming no writer is active before
+  removing that lock; the implementation never guesses lock age or silently repairs history.
+
+## Outstanding work
+
+- Received c7bce2aa-72fb-4af1-940f-44585ae6a9c1: Claude fixes at 5522d42, common validators,
+  and explicit JSONL agreement. Rebased with local work preserved.
+- Sent 7048d63b-2f11-4126-9fc8-2e0bf51bdcf5: mandatory scanner flagged peer command test;
+  stopped source inspection and requested removal.
+- Received 201e195c-04b6-49f1-8a50-e99b636d29db: synthetic literal removed; scan-clean head 40d2c19.
+  Rebased and independently rescanned command, mission, QA and workflow successfully.
+- Added explicit qa::validate_report call and common check_shape before workflow copies.
+- Sent a2715d62-3fec-462c-996e-2f49ddc7cb57: accepted all three peer fixes at 40d2c19;
+  closure https://github.com/0bnoxide/cadcraft/pull/10#issuecomment-6633972444.
+- Sent cf7079c0-7f12-4ccd-8cd0-ff99c982ff51: independent CLI chain passed, five workflow tests pass.
+- Final coverage adds malformed report and nested-input rejection before persistence.
+- Mapper percentage agreement now uses exact bounded integer long division, with rounding ties
+  and u64::MAX regression cases. GSD dual-unit rounding still uses f64.
+- Authenticated GitHub contributor is 0bnoxide; no people.toml entry exists. Asked once via the
+  native question panel about credit preference. No name guessed or contributor files changed.
+- Combined-head full host CI passed all seven steps (fmt, clippy, test, i18n, assets, layers,
+  wasm), exit code 0, with 3,595 workspace tests scheduled. Workflow ready for stacked PR.
+
+Full reference adversarial test coverage, exact decimal GSD dual-unit boundary qualification,
+independent workflow review and exact message delivery timestamps remain. No merge is authorized.
+
+## Local command examples
+
+- Received 75b576c7-d0b0-4029-9c8c-e6c6e71ba552: Claude accepted f69a659, independently
+  ran PASS CLI chain and adversarial cases; no blockers. Requested stale-lock guidance and
+  consistent null content_type defaulting. Both fixed, with null-default engine regression.
+- Stale locks remain fail-closed; no PID/age-based automatic deletion was added because it can
+  release a live writer's lock. The error now explains verified manual recovery.
+- Sent ccf6a389-6627-41ce-8904-338141408bb8: both fixes implemented; full CI pending before push.
+- Review-fix CI passed all seven gates on Windows; source/notes secret scans pass.
+
+- Workflow pushed as f69a6590796e42e7904c7471c920d81578754843; remote exact head verified.
+- PR #11 opened against slice3/claude-qa: https://github.com/0bnoxide/cadcraft/pull/11.
+- Sent 42b3e205-35fb-43e5-a2ac-a5115ef63e71: PR up, exact head, seven green gates,
+  requested independent review and CLI chain. This handoff log row is local pending follow-up.
+
+`pix4dimport` takes exactly one of `text` or `path`, plus optional `content_type` (text/plain).
+Its output is the `report` parameter accepted by `droneqa` and `qareview`.
+`qareview` always takes `history`, an explicit JSONL sidecar path. Draft also takes the same
+mission/ruleset/report or report_text/sensitive_fields inputs as droneqa. Its event returns
+`draft_id`, `draft_hash` and the redacted draft. Review requires that id, `expected_draft_hash`,
+`decision` (APPROVED or REJECTED), `reviewer` and `note`. Commit requires the id/hash, a nonempty
+note and the original draft inputs to recompute source/configuration identity. History returns
+all immutable events. Commit records only local approval; it never writes to AGOL.
