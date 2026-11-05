@@ -64,3 +64,46 @@ fn crossing_planes_split_cut_and_fill_and_partial_coverage_is_skipped() {
     assert_eq!(partial.total.skipped_area, 50.);
     assert!((partial.total.fill - 100.).abs() < 1e-9);
 }
+
+#[test]
+fn tiny_projected_boundary_and_hole_keep_their_area() {
+    let (x, y, size) = (500_000., 4_000_000., 0.01);
+    let ring = vec![[x, y], [x + size, y], [x + size, y + size], [x, y + size]];
+    let base = Tin { vertices: ring.iter().map(|&[x, y]| [x, y, 0.]).collect(), triangles: vec![[0, 1, 2], [0, 2, 3]] };
+    let mut other = base.clone();
+    for p in &mut other.vertices {
+        p[2] = 2.;
+    }
+    let region = Region { outer: ring, holes: vec![] };
+    let full = volume::calculate(&base, &other, std::slice::from_ref(&region), 0.001).unwrap();
+    assert!((full.total.covered_area - size * size).abs() < 1e-10);
+    let mut hole = region;
+    hole.holes.push(vec![[x + 0.004, y + 0.004], [x + 0.006, y + 0.004], [x + 0.006, y + 0.006], [x + 0.004, y + 0.006]]);
+    let report = volume::calculate(&base, &other, &[hole], 0.001).unwrap();
+    assert!((report.total.covered_area - 0.000096).abs() < 1e-10);
+    assert!((report.total.fill - 0.000192).abs() < 1e-10);
+}
+
+#[test]
+fn ordinary_site_grid_does_not_require_scanning_every_face_for_every_cell() {
+    let mut base = Tin::default();
+    for y in 0..26 {
+        for x in 0..26 {
+            base.vertices.push([f64::from(x) * 4., f64::from(y) * 4., 0.]);
+        }
+    }
+    for y in 0..25u32 {
+        for x in 0..25u32 {
+            let i = y * 26 + x;
+            base.triangles.extend([[i, i + 1, i + 27], [i, i + 27, i + 26]]);
+        }
+    }
+    let mut other = base.clone();
+    for p in &mut other.vertices {
+        p[2] = 5.;
+    }
+    let r = Region { outer: vec![[0., 0.], [100., 0.], [100., 100.], [0., 100.]], holes: vec![] };
+    let report = volume::calculate(&base, &other, &[r], 1.).unwrap();
+    assert_eq!(report.total.covered_area, 10000.);
+    assert!((report.total.fill - 50000.).abs() < 1e-8);
+}

@@ -95,22 +95,22 @@ fn run_volume(s: &mut Session, p: &Value) -> Result<Value> {
         .map(|(i, r)| {
             vec![
                 (i + 1).to_string(),
-                r.covered_area.to_string(),
-                r.skipped_area.to_string(),
-                r.cut.to_string(),
-                r.fill.to_string(),
-                r.net.to_string(),
+                format!("{:.3}", r.covered_area),
+                format!("{:.3}", r.skipped_area),
+                format!("{:.3}", r.cut),
+                format!("{:.3}", r.fill),
+                format!("{:.3}", r.net),
             ]
         })
         .collect();
     let total = &report.total;
     cells.push(vec![
         "Total".into(),
-        total.covered_area.to_string(),
-        total.skipped_area.to_string(),
-        total.cut.to_string(),
-        total.fill.to_string(),
-        total.net.to_string(),
+        format!("{:.3}", total.covered_area),
+        format!("{:.3}", total.skipped_area),
+        format!("{:.3}", total.cut),
+        format!("{:.3}", total.fill),
+        format!("{:.3}", total.net),
     ]);
     let table_handle = if let Some(at) = at {
         let table = super::table::make_table(
@@ -129,7 +129,7 @@ fn run_volume(s: &mut Session, p: &Value) -> Result<Value> {
         None
     };
     Ok(
-        json!({"receipt":{"check":"volume","version":1,"inputs":{"base":base_handle.hex(),"comparison":other_handle.hex(),"method":"midpoint_grid","boundary":p.get("boundary").cloned().unwrap_or(Value::Null).to_string(),"regions":regions.len().to_string()},"thresholds":{"cell_size":spacing},"counts":{"regions":regions.len(),"samples":total.samples,"issues":0,"errors":0,"warnings":0}},"method":"midpoint_grid","approximation":"Boundary and cut/fill zero-crossing cells use midpoint sampling; refine cell_size to assess convergence.","cell_size":spacing,"regions":report.regions.iter().map(quantities).collect::<Vec<_>>(),"total":quantities(total),"columns":columns,"rows":cells,"table_handle":table_handle}),
+        json!({"receipt":{"check":"volume","version":1,"inputs":{"base":base_handle.hex(),"comparison":other_handle.hex(),"method":"midpoint_grid","boundary":p.get("boundary").and_then(Value::as_str).unwrap_or("none"),"regions":regions.len().to_string()},"thresholds":{"cell_size":spacing},"counts":{"regions":regions.len(),"samples":total.samples,"issues":0,"errors":0,"warnings":0}},"method":"midpoint_grid","approximation":"Boundary and cut/fill zero-crossing cells use midpoint sampling; refine cell_size to assess convergence.","cell_size":spacing,"regions":report.regions.iter().map(quantities).collect::<Vec<_>>(),"total":quantities(total),"columns":columns,"rows":cells,"table_handle":table_handle}),
     )
 }
 
@@ -161,9 +161,7 @@ fn run_groundwater(s: &mut Session, p: &Value) -> Result<Value> {
         radius: size_param(id, p, "radius", false)?,
         max_neighbors,
     };
-    let gradient = interpolate::fit_plane_gradient(&wells)
-        .map_err(|e| bad(id, e.to_string()))?
-        .ok_or_else(|| bad(id, "at least three distinct noncollinear wells with nonzero plane gradient required"))?;
+    let gradient = interpolate::fit_plane_gradient(&wells).map_err(|e| bad(id, e.to_string()))?;
     let mut lo = [f64::INFINITY; 2];
     let mut hi = [f64::NEG_INFINITY; 2];
     let mut center = [0.; 3];
@@ -189,12 +187,24 @@ fn run_groundwater(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad(id, "no covered grid cells; use a smaller cell_size"));
     }
     let paths = contour::contours(&tin, interval, index_every).map_err(|e| bad(id, e.to_string()))?;
+    let mut warnings = Vec::new();
+    if gradient.is_none() {
+        warnings.push(json!({"code":"GW-FLOW-UNDEFINED","message":"Plane gradient is flat or degenerate; contours retained, no flow arrow."}));
+    }
+    let sigma = (wells.iter().map(|p| (p[2] - center[2]).powi(2) / wells.len() as f64).sum::<f64>()).sqrt();
+    if sigma > 0. {
+        for (i, p) in wells.iter().enumerate() {
+            let score = (p[2] - center[2]).abs() / sigma;
+            if score > 3. {
+                warnings.push(json!({"code":"GW-LEVEL-OUTLIER","well":i,"z_score":score,"message":"Water level exceeds three population standard deviations; review before use."}));
+            }
+        }
+    }
     let count = paths.len();
     let mut handles = Vec::new();
     let mut drawing = s.doc()?.clone();
     let space = s.space();
     drawing.ensure_layer("C-GW-DRAFT");
-    drawing.ensure_layer("C-GW-FLOW-DRAFT");
     for path in paths {
         let points = path.points.into_iter().map(|[x, y, z]| Vec3::new(x, y, z)).collect();
         handles.push(
@@ -207,23 +217,32 @@ fn run_groundwater(s: &mut Session, p: &Value) -> Result<Value> {
                 .hex(),
         );
     }
-    let length = extent * 0.15;
-    let [gx, gy] = gradient.downhill;
-    let mag = gradient.magnitude;
-    let start = Vec3::new(center[0], center[1], center[2]);
-    let end = Vec3::new(start.x + length * gx / mag, start.y + length * gy / mag, start.z);
-    let side = Vec2::new(-gy / mag, gx / mag) * length * 0.08;
-    let back = Vec3::new(end.x - length * 0.2 * gx / mag, end.y - length * 0.2 * gy / mag, end.z);
-    let points = vec![start, end, Vec3::new(back.x + side.x, back.y + side.y, back.z), end, Vec3::new(back.x - side.x, back.y - side.y, back.z)];
-    let arrow = drawing.add(
-        &space,
-        Common { layer: "C-GW-FLOW-DRAFT".into(), ..Default::default() },
-        EntityKind::Polyline3d(Polyline3d { points, closed: false }),
-    )?;
+    let (arrow, gradient_json) = if let Some(gradient) = gradient {
+        drawing.ensure_layer("C-GW-FLOW-DRAFT");
+        let length = extent * 0.15;
+        let [gx, gy] = gradient.downhill;
+        let mag = gradient.magnitude;
+        let start = Vec3::new(center[0], center[1], center[2]);
+        let end = Vec3::new(start.x + length * gx / mag, start.y + length * gy / mag, start.z);
+        let side = Vec2::new(-gy / mag, gx / mag) * length * 0.08;
+        let back = Vec3::new(end.x - length * 0.2 * gx / mag, end.y - length * 0.2 * gy / mag, end.z);
+        let points = vec![start, end, Vec3::new(back.x + side.x, back.y + side.y, back.z), end, Vec3::new(back.x - side.x, back.y - side.y, back.z)];
+        let arrow = drawing.add(
+            &space,
+            Common { layer: "C-GW-FLOW-DRAFT".into(), ..Default::default() },
+            EntityKind::Polyline3d(Polyline3d { points, closed: false }),
+        )?;
+        (
+            Some(arrow.hex()),
+            json!({"downhill":gradient.downhill,"magnitude":gradient.magnitude,"azimuth":gradient.azimuth,"r_squared":gradient.r_squared}),
+        )
+    } else {
+        (None, Value::Null)
+    };
     *s.doc_mut()? = drawing;
     s.echo(format!("Created {count} DRAFT groundwater contours; review before use."));
     Ok(
-        json!({"handles":handles,"contours":count,"flow_arrow":arrow.hex(),"review_status":"DRAFT","gradient":{"downhill":gradient.downhill,"magnitude":gradient.magnitude,"azimuth":gradient.azimuth,"r_squared":gradient.r_squared},"cell_size":spacing,"grid_nodes":grid.values.len()}),
+        json!({"handles":handles,"contours":count,"flow_arrow":arrow,"review_status":"DRAFT","gradient":gradient_json,"warnings":warnings,"cell_size":spacing,"grid_nodes":grid.values.len()}),
     )
 }
 
@@ -261,5 +280,18 @@ mod tests {
         assert_eq!(s.doc().unwrap(), &before);
         assert!(s.execute("gwcontour", &json!({"wells":[[0,0,0],[1,1,1],[2,2,2]]})).is_err());
         assert_eq!(s.doc().unwrap(), &before);
+    }
+
+    #[test]
+    fn groundwater_mound_contours_without_a_flow_arrow_and_reports_outliers() {
+        let mut s = Session::new();
+        let v = s.execute("gwcontour", &json!({"wells":[[0,0,10],[10,0,10],[10,10,10],[0,10,10],[5,5,15]],"cell_size":1})).unwrap();
+        assert!(v["contours"].as_u64().unwrap() > 0);
+        assert!(v["flow_arrow"].is_null());
+        assert!(v["gradient"].is_null());
+        assert!(v["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "GW-FLOW-UNDEFINED"));
+        let wells: Vec<_> = (0..16).map(|i| json!([i % 4, i / 4, if i == 5 { 100 } else { 0 }])).collect();
+        let v = s.execute("gwcontour", &json!({"wells":wells,"cell_size":0.5,"interval":10})).unwrap();
+        assert!(v["warnings"].as_array().unwrap().iter().any(|w| w["code"] == "GW-LEVEL-OUTLIER" && w["well"] == 5));
     }
 }

@@ -55,3 +55,20 @@ Final feature gate: cargo xtask ci all seven passed (slice5-ci-final.log); host 
 - Rendering correction: initial regeneration attempt under host PowerShell used incompatible native quoting; retry under the normal shell succeeded, final narrower table PNG inspected. No product code issue.
 
 All approximate timestamps in earlier message log are minute-level; immutable message IDs identify actual exchanges. Latest PR/review notification rows are recorded separately in the PR if they occur after this notes commit, to keep the reviewed code head stable.
+
+## Publication and final review log
+- 2026-11-05 UTC outgoing9bda5667: PR19 https://github.com/0bnoxide/cadcraft/pull/19 head6584e52, base slice5/claude-audit, requested full reciprocal review and independent CLI chain; supplied all7 gate and3653-test evidence. Corrected Claude snapshot send count to6.
+- Published head6584e52 verified through GitHub API; only6 owned files. Main remains2e12603ab30a5fc902553db548af11d0b6848790. No merge.
+
+## Review corrections (2026-11-05 UTC)
+- Automated review4478013023 found projected-coordinate shoelace cancellation. Reproduced failure on0.01-square at500000,4000000; centered each ring at its first vertex. Tiny boundary and tiny-hole regression now passes.
+- Incominga72756d0: Claude requested changes on6584e52: retain contours without plane gradient, improve ordinary-site volume work, receipt strings/table decimals, optional3sigma warning and collinear IDW claim.
+- Outgoingfbf60ee1: acknowledged automated cancellation fix. Outgoing1c5121b1: proposed revised absent-gradient contract and triangle-bbox sampling; incoming15cd81cb AGREED before dependent changes.
+- Groundwater contract amendment: noncollinear flat/mound wells contour normally; missing gradient/arrow are null with GW-FLOW-UNDEFINED warning. Collinear wells explicitly fail for both interpolation methods. Added GW-LEVEL-OUTLIER population-z-score warning above3sigma, using the reference behavior.
+- Volume triangle bounding boxes select spatially binned regular-grid samples; barycentric interpolation still reuses compare::elevations on each local face. Global bounded work/cell caps remain, without silently coarsening. Regression: two1250-face TINs over100x100, cell1, covered10000/fill50000 succeeds.
+- Receipt boundary is a plain supplied hex string or none. Table numbers use3decimal places; quantity JSON retains full precision.
+- New regressions were observed failing before fixes; all6volume and6interpolation tests now pass. Engine mound/outlier test and full gate pending.
+
+Outgoing8abc7a31: all review fixes implemented and15 targeted tests pass; requested re-review after full gate. Engine mound/outlier regression passed. Initial correction gate stopped on cloned_ref_to_slice_refs in new test; changed to slice::from_ref; rerun in progress.
+
+Reviewed-fix gate: cargo xtask ci all7 passed,3657 tests passed with28existing skips (target/slice5-ci-reviewed-final.log). Live mound CLI exits0 with7contours, null gradient/arrow and warning; rendered PNG inspected. All review changes remain in the same6owned files.

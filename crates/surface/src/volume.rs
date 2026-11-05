@@ -3,6 +3,7 @@
 //! (see `docs/agents/slice-5-analysis.md`).
 
 use crate::{Region, Tin, compare};
+use std::collections::HashMap;
 
 pub const MAX_CELLS: usize = 1_000_000;
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -49,11 +50,14 @@ fn valid_region(region: &Region) -> bool {
     let mut segments = Vec::new();
     for (r, ring) in rings.iter().enumerate() {
         let mut area = 0.;
+        let Some(&origin) = ring.first() else {
+            return false;
+        };
         for (i, (&a, &b)) in ring.iter().zip(ring.iter().cycle().skip(1)).enumerate() {
             if a == b || a.iter().chain(b.iter()).any(|n| n.abs() > 1e50) {
                 return false;
             }
-            area += a[0] * b[1] - b[0] * a[1];
+            area += cross(origin, a, b);
             segments.push((r, i, a, b));
         }
         if area == 0. || !area.is_finite() {
@@ -91,6 +95,81 @@ fn valid_region(region: &Region) -> bool {
         }
     }
     true
+}
+
+/// Bin regular-grid queries so each face samples only the cells in its XY bounding box.
+fn sampled(tin: &Tin, points: &[[f64; 2]], bounds: [[f64; 2]; 2], step: f64, work: &mut usize) -> Result<Vec<Option<f64>>, VolumeError> {
+    let spend = |work: &mut usize, n: usize| -> Result<(), VolumeError> {
+        *work = work.checked_sub(n).ok_or(VolumeError("volume sampling work limit exceeded"))?;
+        Ok(())
+    };
+    spend(work, tin.triangles.len())?;
+    compare::elevations(tin, &[]).map_err(|e| VolumeError(e.0))?;
+    let [lo, hi] = bounds;
+    let tile = |p: [f64; 2]| -> Result<(usize, usize), VolumeError> {
+        let x = ((p[0] - lo[0]) / step).floor();
+        let y = ((p[1] - lo[1]) / step).floor();
+        if !x.is_finite() || !y.is_finite() || x < 0. || y < 0. || x > MAX_CELLS as f64 || y > MAX_CELLS as f64 {
+            return Err(VolumeError("invalid sample tile"));
+        }
+        Ok((x as usize, y as usize))
+    };
+    let mut bins: HashMap<(usize, usize), Vec<usize>> = HashMap::new();
+    for (i, &p) in points.iter().enumerate() {
+        bins.entry(tile(p)?).or_default().push(i);
+    }
+    let mut out = vec![None; points.len()];
+    for face in &tin.triangles {
+        let mut vertices = Vec::with_capacity(3);
+        for &i in face {
+            vertices.push(*tin.vertices.get(i as usize).ok_or(VolumeError("invalid triangle index"))?);
+        }
+        let mut a = [f64::INFINITY; 2];
+        let mut b = [f64::NEG_INFINITY; 2];
+        for &[x, y, _] in &vertices {
+            a[0] = a[0].min(x);
+            a[1] = a[1].min(y);
+            b[0] = b[0].max(x);
+            b[1] = b[1].max(y);
+        }
+        // Preserve compare's 1e-9 edge-distance tolerance at tile boundaries.
+        for axis in 0..2 {
+            a[axis] = (a[axis] - 1e-9).max(lo[axis]);
+            b[axis] = (b[axis] + 1e-9).min(hi[axis]);
+        }
+        if a[0] > b[0] || a[1] > b[1] {
+            continue;
+        }
+        let (x0, y0) = tile(a)?;
+        let (x1, y1) = tile(b)?;
+        let count = (x1 - x0 + 1).checked_mul(y1 - y0 + 1).ok_or(VolumeError("sample tile count overflow"))?;
+        spend(work, count)?;
+        let mut indices = Vec::new();
+        let mut queries = Vec::new();
+        for y in y0..=y1 {
+            for x in x0..=x1 {
+                if let Some(bucket) = bins.get(&(x, y)) {
+                    spend(work, bucket.len())?;
+                    for &i in bucket {
+                        if out.get(i).is_some_and(Option::is_none) {
+                            queries.push(*points.get(i).ok_or(VolumeError("invalid query index"))?);
+                            indices.push(i);
+                        }
+                    }
+                }
+            }
+        }
+        if !queries.is_empty() {
+            let local = Tin { vertices, triangles: vec![[0, 1, 2]] };
+            let heights = compare::elevations(&local, &queries).map_err(|e| VolumeError(e.0))?;
+            for (i, z) in indices.into_iter().zip(heights) {
+                if let Some(slot) = out.get_mut(i) {
+                    *slot = z;
+                }
+            }
+        }
+    }
+    Ok(out)
 }
 
 /// Midpoint integration; boundary and zero-crossing cells are approximate. No zero filling.
@@ -144,16 +223,8 @@ pub fn calculate(base: &Tin, other: &Tin, regions: &[Region], cell_size: f64) ->
                 }
             }
         }
-        let visits = base
-            .triangles
-            .len()
-            .checked_add(other.triangles.len())
-            .and_then(|n| n.checked_mul(points.len().max(1)))
-            .filter(|&n| n <= work_left)
-            .ok_or(VolumeError("volume face/sample work limit exceeded"))?;
-        work_left -= visits;
-        let a = compare::elevations(base, &points).map_err(|e| VolumeError(e.0))?;
-        let b = compare::elevations(other, &points).map_err(|e| VolumeError(e.0))?;
+        let a = sampled(base, &points, [lo, hi], cell_size, &mut work_left)?;
+        let b = sampled(other, &points, [lo, hi], cell_size, &mut work_left)?;
         let mut row = Quantities::default();
         for ((a, b), area) in a.into_iter().zip(b).zip(areas) {
             row.requested_area += area;

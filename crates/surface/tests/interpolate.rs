@@ -64,3 +64,12 @@ fn grid_preserves_missing_nodes_and_tin_interpolation_preserves_topology() {
     assert!(interpolate::grid_tin(&missing).unwrap().triangles.is_empty());
     assert!(interpolate::grid(&wells(), [[0., 0.], [10., 10.]], 1e-50, &Options::default()).is_err());
 }
+
+#[test]
+fn collinear_wells_are_explicitly_rejected_for_both_methods() {
+    for method in [Method::Idw, Method::NaturalNeighbor] {
+        assert!(
+            interpolate::at_points(&[[0., 0., 0.], [1., 1., 1.], [2., 2., 2.]], &[[0.5, 0.5]], &Options { method, ..Options::default() }).is_err()
+        );
+    }
+}

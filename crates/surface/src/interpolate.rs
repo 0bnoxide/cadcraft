@@ -137,8 +137,8 @@ pub fn at_points(wells: &[[f64; 3]], queries: &[[f64; 2]], options: &Options) ->
         }
         heights.push(z);
     }
-    if options.method == Method::NaturalNeighbor && dt.num_inner_faces() == 0 {
-        return Err(InterpolationError("natural neighbour requires noncollinear wells"));
+    if dt.num_inner_faces() == 0 {
+        return Err(InterpolationError("interpolation requires noncollinear wells"));
     }
     let nn = dt.natural_neighbor();
     let mut weights = Vec::new();
