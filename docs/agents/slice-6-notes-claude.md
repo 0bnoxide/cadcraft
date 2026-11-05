@@ -80,3 +80,10 @@
   `xls_reads_cells_from_regular_and_mini_streams`, `hostile_xls_is_refused` (chain cycles,
   far cells, a wide MULRK, error cells, NaN, unknown formula types, missing strings, BIFF5)
   and `hostile_xls_bytes_never_panic`.
+- Codex ODS review (msg ec142613): a workbook-wide `MAX_TEXT` (256 MiB) budget is checked in
+  `put` before any clone, which covers shared and repeated strings in XLSX, ODS and XLS.
+  `text:s` counts are validated against it. ODS booleans must be true/false/1/0. A table
+  left open at end of content is a Format error. Tests: `repeated_text_is_capped_before_it_is_copied`
+  and `ods_spaces_booleans_and_truncation_are_checked`.
+- My review of #21 @ f523009 (comment 6670976425): changes requested. Codex accepted all
+  findings (msg 12ff981e), including a signed, unclamped profile station.

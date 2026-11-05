@@ -18,6 +18,8 @@ pub const MAX_ROWS: usize = 100_000;
 pub const MAX_COLS: usize = 512;
 /// Most cells across a whole workbook.
 pub const MAX_CELLS: usize = 2_000_000;
+/// Most text bytes across a whole workbook, as read.
+pub const MAX_TEXT: usize = 256 << 20;
 
 #[derive(Clone, Debug, PartialEq)]
 pub enum SheetError {
@@ -132,23 +134,40 @@ fn far_cell(sheet: &str, row: u64, col: u64) -> SheetError {
     too_large(&format!("sheet {sheet:?} has a cell at {at} past the row or column cap"))
 }
 
+/// What one workbook may hold once read: cells (padding included) and text bytes. Text is
+/// counted as it is stored, so shared or repeated strings can't multiply past the cap.
+#[derive(Default)]
+struct Budget {
+    cells: usize,
+    text: usize,
+}
+
 /// Store a non-empty cell at a position already checked against [`MAX_ROWS`] and
-/// [`MAX_COLS`], padding the row with `Empty`. Padding counts toward `cells`, since the table
-/// really holds it.
-fn put(rows: &mut Vec<Vec<Cell>>, cells: &mut usize, r: usize, c: usize, value: Cell) -> Result<(), SheetError> {
+/// [`MAX_COLS`], padding the row with `Empty`. Both caps are checked before anything is
+/// allocated or cloned; overwritten text stays counted.
+fn put(rows: &mut Vec<Vec<Cell>>, budget: &mut Budget, r: usize, c: usize, value: &Cell) -> Result<(), SheetError> {
+    if let Cell::Text(t) = value {
+        budget.text = budget.text.saturating_add(t.len());
+        if budget.text > MAX_TEXT {
+            return Err(too_large("more than 256 MiB of text"));
+        }
+    }
+    let width = rows.get(r).map_or(0, Vec::len);
+    if width <= c {
+        budget.cells = budget.cells.saturating_add(c + 1 - width);
+        if budget.cells > MAX_CELLS {
+            return Err(too_large("more than 2,000,000 cells"));
+        }
+    }
     if rows.len() <= r {
         rows.resize_with(r + 1, Vec::new);
     }
     let Some(row) = rows.get_mut(r) else { return Ok(()) };
     if row.len() <= c {
-        *cells = cells.saturating_add(c + 1 - row.len());
-        if *cells > MAX_CELLS {
-            return Err(too_large("more than 2,000,000 cells"));
-        }
         row.resize(c + 1, Cell::Empty);
     }
     if let Some(slot) = row.get_mut(c) {
-        *slot = value;
+        *slot = value.clone();
     }
     Ok(())
 }
@@ -159,7 +178,7 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
     use calamine::{DataRef, Reader, Xlsx};
     let fmt_err = |e: calamine::XlsxError| SheetError::Format(e.to_string());
     let mut book: Xlsx<_> = Xlsx::new(Cursor::new(bytes)).map_err(fmt_err)?;
-    let mut cells = 0usize;
+    let mut budget = Budget::default();
     let mut out = Vec::new();
     for name in book.sheet_names() {
         let mut rows: Vec<Vec<Cell>> = Vec::new();
@@ -189,7 +208,7 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
             if value == Cell::Empty {
                 continue;
             }
-            put(&mut rows, &mut cells, ri, ci, value)?;
+            put(&mut rows, &mut budget, ri, ci, &value)?;
         }
         out.push(Table { name, rows });
     }
@@ -224,18 +243,26 @@ struct OdsCell {
     paragraphs: usize,
 }
 
+fn ods_at(row: u64, col: u64) -> String {
+    u32::try_from(row).ok().zip(u32::try_from(col).ok()).map_or_else(|| format!("row {row} column {col}"), |(r, c)| cell_ref(r, c))
+}
+
 /// The typed value an ODS cell's attributes give, if any.
 fn ods_value(e: &quick_xml::events::BytesStart, row: u64, col: u64) -> Result<Option<Cell>, SheetError> {
     Ok(match attr(e, b"value-type")?.as_deref() {
         Some("float" | "percentage" | "currency") => {
             let v = attr(e, b"value")?.unwrap_or_default();
-            let n = v.trim().parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(|| {
-                let at = u32::try_from(row).ok().zip(u32::try_from(col).ok()).map_or(String::new(), |(r, c)| cell_ref(r, c));
-                SheetError::Format(format!("cell {at} has the number value {v:?}, which is not a finite number"))
-            })?;
+            let n =
+                v.trim().parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(|| {
+                    SheetError::Format(format!("cell {} has the number value {v:?}, which is not a finite number", ods_at(row, col)))
+                })?;
             Some(Cell::Number(n))
         }
-        Some("boolean") => Some(Cell::Bool(attr(e, b"boolean-value")?.is_some_and(|v| v.trim() == "true"))),
+        Some("boolean") => match attr(e, b"boolean-value")?.as_deref().map(str::trim) {
+            Some("true" | "1") => Some(Cell::Bool(true)),
+            Some("false" | "0") => Some(Cell::Bool(false)),
+            v => return Err(SheetError::Format(format!("cell {} has the boolean value {v:?}", ods_at(row, col)))),
+        },
         Some("date") => attr(e, b"date-value")?.map(Cell::Text),
         Some("time") => attr(e, b"time-value")?.map(Cell::Text),
         Some("string") => attr(e, b"string-value")?.map(Cell::Text),
@@ -257,7 +284,7 @@ fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
     let mut buf = Vec::new();
     let mut skip = Vec::new();
     let mut out = Vec::new();
-    let mut cells = 0usize;
+    let mut budget = Budget::default();
     // The open table, the position in it, the open row's repeat and values, the open cell.
     let mut table: Option<Table> = None;
     let (mut row, mut col, mut row_repeat) = (0u64, 0u64, 1u64);
@@ -300,8 +327,13 @@ fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     }
                     b"s" => {
                         if let Some(c) = cell.as_mut() {
-                            // shortcut: a run of spaces is capped at 1,024; raise it if real text needs more.
-                            let n = attr(e, b"c")?.and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).min(1024);
+                            let n = match attr(e, b"c")? {
+                                None => 1,
+                                Some(v) => v.trim().parse::<usize>().map_err(|_| SheetError::Format(format!("bad space count {v:?}")))?,
+                            };
+                            if c.text.len().saturating_add(n) > MAX_TEXT {
+                                return Err(too_large("more than 256 MiB of text"));
+                            }
                             c.text.extend(std::iter::repeat_n(' ', n));
                         }
                     }
@@ -335,7 +367,12 @@ fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     c.text.extend(ch);
                 }
             }
-            Event::Eof => break,
+            Event::Eof => {
+                if table.is_some() || cell.is_some() {
+                    return Err(SheetError::Format("ODS content ends inside a table".into()));
+                }
+                break;
+            }
             _ => {}
         }
         match ended.as_deref() {
@@ -365,7 +402,7 @@ fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     for r in row..row + row_repeat {
                         for (c0, n, v) in &row_values {
                             for c in *c0..*c0 + *n {
-                                put(&mut t.rows, &mut cells, r as usize, c as usize, v.clone())?;
+                                put(&mut t.rows, &mut budget, r as usize, c as usize, v)?;
                             }
                         }
                     }
@@ -612,7 +649,7 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
         }
         pos = next;
     }
-    let mut cells = 0usize;
+    let mut budget = Budget::default();
     let mut out = Vec::new();
     for (name, start) in sheets {
         let mut rows: Vec<Vec<Cell>> = Vec::new();
@@ -625,7 +662,7 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
             match v {
                 Cell::Number(n) if !n.is_finite() => Err(bad(format!("sheet {name:?} cell {} is not a finite number", at(r, c)))),
                 Cell::Empty => Ok(()),
-                v => put(rows, &mut cells, ri, ci, v),
+                v => put(rows, &mut budget, ri, ci, &v),
             }
         };
         let (mut pos, mut depth, mut formula_at) = (start, 0usize, None);

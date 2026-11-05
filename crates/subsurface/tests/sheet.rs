@@ -522,3 +522,29 @@ fn hostile_xls_bytes_never_panic() {
         }
     }
 }
+
+#[test]
+fn repeated_text_is_capped_before_it_is_copied() {
+    let big = "x".repeat(300_000);
+    let wb = ods(&format!(
+        r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="2"><table:table-cell office:value-type="string" table:number-columns-repeated="512"><text:p>{big}</text:p></table:table-cell></table:table-row></table:table>"#
+    ));
+    assert!(matches!(sheet::read(&wb, "t.ods"), Err(SheetError::TooLarge(m)) if m.contains("text")));
+}
+
+#[test]
+fn ods_spaces_booleans_and_truncation_are_checked() {
+    let cell = |inner: &str| ods(&format!(r#"<table:table table:name="s"><table:table-row>{inner}</table:table-row></table:table>"#));
+    let huge = cell(r#"<table:table-cell office:value-type="string"><text:p>a<text:s text:c="999999999999"/></text:p></table:table-cell>"#);
+    assert!(matches!(sheet::read(&huge, "s.ods"), Err(SheetError::TooLarge(_))));
+    let bad = cell(r#"<table:table-cell office:value-type="string"><text:p>a<text:s text:c="-3"/></text:p></table:table-cell>"#);
+    assert!(matches!(sheet::read(&bad, "s.ods"), Err(SheetError::Format(_))));
+    let yes = cell(r#"<table:table-cell office:value-type="boolean" office:boolean-value="1"/>"#);
+    assert_eq!(sheet::read(&yes, "b.ods").unwrap()[0].rows, vec![vec![Cell::Bool(true)]]);
+    for v in [r#" office:boolean-value="maybe""#, ""] {
+        let b = cell(&format!(r#"<table:table-cell office:value-type="boolean"{v}/>"#));
+        assert!(matches!(sheet::read(&b, "b.ods"), Err(SheetError::Format(m)) if m.contains("A1")));
+    }
+    let cut = ods(r#"<table:table table:name="s"><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row>"#);
+    assert!(matches!(sheet::read(&cut, "c.ods"), Err(SheetError::Format(_))));
+}
