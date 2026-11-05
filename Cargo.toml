@@ -46,6 +46,8 @@ log = "0.4"
 # All date/time conversion goes through chrono (no hand-rolled calendar code beyond the 400-year range extension; AGENTS.md).
 chrono = { version = "0.4.45", default-features = false, features = ["std"] }
 rayon = "1"
+# User-configured attachment patterns (droneqa); Rust syntax, no lookaround or backreferences.
+regex = { version = "1", default-features = false, features = ["std", "unicode-perl"] }
 
 # rendering / formats
 tiny-skia = { version = "0.12", default-features = false, features = ["std", "simd", "png-format"] }
