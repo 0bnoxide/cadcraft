@@ -65,3 +65,21 @@ All substantive API/convention agreements above precede the first Codex implemen
 - Expanded library tests pass and 253 engine command tests pass locally; full frozen-source host CI underway before the next commit.
 - 2026-11-05T22:27Z: full host CI passed all seven gates for the review fixes and grouped aggregates (3705 tests passed, 28 skipped). Real CLI flow rerun: 13 report worksheets, no_samples for B-2, grouped count/max extraction and same table handle 13E on refresh. flow-fixed.png inspected; evidence retained in the temporary acceptance folder.
 - IN d9e042e9-3158-44cf-b22a-ea15121d69bb: final dependency f477bd7 reportedly green; sheet/row-slot/SST/formula truncation fixes, 25 sheet tests. Final exact-head review and integration rebase next.
+## Final dependency review and integration
+
+- IN d9e042e9-3158-44cf-b22a-ea15121d69bb: dependency f477bd72188ef13153417f418e7a38645c1b7889 includes row-slot/sheet caps and strict XLS text/SST/globals EOF regressions.
+- Verified PR20 live head equals that exact SHA. Feature branch rebased without conflicts; implementation commits are now fce132b and fd06c4b (the latter is the frozen source head).
+- Final isolated dependency review: 1 shared, 12 import, 25 spreadsheet tests passed. Inspected every reported fix and the agreed manifest/lock edges. Review posted with gh pr review --comment: approved within documented BIFF8/date/blank-normalization limits.
+- OUT e368feed-44f0-4594-8ce2-57fb272a2058: sent exact dependency approval and local fixed source head fd06c4b; final CI before lease-protected PR update.
+- The temporary Codex review target and detached checkout were removed after review. Other agents' worktrees and target directories were untouched.
+- Final PR21 update is requested for re-review via Paseo after its exact-head CI succeeds. Its source diff contains only the ten Codex-owned files (including three test files and this notes file); no shared or slice 4/5 files.
+
+### Operator handoff
+
+- PR21 remains stacked on PR20. Greg merges PR20 first and then retargets PR21 to main; neither agent merges or pushes main.
+- Builds use the dedicated CARGO_TARGET_DIR recorded above. Generated acceptance evidence is outside the repository at C:/Users/ichbi/AppData/Local/Temp/cadcraft-slice6-acceptance-20261105-codex.
+- BIFF8 XLS is supported; older BIFF versions fail explicitly. XLS dates stay numeric serials. XLSX blank shape is normalized (trailing blanks/empty text), with semantic values tested.
+- Approval names/signatures/dates are blank because no such fields exist in the agreed shared Boring model; the report never invents names or sign-offs.
+- No AutoCAD/native-UI qualification is claimed. Acceptance uses the real CADCraft CLI, engine regressions, workbook readback and PNG inspection.
+- 2026-11-05T22:33Z: final rebased source fd06c4b on dependency f477bd7 passed all seven cargo xtask ci gates on Windows with host access (3715 nextest tests, 28 skipped). Remaining WASM warnings are the existing ui-egui dead-code warnings only.
+- Final outbound closeout: PR21 fixes-pushed message requests Claude's re-review of the published notes-only acceptance head, with source fd06c4b unchanged; the exact receipt/head and verdict are retained in Paseo and the PR review record. Main remains 6213b702684d84230f714fe2d8756ff149c5578f.
