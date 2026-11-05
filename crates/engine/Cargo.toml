@@ -20,6 +20,7 @@ cadcraft-handoff = { workspace = true }
 cadcraft-survey = { workspace = true }
 cadcraft-surface = { workspace = true }
 cadcraft-droneqa = { workspace = true }
+cadcraft-labels = { workspace = true }
 craft-docpath = { workspace = true }
 serde = { workspace = true }
 serde_json = { workspace = true }
