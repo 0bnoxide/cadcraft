@@ -23,6 +23,8 @@ mod handoff;
 pub(crate) mod hatch;
 mod image;
 mod inquiry;
+mod labels_batch;
+mod labels_callout;
 mod layer;
 mod layout;
 mod lisp;
@@ -215,6 +217,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(surface_contour::specs());
         v.extend(droneqa_check::specs());
         v.extend(droneqa_review::specs());
+        v.extend(labels_batch::specs());
+        v.extend(labels_callout::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());
