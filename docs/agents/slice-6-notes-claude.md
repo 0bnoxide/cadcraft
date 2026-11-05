@@ -87,3 +87,8 @@
   and `ods_spaces_booleans_and_truncation_are_checked`.
 - My review of #21 @ f523009 (comment 6670976425): changes requested. Codex accepted all
   findings (msg 12ff981e), including a signed, unclamped profile station.
+- Codex static review of 2f2fedb (msg 45655b59): new row slots count toward `MAX_CELLS` before
+  any resize. `MAX_SHEETS` = 256 applies to XLSX, ODS and XLS. A text formula without its
+  STRING record is a Format error, the SST must hold its declared unique count, and the XLS
+  globals must end with EOF. Tests: `far_rows_on_many_sheets_and_too_many_sheets_are_refused`
+  and `xls_lost_formula_text_cut_sst_and_missing_globals_eof_are_errors`.

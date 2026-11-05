@@ -18,6 +18,8 @@ pub const MAX_ROWS: usize = 100_000;
 pub const MAX_COLS: usize = 512;
 /// Most cells across a whole workbook.
 pub const MAX_CELLS: usize = 2_000_000;
+/// Most sheets in one workbook.
+pub const MAX_SHEETS: usize = 256;
 /// Most text bytes across a whole workbook, as read.
 pub const MAX_TEXT: usize = 256 << 20;
 
@@ -152,12 +154,13 @@ fn put(rows: &mut Vec<Vec<Cell>>, budget: &mut Budget, r: usize, c: usize, value
             return Err(too_large("more than 256 MiB of text"));
         }
     }
+    // New row slots count like cells, so far-away rows on many sheets can't add up unseen.
+    let new_rows = (r + 1).saturating_sub(rows.len());
     let width = rows.get(r).map_or(0, Vec::len);
-    if width <= c {
-        budget.cells = budget.cells.saturating_add(c + 1 - width);
-        if budget.cells > MAX_CELLS {
-            return Err(too_large("more than 2,000,000 cells"));
-        }
+    let new_cells = (c + 1).saturating_sub(width);
+    budget.cells = budget.cells.saturating_add(new_rows).saturating_add(new_cells);
+    if budget.cells > MAX_CELLS {
+        return Err(too_large("more than 2,000,000 cells"));
     }
     if rows.len() <= r {
         rows.resize_with(r + 1, Vec::new);
@@ -180,7 +183,11 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
     let mut book: Xlsx<_> = Xlsx::new(Cursor::new(bytes)).map_err(fmt_err)?;
     let mut budget = Budget::default();
     let mut out = Vec::new();
-    for name in book.sheet_names() {
+    let names = book.sheet_names();
+    if names.len() > MAX_SHEETS {
+        return Err(too_large(&format!("more than {MAX_SHEETS} sheets")));
+    }
+    for name in names {
         let mut rows: Vec<Vec<Cell>> = Vec::new();
         let mut reader = book.worksheet_cells_reader(&name).map_err(fmt_err)?;
         while let Some(cell) = reader.next_cell().map_err(fmt_err)? {
@@ -300,6 +307,9 @@ fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                 let local = e.local_name().as_ref().as_bytes().to_vec();
                 match local.as_slice() {
                     b"table" => {
+                        if out.len() >= MAX_SHEETS {
+                            return Err(too_large(&format!("more than {MAX_SHEETS} sheets")));
+                        }
                         table = Some(Table { name: attr(e, b"name")?.unwrap_or_default(), rows: Vec::new() });
                         row = 0;
                     }
@@ -613,6 +623,7 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
     let mut sheets: Vec<(String, usize)> = Vec::new();
     let mut strings: Vec<String> = Vec::new();
     let mut pos = 0;
+    let mut ended = false;
     while let Some((typ, d, next)) = biff_record(&s, pos) {
         match typ {
             0x0085 if d.get(5) == Some(&0) => {
@@ -623,6 +634,9 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     let high = seg.byte()? & 1 != 0;
                     seg.chars(cch, high)
                 });
+                if sheets.len() >= MAX_SHEETS {
+                    return Err(SheetError::TooLarge(format!("more than {MAX_SHEETS} sheets")));
+                }
                 sheets.push((name.ok_or_else(|| bad("bad sheet name".into()))?, at));
             }
             0x00FC => {
@@ -633,8 +647,11 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     p = n;
                 }
                 let mut seg = Segments { segs, i: 0, at: 0 };
-                seg.skip(8).ok_or_else(|| bad("short string table".into()))?;
-                while let Some(cch) = seg.u16() {
+                let unique = seg.skip(4).and_then(|_| seg.u32()).ok_or_else(|| bad("short string table".into()))?;
+                // Exactly the declared count; each string reads at least 3 bytes, so a hostile
+                // count runs out of data instead of looping.
+                for _ in 0..unique {
+                    let cch = seg.u16().ok_or_else(|| bad("string table ends before its declared count".into()))?;
                     let flags = seg.byte().ok_or_else(|| bad("cut string table".into()))?;
                     let runs = if flags & 8 != 0 { seg.u16().map(usize::from) } else { Some(0) };
                     let ext = if flags & 4 != 0 { seg.u32().map(|n| n as usize) } else { Some(0) };
@@ -644,10 +661,16 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                     strings.push(text);
                 }
             }
-            0x000A => break,
+            0x000A => {
+                ended = true;
+                break;
+            }
             _ => {}
         }
         pos = next;
+    }
+    if !ended {
+        return Err(bad("XLS workbook globals end without an EOF record".into()));
     }
     let mut budget = Budget::default();
     let mut out = Vec::new();
@@ -675,6 +698,9 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
             pos = next;
             match (typ, depth) {
                 (0x0809, _) if pos - d.len() - 4 != start => depth += 1,
+                (0x000A, 0) if formula_at.is_some() => {
+                    return Err(bad(format!("sheet {name:?} has a text formula without its cached STRING")));
+                }
                 (0x000A, 0) => break,
                 (0x000A, _) => depth -= 1,
                 (_, 1..) => {}
@@ -712,7 +738,9 @@ fn read_xls(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                 }
                 (0x0006, _) => {
                     let ((r, c), v) = rc(d).zip(d.get(6..14)).ok_or_else(short)?;
-                    formula_at = None;
+                    if formula_at.is_some() {
+                        return Err(bad(format!("sheet {name:?} has a text formula without its cached STRING")));
+                    }
                     if v.get(6..8) == Some(&[0xFF, 0xFF]) {
                         match v.first() {
                             Some(0) => formula_at = Some((r, c)), // text follows in a STRING record

@@ -548,3 +548,36 @@ fn ods_spaces_booleans_and_truncation_are_checked() {
     let cut = ods(r#"<table:table table:name="s"><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row>"#);
     assert!(matches!(sheet::read(&cut, "c.ods"), Err(SheetError::Format(_))));
 }
+
+#[test]
+fn far_rows_on_many_sheets_and_too_many_sheets_are_refused() {
+    let far = r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="99998"/><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table>"#;
+    assert!(sheet::read(&ods(far), "one.ods").is_ok());
+    // Each sheet holds one counted cell but 99,999 row slots; 30 of them pass 2,000,000.
+    assert!(matches!(sheet::read(&ods(&far.repeat(30)), "rows.ods"), Err(SheetError::TooLarge(m)) if m.contains("cells")));
+    let empty = r#"<table:table table:name="e"/>"#.repeat(sheet::MAX_SHEETS + 1);
+    assert!(matches!(sheet::read(&ods(&empty), "many.ods"), Err(SheetError::TooLarge(m)) if m.contains("sheets")));
+}
+
+#[test]
+fn xls_lost_formula_text_cut_sst_and_missing_globals_eof_are_errors() {
+    let (sst, _) = sample_cells();
+    let mut f = rcx(0, 0);
+    f.extend([0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
+    f.extend([0; 6]);
+    let lone = rec(0x0006, &f);
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &lone), false), "f.xls"), Err(SheetError::Format(m)) if m.contains("STRING")));
+    let twice = [lone.clone(), lone].concat();
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &twice), false), "f.xls"), Err(SheetError::Format(m)) if m.contains("STRING")));
+
+    // An SST that declares 3 unique strings but holds 2.
+    let mut short = 3u32.to_le_bytes().to_vec();
+    short.extend(3u32.to_le_bytes());
+    short.extend([1, 0, 0, b'a', 1, 0, 0, b'b']);
+    assert!(matches!(sheet::read(&cfb(&biff(&rec(0x00FC, &short), &[]), false), "s.xls"), Err(SheetError::Format(m)) if m.contains("declared")));
+
+    // Globals cut off before their EOF: just a BOF and a sheet record pointing nowhere.
+    let mut cut = rec(0x0809, &BOF8);
+    cut.extend(rec(0x0085, &[0, 0, 0, 0, 0, 0, 1, 0, b'x']));
+    assert!(matches!(sheet::read(&cfb(&cut, false), "g.xls"), Err(SheetError::Format(m)) if m.contains("EOF")));
+}
