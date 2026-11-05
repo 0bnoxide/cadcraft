@@ -23,6 +23,8 @@ pub struct Placed {
     pub rect: Rect,
     pub overlap: f64,
     pub hits: Vec<usize>,
+    pub buffer_hits: Vec<usize>,
+    pub obstacle_hits: Vec<usize>,
 }
 
 pub fn intersection(a: Rect, b: Rect) -> f64 {
@@ -76,15 +78,24 @@ pub fn place(requests: &[Request], obstacles: &[Rect], boundary: Option<Rect>, g
                     return Err("label does not fit boundary".into());
                 }
                 if !r.locked {
-                    at.x = at.x.clamp(b.min_x, b.max_x - r.width);
-                    at.y = at.y.clamp(b.min_y, b.max_y - r.height);
+                    at.x = at.x.max(b.min_x).min((b.max_x - r.width).max(b.min_x));
+                    at.y = at.y.max(b.min_y).min((b.max_y - r.height).max(b.min_y));
                 }
             }
-            let rect = Rect::from_corner(at, r.width, r.height).ok_or("placement overflow")?;
+            let mut rect = Rect::from_corner(at, r.width, r.height).ok_or("placement overflow")?;
+            if !r.locked
+                && let Some(b) = boundary
+            {
+                // Subtraction and re-addition can exceed an edge by one ulp.
+                rect.max_x = rect.max_x.min(b.max_x);
+                rect.max_y = rect.max_y.min(b.max_y);
+            }
             if boundary.is_some_and(|b| rect.min_x < b.min_x || rect.min_y < b.min_y || rect.max_x > b.max_x || rect.max_y > b.max_y) {
                 return Err("locked label outside boundary".into());
             }
             let hits: Vec<_> = out.iter().filter(|p| intersection(rect, p.rect) > 0.0).map(|p| p.index).collect();
+            let buffer_hits = buffers.iter().enumerate().filter(|(_, b)| intersection(rect, **b) > 0.0).map(|(i, _)| i).collect();
+            let obstacle_hits = obstacles.iter().enumerate().filter(|(_, b)| intersection(rect, **b) > 0.0).map(|(i, _)| i).collect();
             let overlap = out
                 .iter()
                 .map(|p| intersection(rect, p.rect))
@@ -94,7 +105,7 @@ pub fn place(requests: &[Request], obstacles: &[Rect], boundary: Option<Rect>, g
                 return Err("collision score overflow".into());
             }
             if best.as_ref().is_none_or(|p| overlap < p.overlap) {
-                best = Some(Placed { index, rect, overlap, hits });
+                best = Some(Placed { index, rect, overlap, hits, buffer_hits, obstacle_hits });
             }
             if overlap == 0.0 {
                 break;

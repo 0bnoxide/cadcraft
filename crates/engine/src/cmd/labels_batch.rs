@@ -104,12 +104,12 @@ fn samples(s: &Session, t: &Template, p: &Value) -> Result<Vec<Sample>> {
                     }
                     continue;
                 }
-                let segments = match &e.kind {
+                let (segments, elevation) = match &e.kind {
                     EntityKind::LwPolyline(pl) => {
                         if pl.vertices.len() > MAX_LABELS {
                             return Err(bad("labelbatch", "too many polyline vertices"));
                         }
-                        Polyline { vertices: pl.vertices.clone(), closed: pl.closed }.segments()
+                        (Polyline { vertices: pl.vertices.clone(), closed: pl.closed }.segments(), pl.elevation)
                     }
                     _ => continue,
                 };
@@ -120,7 +120,7 @@ fn samples(s: &Session, t: &Template, p: &Value) -> Result<Vec<Sample>> {
                     let mut props = Props::new();
                     props.insert("length".into(), json!(seg.len()));
                     props.insert("bearing".into(), json!((b.x - a.x).atan2(b.y - a.y).to_degrees().rem_euclid(360.0)));
-                    push(format!("{}:segment:{i}", e.handle.hex()), Vec3 { x: at.x, y: at.y, z: 0.0 }, props)?;
+                    push(format!("{}:segment:{i}", e.handle.hex()), Vec3 { x: at.x, y: at.y, z: elevation }, props)?;
                 }
             }
         }
@@ -167,6 +167,9 @@ fn samples(s: &Session, t: &Template, p: &Value) -> Result<Vec<Sample>> {
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
+    if s.space() != cadcraft_doc::Space::Model {
+        return Err(bad("labelbatch", "run this command in model space"));
+    }
     if let Some(id) = p.get("delete").and_then(Value::as_str) {
         if id.is_empty() || id.len() > 64 {
             return Err(bad("labelbatch", "invalid template id"));
@@ -190,6 +193,15 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         requests.push(Request { anchor: source.at, width, height, origin: None, locked: false });
     }
     let placed = place(&requests, &[], t.boundary, t.height, 0.0).map_err(|e| bad("labelbatch", e))?;
+    let mut existing: std::collections::BTreeMap<String, Vec<Handle>> = std::collections::BTreeMap::new();
+    for e in s.doc()?.model.iter() {
+        if let Some(o) = owner(&e.common.xdata)
+            && o.template == t.id
+            && o.role == "label"
+        {
+            existing.entry(o.source).or_default().push(e.handle);
+        }
+    }
     let mut handles = Vec::new();
     let mut updated = 0;
     let mut overlaps = 0;
@@ -211,7 +223,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             EntityKind::MText(label)
         };
         let o = Owner { version: 1, template: t.id.clone(), source: source.key.clone(), role: "label".into() };
-        let matching: Vec<_> = s.doc()?.model.iter().filter(|e| owner(&e.common.xdata).as_ref() == Some(&o)).map(|e| e.handle).collect();
+        let matching = existing.remove(&source.key).unwrap_or_default();
         let h = if let Some(&h) = matching.first() {
             s.doc_mut()?.modify_entity(h, |e| e.kind = kind)?;
             for duplicate in matching.iter().skip(1) {
@@ -230,7 +242,12 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         }
         handles.push(h.hex());
     }
-    Ok(json!({"handles":handles,"updated":updated,"overlaps":overlaps}))
+    let mut deleted = 0;
+    for h in existing.into_values().flatten() {
+        s.doc_mut()?.remove_entity(h);
+        deleted += 1;
+    }
+    Ok(json!({"handles":handles,"updated":updated,"overlaps":overlaps,"deleted":deleted}))
 }
 
 #[cfg(test)]
@@ -311,5 +328,36 @@ mod source_tests {
         let rows = samples(&s, &t, &json!({})).unwrap();
         assert_eq!(rows[0].props["length"], 5.0);
         assert_eq!(rows[0].props["z"], 2.0);
+    }
+}
+
+#[cfg(test)]
+mod review_tests {
+    use super::*;
+    #[test]
+    fn vanished_sources_are_removed_and_paper_space_is_rejected() {
+        let mut s = Session::new();
+        let h = s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: Vec3 { x: 0.0, y: 0.0, z: 0.0 }, angle: 0.0 })).unwrap();
+        let p = json!({"template":{"id":"test","source":{"kind":"points"},"content":[],"height":1.0}});
+        s.execute("labelbatch", &p).unwrap();
+        s.doc_mut().unwrap().remove_entity(h);
+        assert_eq!(s.execute("labelbatch", &p).unwrap()["deleted"], 1);
+        assert!(s.doc().unwrap().model.is_empty());
+        s.state_mut().unwrap().space = cadcraft_doc::Space::Paper("Layout1".into());
+        assert!(s.execute("labelbatch", &p).is_err());
+    }
+    #[test]
+    fn lightweight_polyline_elevation_reaches_label_properties() {
+        let mut s = Session::new();
+        s.add_entity(EntityKind::LwPolyline(cadcraft_doc::LwPolyline {
+            vertices: Polyline::from_points(&[cadcraft_geom::Vec2 { x: 0.0, y: 0.0 }, cadcraft_geom::Vec2 { x: 3.0, y: 4.0 }], false).vertices,
+            closed: false,
+            const_width: 0.0,
+            elevation: 42.0,
+            plinegen: false,
+        }))
+        .unwrap();
+        let t: Template = serde_json::from_value(json!({"id":"test","source":{"kind":"segments"},"content":[],"height":1.0})).unwrap();
+        assert_eq!(samples(&s, &t, &json!({})).unwrap()[0].props["z"], 42.0);
     }
 }

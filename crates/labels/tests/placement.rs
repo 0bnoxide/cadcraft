@@ -4,6 +4,33 @@ use cadcraft_labels::{
 };
 
 #[test]
+fn exact_boundary_width_does_not_panic_on_rounding() {
+    let b = Rect { min_x: -2778.850520327856, max_x: 4580.849370357377, min_y: 0.0, max_y: 2.0 };
+    let r = Request { anchor: Pt::default(), width: b.width(), height: 2.0, origin: None, locked: false };
+    let p = place(&[r], &[], Some(b), 1.0, 0.0).unwrap();
+    assert_eq!(p[0].rect, b);
+}
+
+#[test]
+fn reports_point_buffer_and_obstacle_collisions() {
+    let r = Request { anchor: Pt::default(), width: 2.0, height: 2.0, origin: Some(Pt::default()), locked: true };
+    let obstacle = Rect::from_corner(Pt::default(), 1.0, 1.0).unwrap();
+    let p = place(&[r], &[obstacle], None, 0.0, 1.0).unwrap();
+    assert_eq!(p[0].buffer_hits, vec![0]);
+    assert_eq!(p[0].obstacle_hits, vec![0]);
+}
+
+#[test]
+fn same_point_labels_separate_and_crowded_labels_are_all_reported() {
+    let r = Request { anchor: Pt::default(), width: 2.0, height: 1.0, origin: None, locked: false };
+    let separate = place(&[r.clone(), r.clone()], &[], None, 1.0, 0.0).unwrap();
+    assert!(separate.iter().all(|p| p.overlap == 0.0));
+    let crowded = place(&vec![r; 10], &[], Some(Rect { min_x: -2.0, min_y: -1.0, max_x: 2.0, max_y: 1.0 }), 0.0, 0.0).unwrap();
+    assert_eq!(crowded.len(), 10);
+    assert!(crowded.iter().any(|p| p.overlap > 0.0));
+}
+
+#[test]
 fn crowded_labels_report_overlap_and_stay_inside() {
     let bounds = Rect::from_corner(Pt::default(), 10.0, 10.0).unwrap();
     let req = Request { anchor: Pt { x: 5.0, y: 5.0 }, width: 8.0, height: 8.0, origin: None, locked: false };

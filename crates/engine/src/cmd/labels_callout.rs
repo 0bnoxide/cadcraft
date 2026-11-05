@@ -90,13 +90,31 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             cells.push(Cell { row, col, span: 1, text: value, width, height: h });
         }
     }
+    let columns = cells.iter().map(|c| c.col + 1).max().unwrap_or(0);
+    let title = columns > 1 && cells.iter().filter(|c| c.row == 0).count() == 1;
+    if title && let Some(c) = cells.first_mut() {
+        c.span = columns;
+    }
     let g = layout(&cells, padding).map_err(|e| bad("callout", e))?;
     let boundary: Option<Rect> =
         p.get("boundary").map(|v| serde_json::from_value(v.clone())).transpose().map_err(|e| bad("callout", e.to_string()))?;
     let flat = cells.iter().map(|c| literal(&c.text)).collect::<Vec<_>>().join("\\P");
     let (width, box_height) = if str_param(p, "kind") == Some("mtext") { measure(s, &flat, height)? } else { (g.bounds.width(), g.bounds.height()) };
     let request = Request { anchor, width, height: box_height, origin: None, locked: false };
-    let placed = place(&[request], &[], boundary, height, 0.0).map_err(|e| bad("callout", e))?;
+    let d = s.doc()?;
+    let obstacles: Vec<_> = d
+        .space(&s.space())
+        .into_iter()
+        .flat_map(|store| store.iter())
+        .filter(|e| matches!(e.kind, EntityKind::Table(_) | EntityKind::MText(_)))
+        .filter_map(|e| {
+            let b = cadcraft_doc::entity_bounds(d, e, 0);
+            let rect = Rect { min_x: b.min.x, min_y: b.min.y, max_x: b.max.x, max_y: b.max.y };
+            rect.is_valid().then_some(rect)
+        })
+        .take(cadcraft_labels::placement::MAX_LABELS + 1)
+        .collect();
+    let placed = place(&[request], &obstacles, boundary, height, 0.0).map_err(|e| bad("callout", e))?;
     let at = placed.first().ok_or_else(|| bad("callout", "no placement"))?;
     let origin = Pt { x: at.rect.min_x, y: at.rect.min_y };
     let kind = match str_param(p, "kind").unwrap_or("table") {
@@ -113,7 +131,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
                 cells: table_rows,
                 style: "Standard".into(),
                 text_height: height,
-                title: false,
+                title,
                 header: false,
                 row_styles: Vec::new(),
                 breaks: None,
@@ -144,6 +162,36 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn analytical_record_has_title_and_one_row_per_analyte() {
+        let mut s = Session::new();
+        s.execute(
+            "callout",
+            &json!({"anchor":[0,0],"record":{"location":"MW-5","benzene":"6.4","toluene":"<50"},
+            "rows":[[[{"kind":"prop","key":"location"}]],
+            [[{"kind":"text","text":"Benzene"}],[{"kind":"prop","key":"benzene"}]],
+            [[{"kind":"text","text":"Toluene"}],[{"kind":"prop","key":"toluene"}]]]}),
+        )
+        .unwrap();
+        let drawing = s.doc().unwrap();
+        let t = drawing.model.iter().find_map(|e| if let EntityKind::Table(t) = &e.kind { Some(t) } else { None }).unwrap();
+        assert_eq!(t.cells.len(), 3);
+        assert!(t.title);
+        assert_eq!(t.cells[0][0].text, "MW-5");
+        assert_eq!(t.cells[1][1].text, "6.4");
+        assert_eq!(t.cells[2][1].text, "<50");
+    }
+
+    #[test]
+    fn successive_callouts_avoid_existing_table() {
+        let mut s = Session::new();
+        let p = json!({"anchor":[0,0],"rows":[[[{"kind":"text","text":"Test"}]] ]});
+        s.execute("callout", &p).unwrap();
+        s.execute("callout", &p).unwrap();
+        let d = s.doc().unwrap();
+        let tables: Vec<_> = d.model.iter().filter(|e| matches!(e.kind, EntityKind::Table(_))).collect();
+        assert_ne!(tables[0].kind, tables[1].kind);
+    }
     #[test]
     fn record_formats_into_table_with_leader_and_mtext() {
         for kind in ["table", "mtext"] {
