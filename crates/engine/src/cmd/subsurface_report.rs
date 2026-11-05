@@ -34,7 +34,7 @@ pub(crate) fn drawing_table(table: &Table, at: [f64; 2]) -> Result<cadcraft_doc:
     ))
 }
 
-pub(crate) fn output(s: &mut Session, p: &Value, tables: &[Table]) -> Result<Vec<Handle>> {
+pub(crate) fn output(s: &mut Session, p: &Value, tables: &[Table], xdata: &[cadcraft_doc::RawTag]) -> Result<Vec<Handle>> {
     if let Some(path) = str_param(p, "output") {
         let bytes = cadcraft_subsurface::sheet::write_xlsx(tables).map_err(|e| bad("boringreport", e.to_string()))?;
         #[cfg(not(target_arch = "wasm32"))]
@@ -63,17 +63,18 @@ pub(crate) fn output(s: &mut Session, p: &Value, tables: &[Table]) -> Result<Vec
     let space = s.space();
     let mut handles = Vec::new();
     for t in entities {
-        handles.push(drawing.add(&space, cadcraft_doc::Common::default(), EntityKind::Table(t))?);
+        handles.push(drawing.add(&space, cadcraft_doc::Common { xdata: xdata.to_vec(), ..Default::default() }, EntityKind::Table(t))?);
     }
     *s.doc_mut()? = drawing;
     Ok(handles)
 }
 
 fn run(s: &mut Session, p: &Value) -> Result<Value> {
-    let (set, findings) = super::subsurface_draw::load(p, "boringreport")?;
-    let tables = cadcraft_subsurface::report::tables(&set).map_err(|e| bad("boringreport", e))?;
-    let handles = output(s, p, &tables)?;
+    let (set, mut findings) = super::subsurface_draw::load(p, "boringreport")?;
+    let report = cadcraft_subsurface::report::build(&set).map_err(|e| bad("boringreport", e))?;
+    findings.extend(report.findings);
+    let handles = output(s, p, &report.tables, &[])?;
     Ok(
-        json!({"handles":handles.iter().map(|h|h.hex()).collect::<Vec<_>>(),"tables":tables.len(),"findings":super::subsurface_import::findings_json(&findings),"output":p.get("output")}),
+        json!({"handles":handles.iter().map(|h|h.hex()).collect::<Vec<_>>(),"tables":report.tables.len(),"findings":super::subsurface_import::findings_json(&findings),"output":p.get("output")}),
     )
 }

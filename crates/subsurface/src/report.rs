@@ -1,7 +1,13 @@
 //! Boring-log reports and the sample summary as tables. Owner: Codex (see
 //! `docs/agents/slice-6-subsurface.md`). Behaviour reference: AutoGIS `boring_log_report.py`.
 
-use crate::{BoringSet, Cell, Table, sticklog};
+use crate::{BoringSet, Cell, Finding, Severity, Table, sticklog};
+
+#[derive(Clone, Debug, Default)]
+pub struct Report {
+    pub tables: Vec<Table>,
+    pub findings: Vec<Finding>,
+}
 
 fn text(value: &str) -> Cell {
     Cell::Text(value.into())
@@ -13,7 +19,7 @@ fn table(name: String, header: &[&str]) -> Table {
     Table { name, rows: vec![header.iter().map(|s| text(s)).collect()] }
 }
 
-pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
+pub fn build(set: &BoringSet) -> Result<Report, String> {
     let count = [set.borings.len(), set.lithology.len(), set.samples.len(), set.wells.len(), set.water.len()]
         .into_iter()
         .try_fold(0usize, |a, b| a.checked_add(b))
@@ -22,6 +28,7 @@ pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
         return Err("too many records".into());
     }
     let mut out = Vec::new();
+    let mut findings = Vec::new();
     let mut summary = table(
         "Sample summary".into(),
         &["boring_id", "sample_id", "sample_type", "top_depth", "bottom_depth", "recovery", "blow_counts", "lab_submitted", "pid_ppm"],
@@ -46,7 +53,7 @@ pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
         let mut intervals: Vec<_> = set.lithology.iter().filter(|r| r.boring_id == *id).collect();
         intervals.sort_by(|a, b| a.top_depth.total_cmp(&b.top_depth));
         for row in &intervals {
-            sticklog::interval(row.top_depth, row.bottom_depth)?;
+            sticklog::interval(id, row.top_depth, row.bottom_depth)?;
             lith.rows.push(vec![
                 Cell::Number(row.top_depth),
                 Cell::Number(row.bottom_depth),
@@ -65,9 +72,18 @@ pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
             &["boring_id", "sample_id", "sample_type", "top_depth", "bottom_depth", "recovery", "blow_counts", "lab_submitted", "pid_ppm"],
         );
         let mut rows: Vec<_> = set.samples.iter().filter(|r| r.boring_id == *id).collect();
+        if rows.is_empty() {
+            findings.push(Finding {
+                severity: Severity::Warning,
+                code: "no_samples".into(),
+                message: format!("Boring {id} has no sample records"),
+                boring_id: Some(id.clone()),
+                source: None,
+            });
+        }
         rows.sort_by(|a, b| a.top_depth.total_cmp(&b.top_depth));
         for row in rows {
-            sticklog::interval(row.top_depth, row.bottom_depth)?;
+            sticklog::interval(id, row.top_depth, row.bottom_depth)?;
             let pid = intervals
                 .iter()
                 .filter(|r| r.top_depth < row.bottom_depth && r.bottom_depth > row.top_depth)
@@ -92,7 +108,7 @@ pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
         let mut rows: Vec<_> = set.wells.iter().filter(|r| r.boring_id == *id).collect();
         rows.sort_by(|a, b| a.top_depth.total_cmp(&b.top_depth));
         for row in rows {
-            sticklog::interval(row.top_depth, row.bottom_depth)?;
+            sticklog::interval(id, row.top_depth, row.bottom_depth)?;
             wells.rows.push(vec![
                 Cell::Number(row.top_depth),
                 Cell::Number(row.bottom_depth),
@@ -108,10 +124,15 @@ pub fn tables(set: &BoringSet) -> Result<Vec<Table>, String> {
             water.rows.push(vec![text(&row.observed), number(row.depth_to_water), text(&row.kind)]);
         }
         out.push(water);
+        let mut approval = table(format!("{id} approval"), &["Role", "Name", "Signature", "Date"]);
+        for role in ["Logged by", "Reviewed by", "Approved by"] {
+            approval.rows.push(vec![text(role), Cell::Empty, Cell::Empty, Cell::Empty]);
+        }
+        out.push(approval);
     }
     out.push(summary);
     if out.iter().flat_map(|t| &t.rows).flatten().any(|c| matches!(c,Cell::Number(n) if !n.is_finite())) {
         return Err("nonfinite report value".into());
     }
-    Ok(out)
+    Ok(Report { tables: out, findings })
 }

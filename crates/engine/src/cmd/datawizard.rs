@@ -11,12 +11,22 @@ use std::collections::{BTreeMap, BTreeSet};
 
 const APP: &str = "CADCRAFT_DATAWIZARD";
 
+#[derive(Clone, Copy, Debug, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+enum Aggregate {
+    Sum,
+    Min,
+    Max,
+    Count,
+}
+
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Column {
     property: String,
     title: String,
     decimals: Option<usize>,
+    aggregate: Option<Aggregate>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -36,12 +46,13 @@ struct Settings {
 }
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![CommandSpec::new("datawizard","Data Wizard",run).params("{settings:{version:1,handles?:[],types?:[],layers?:[],columns:[{property,title,decimals?}],group_by?:[property],sort_by?:[property]},at?:[x,y],output?:xlsx_path} or {refresh:owned_table_handle}; properties: handle,type,layer,block,attribute:TAG,length,area,x,y,z")]
+    vec![CommandSpec::new("datawizard","Data Wizard",run).params("{settings:{version:1,handles?:[],types?:[],layers?:[],columns:[{property,title,decimals?,aggregate?:sum|min|max|count}],group_by?:[property],sort_by?:[property]},at?:[x,y],output?:xlsx_path} or {refresh:owned_table_handle}; properties: handle,type,layer,block,attribute:TAG,length,area,x,y,z,count; count aggregate uses property count")]
 }
 
 fn property(e: &Entity, name: &str) -> Result<Cell> {
     let num = |n: f64| if n.is_finite() { Ok(Cell::Number(n)) } else { Err(bad("datawizard", "nonfinite derived value")) };
     match name {
+        "count" => num(1.0),
         "handle" => Ok(Cell::Text(e.handle.hex())),
         "type" => Ok(Cell::Text(e.kind.type_name().into())),
         "layer" => Ok(Cell::Text(e.common.layer.clone())),
@@ -118,6 +129,11 @@ fn settings(v: Value) -> Result<Settings> {
     if names.len() != settings.columns.len() || settings.group_by.iter().chain(&settings.sort_by).any(|n| !names.contains(n.as_str())) {
         return Err(bad("datawizard", "duplicate properties or unknown grouping/sort column"));
     }
+    if settings.columns.iter().any(|c| {
+        c.aggregate.is_some() && settings.group_by.contains(&c.property) || matches!(c.aggregate, Some(Aggregate::Count)) && c.property != "count"
+    }) {
+        return Err(bad("datawizard", "aggregate columns cannot be grouping keys; count aggregate requires property count"));
+    }
     Ok(settings)
 }
 
@@ -147,17 +163,42 @@ fn extract(s: &Session, cfg: &Settings, exclude: Option<Handle>) -> Result<Table
         return Err(bad("datawizard", "no matching objects"));
     }
     let index = |name: &str| cfg.columns.iter().position(|c| c.property == name);
-    if !cfg.group_by.is_empty() {
-        let mut groups = BTreeMap::new();
-        for row in rows {
+    if !cfg.group_by.is_empty() || cfg.columns.iter().any(|c| c.aggregate.is_some()) {
+        let mut groups: BTreeMap<Vec<String>, Vec<Cell>> = BTreeMap::new();
+        for mut row in rows {
+            for (cell, col) in row.iter_mut().zip(&cfg.columns) {
+                if let Some(aggregate) = col.aggregate {
+                    let n = if matches!(aggregate, Aggregate::Count) {
+                        1.0
+                    } else {
+                        cell.number().ok_or_else(|| bad("datawizard", "aggregate requires numeric values"))?
+                    };
+                    *cell = Cell::Number(n);
+                }
+            }
             let key: Vec<_> =
                 cfg.group_by.iter().filter_map(|n| index(n).and_then(|i| row.get(i))).map(|c| serde_json::to_string(c).unwrap_or_default()).collect();
-            if let Some(existing) = groups.get(&key)
-                && existing != &row
-            {
-                return Err(bad("datawizard", "group contains different non-group values; include those columns in group_by"));
+            if let Some(existing) = groups.get_mut(&key) {
+                for ((dest, source), col) in existing.iter_mut().zip(&row).zip(&cfg.columns) {
+                    if let Some(aggregate) = col.aggregate {
+                        let a = dest.number().ok_or_else(|| bad("datawizard", "invalid aggregate value"))?;
+                        let b = source.number().ok_or_else(|| bad("datawizard", "invalid aggregate value"))?;
+                        let value = match aggregate {
+                            Aggregate::Sum | Aggregate::Count => a + b,
+                            Aggregate::Min => a.min(b),
+                            Aggregate::Max => a.max(b),
+                        };
+                        if !value.is_finite() {
+                            return Err(bad("datawizard", "aggregate overflow"));
+                        }
+                        *dest = Cell::Number(value);
+                    } else if dest != source {
+                        return Err(bad("datawizard", "group contains different non-group values; include those columns in group_by"));
+                    }
+                }
+            } else {
+                groups.insert(key, row);
             }
-            groups.entry(key).or_insert(row);
         }
         rows = groups.into_values().collect();
     }
@@ -238,16 +279,97 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         s.doc_mut()?.modify_entity(h, |e| e.kind = EntityKind::Table(entity))?;
         return Ok(json!({"handle":h.hex(),"refreshed":true,"rows":table.rows.len()-1}));
     }
-    let handles = super::subsurface_report::output(s, p, &[table])?;
-    for h in &handles {
-        s.doc_mut()?.modify_entity(*h, |e| e.common.xdata.extend(tags.clone()))?;
-    }
+    let handles = super::subsurface_report::output(s, p, &[table], &tags)?;
     Ok(json!({"handles":handles.iter().map(|h|h.hex()).collect::<Vec<_>>(),"refreshed":false}))
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn builtin_geometry_and_block_attributes_are_resolved_explicitly() {
+        let line = Entity::new(
+            Handle(1),
+            EntityKind::Line(cadcraft_doc::Line { a: cadcraft_geom::Vec3::ZERO, b: cadcraft_geom::Vec3 { x: 3.0, y: 4.0, z: 12.0 } }),
+        );
+        assert_eq!(property(&line, "length").unwrap(), Cell::Number(13.0));
+        assert!(property(&line, "area").is_err());
+        let circle = Entity::new(Handle(2), EntityKind::Circle(cadcraft_doc::Circle { center: cadcraft_geom::Vec3::ZERO, radius: 2.0 }));
+        assert_eq!(property(&circle, "area").unwrap(), Cell::Number(4.0 * cadcraft_geom::PI));
+        let text: cadcraft_doc::Text = serde_json::from_value(json!({"insert":{"x":0,"y":0,"z":0},"height":1,"value":"MW-1"})).unwrap();
+        let insert = Entity::new(
+            Handle(3),
+            EntityKind::Insert(cadcraft_doc::Insert {
+                block: "WELL".into(),
+                insert: cadcraft_geom::Vec3::ZERO,
+                scale: cadcraft_geom::Vec3 { x: 1.0, y: 1.0, z: 1.0 },
+                rotation: 0.0,
+                attribs: vec![cadcraft_doc::Attrib {
+                    tag: "ID".into(),
+                    text,
+                    invisible: false,
+                    constant: false,
+                    prompt: String::new(),
+                    props: Default::default(),
+                    multiline: None,
+                    modes: Default::default(),
+                }],
+                cols: 1,
+                rows: 1,
+                col_spacing: 0.0,
+                row_spacing: 0.0,
+            }),
+        );
+        assert_eq!(property(&insert, "block").unwrap().text(), "WELL");
+        assert_eq!(property(&insert, "attribute:id").unwrap().text(), "MW-1");
+        assert!(property(&insert, "attribute:MISSING").is_err());
+        assert!(property(&line, "attribute:ID").is_err());
+    }
+
+    #[test]
+    fn overflowing_aggregate_leaves_the_drawing_unchanged() {
+        let mut s = Session::new();
+        for _ in 0..2 {
+            s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3 { x: f64::MAX, y: 0.0, z: 0.0 }, angle: 0.0 })).unwrap();
+        }
+        let before = s.doc().unwrap().model.clone();
+        assert!(s.execute("datawizard", &json!({"settings":{"version":1,"columns":[{"property":"x","title":"X","aggregate":"sum"}]}})).is_err());
+        assert_eq!(s.doc().unwrap().model, before);
+    }
+    #[test]
+    fn grouped_takeoffs_aggregate_before_format_and_keep_keys() {
+        let mut s = Session::new();
+        for length in [2.0, 3.0] {
+            s.add_entity(EntityKind::Line(cadcraft_doc::Line { a: cadcraft_geom::Vec3::ZERO, b: cadcraft_geom::Vec3 { x: length, y: 0.0, z: 0.0 } }))
+                .unwrap();
+        }
+        for (aggregate, want) in [("sum", 5.0), ("min", 2.0), ("max", 3.0)] {
+            let cfg=settings(json!({"version":1,"columns":[{"property":"layer","title":"Layer"},{"property":"length","title":"Length","aggregate":aggregate},{"property":"count","title":"Objects","aggregate":"count"}],"group_by":["layer"]})).unwrap();
+            let table = extract(&s, &cfg, None).unwrap();
+            assert_eq!(table.rows.len(), 2);
+            assert_eq!(table.cell(1, 1), &Cell::Number(want));
+            assert_eq!(table.cell(1, 2), &Cell::Number(2.0));
+        }
+        let cfg = settings(json!({"version":1,"columns":[{"property":"length","title":"Total","aggregate":"sum","decimals":1}]})).unwrap();
+        assert_eq!(extract(&s, &cfg, None).unwrap().cell(1, 0).text(), "5.0");
+    }
+
+    #[test]
+    fn aggregate_errors_do_not_create_output() {
+        let mut s = Session::new();
+        for x in [1.0, 2.0] {
+            s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3 { x, y: 0.0, z: 0.0 }, angle: 0.0 })).unwrap();
+        }
+        let count = s.doc().unwrap().model.len();
+        for columns in [
+            json!([{"property":"type","title":"Bad sum","aggregate":"sum"}]),
+            json!([{"property":"x","title":"X"},{"property":"count","title":"Count","aggregate":"count"}]),
+        ] {
+            assert!(s.execute("datawizard", &json!({"settings":{"version":1,"columns":columns}})).is_err());
+            assert_eq!(s.doc().unwrap().model.len(), count);
+        }
+        assert!(settings(json!({"version":1,"columns":[{"property":"count","title":"N","aggregate":"sum"}],"group_by":["count"]})).is_err());
+    }
     #[test]
     fn refresh_preserves_handle_and_position_and_reloads_sources() {
         let mut s = Session::new();

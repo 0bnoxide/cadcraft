@@ -42,9 +42,9 @@ pub fn description(row: &Lithology) -> String {
     text
 }
 
-pub fn interval(top: f64, bottom: f64) -> Result<(), String> {
+pub fn interval(id: &str, top: f64, bottom: f64) -> Result<(), String> {
     if !top.is_finite() || !bottom.is_finite() || top < 0.0 || bottom < top {
-        return Err("invalid depth interval".into());
+        return Err(format!("boring {id}: invalid depth interval {top} to {bottom}"));
     }
     Ok(())
 }
@@ -71,7 +71,7 @@ pub fn draw(set: &BoringSet, id: &str, at: [f64; 2], scale: f64) -> Result<Log, 
     let y = |d: f64| at[1] - d * scale;
     log.marks.push(Mark::Text { layer: "BORING-TEXT", at: [at[0], at[1] + 0.5], text: id.into() });
     for row in lith {
-        interval(row.top_depth, row.bottom_depth)?;
+        interval(id, row.top_depth, row.bottom_depth)?;
         if row.pid_ppm.is_some_and(|v| !v.is_finite()) {
             return Err("nonfinite PID".into());
         }
@@ -89,7 +89,7 @@ pub fn draw(set: &BoringSet, id: &str, at: [f64; 2], scale: f64) -> Result<Log, 
         log.marks.push(Mark::Text { layer: "BORING-TEXT", at: [at[0] + 3.25, mid], text: description(row) });
     }
     for row in set.samples.iter().filter(|r| r.boring_id == id) {
-        interval(row.top_depth, row.bottom_depth)?;
+        interval(id, row.top_depth, row.bottom_depth)?;
         log.depth = log.depth.max(row.bottom_depth);
         log.marks.push(Mark::Box {
             layer: "BORING-SAMPLE",
@@ -100,7 +100,7 @@ pub fn draw(set: &BoringSet, id: &str, at: [f64; 2], scale: f64) -> Result<Log, 
         log.marks.push(Mark::Text { layer: "BORING-SAMPLE", at: [at[0] - 1.0, y(row.top_depth)], text: row.sample_id.clone() });
     }
     for row in set.wells.iter().filter(|r| r.boring_id == id) {
-        interval(row.top_depth, row.bottom_depth)?;
+        interval(id, row.top_depth, row.bottom_depth)?;
         log.depth = log.depth.max(row.bottom_depth);
         log.marks.push(Mark::Box {
             layer: "BORING-WELL",
@@ -111,7 +111,7 @@ pub fn draw(set: &BoringSet, id: &str, at: [f64; 2], scale: f64) -> Result<Log, 
         log.marks.push(Mark::Text { layer: "BORING-WELL", at: [at[0] + 2.0, y(row.top_depth)], text: row.component.clone() });
     }
     if let Some(depth) = set.water.iter().filter(|r| r.boring_id == id).find_map(|r| r.depth_to_water) {
-        interval(depth, depth)?;
+        interval(id, depth, depth)?;
         log.depth = log.depth.max(depth);
         log.marks.push(Mark::Line { layer: "BORING-WATER", a: [at[0] - 1.0, y(depth)], b: [at[0] + 3.0, y(depth)] });
         for x in [at[0] - 1.25, at[0] - 0.75] {
@@ -120,7 +120,7 @@ pub fn draw(set: &BoringSet, id: &str, at: [f64; 2], scale: f64) -> Result<Log, 
         log.marks.push(Mark::Text { layer: "BORING-WATER", at: [at[0] + 3.25, y(depth)], text: format!("DTW {depth}") });
     }
     if let Some(depth) = boring.total_depth {
-        interval(depth, depth)?;
+        interval(id, depth, depth)?;
         log.depth = log.depth.max(depth);
     }
     if !y(log.depth).is_finite()

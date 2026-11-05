@@ -41,6 +41,13 @@ pub(crate) fn point(p: &Value, key: &str, default: Option<[f64; 2]>, cmd: &str) 
     }
 }
 
+fn scalar(cmd: &str, p: &Value, key: &str, default: f64, zero_ok: bool) -> Result<f64> {
+    if p.get(key).is_some_and(Value::is_null) {
+        return Err(bad(cmd, format!("{key} must be a number")));
+    }
+    Ok(super::size_param(cmd, p, key, zero_ok)?.unwrap_or(default))
+}
+
 fn draw(s: &mut Session, log: Log) -> Result<Value> {
     let mut entities = Vec::new();
     let v3 = |p: [f64; 2]| Vec3 { x: p[0], y: p[1], z: 0.0 };
@@ -110,7 +117,7 @@ fn run_logs(s: &mut Session, p: &Value) -> Result<Value> {
         return Err(bad("sticklog", "more than 1000 borings"));
     }
     let at = point(p, "at", Some([0.0, 0.0]), "sticklog")?;
-    let scale = p.get("scale").and_then(Value::as_f64).unwrap_or(1.0);
+    let scale = scalar("sticklog", p, "scale", 1.0, false)?;
     let selected: Option<Vec<String>> =
         p.get("borings").map(|v| serde_json::from_value(v.clone()).map_err(|e| bad("sticklog", e.to_string()))).transpose()?;
     if let Some(ids) = &selected {
@@ -153,9 +160,9 @@ fn run_profile(s: &mut Session, p: &Value) -> Result<Value> {
         &set,
         a,
         b,
-        p.get("tolerance").and_then(Value::as_f64).unwrap_or(50.0),
+        scalar("subsurfaceprofile", p, "tolerance", 50.0, true)?,
         at,
-        p.get("exaggeration").and_then(Value::as_f64).unwrap_or(1.0),
+        scalar("subsurfaceprofile", p, "exaggeration", 1.0, false)?,
     )
     .map_err(|e| bad("subsurfaceprofile", e))?;
     if log.marks.is_empty() {
@@ -169,6 +176,17 @@ fn run_profile(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn numeric_options_reject_bad_values_instead_of_defaulting() {
+        for key in ["scale", "tolerance", "exaggeration"] {
+            for value in [json!("bad"), json!(null), json!(-1), json!(true)] {
+                assert!(scalar("subsurfaceprofile", &json!({key:value}), key, 1.0, key == "tolerance").is_err());
+            }
+        }
+        assert_eq!(scalar("subsurfaceprofile", &json!({"tolerance":0}), "tolerance", 50.0, true).unwrap(), 0.0);
+        assert!(scalar("sticklog", &json!({"scale":0}), "scale", 1.0, false).is_err());
+        assert_eq!(scalar("sticklog", &json!({}), "scale", 1.0, false).unwrap(), 1.0);
+    }
     #[test]
     fn package_commands_draw_entities_and_workbook_round_trips() {
         let dir = std::env::temp_dir().join(format!("cadcraft-slice6-flow-{}", std::process::id()));
@@ -190,12 +208,12 @@ mod tests {
         let profile = s.execute("subsurfaceprofile", &json!({"path":path,"start":[0,0],"end":[10,0],"tolerance":1,"exaggeration":2})).unwrap();
         assert!(!profile["handles"].as_array().unwrap().is_empty());
         let report = s.execute("boringreport", &json!({"path":path})).unwrap();
-        assert_eq!(report["tables"], 11);
+        assert_eq!(report["tables"], 13);
         let output = dir.join("report.xlsx");
         s.execute("boringreport", &json!({"path":path,"output":output.to_string_lossy()})).unwrap();
         let bytes = std::fs::read(&output).unwrap();
         let tables = cadcraft_subsurface::sheet::read(&bytes, "report.xlsx").unwrap();
-        assert_eq!(tables.len(), 11);
+        assert_eq!(tables.len(), 13);
         assert!(tables.iter().any(|t| t.name == "Sample summary" && t.cell(1, 8).number() == Some(3.2)));
         let before = s.doc().unwrap().model.len();
         let query = json!({"version":1,"layers":["BORING-LOC"],"types":["Point"],"columns":[{"property":"handle","title":"Handle"},{"property":"z","title":"Ground","decimals":1}]});

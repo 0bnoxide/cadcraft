@@ -56,7 +56,7 @@ pub fn project(point: [f64; 2], a: [f64; 2], b: [f64; 2]) -> Result<(f64, f64), 
     if !station.is_finite() || !offset.is_finite() {
         return Err("projection overflow".into());
     }
-    Ok((nearest, offset))
+    Ok((station, offset))
 }
 
 pub fn place(set: &BoringSet, a: [f64; 2], b: [f64; 2], tolerance: f64) -> Result<(Vec<Placement>, Vec<String>), String> {

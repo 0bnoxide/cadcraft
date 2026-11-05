@@ -30,6 +30,9 @@ fn overlays_and_pid_are_drawn_at_scaled_depths() {
     assert!(log.marks.iter().any(|m| matches!(m,Mark::Line{layer:"BORING-WATER",a,..} if a[1]==16.0)));
     assert!(log.marks.iter().any(|m| matches!(m,Mark::Box{layer:"BORING-SAMPLE",at,..} if at[1]==0.0)));
     assert!(sticklog::draw(&set, "EMPTY", [0.0, 0.0], 1.0).unwrap().marks.is_empty());
+    assert!(
+        sticklog::draw(&set, "EMPTY", [0.0, 0.0], 1.0).unwrap().warnings.iter().any(|w| w.contains("sticklog_no_lithology") && w.contains("EMPTY"))
+    );
     assert_eq!(sticklog::hatch("sp-sm"), "DOTS");
     assert_eq!(sticklog::hatch("CL"), "ANSI31");
 }
@@ -41,6 +44,8 @@ fn hostile_depth_and_coordinate_overflow_are_errors() {
     assert!(sticklog::draw(&set, "B-1", [0.0, 0.0], 1.0).is_err());
     assert!(sticklog::draw(&fixture(), "B-1", [0.0, 0.0], f64::MAX).is_err());
     assert!(profile::project([0.0, 0.0], [1.0, 1.0], [1.0, 1.0]).is_err());
+    let error = sticklog::interval("B-BAD", -1.0, 2.0).unwrap_err();
+    assert!(error.contains("B-BAD") && error.contains("-1") && error.contains('2'));
 }
 
 #[test]
@@ -77,7 +82,7 @@ fn profile_endpoint_modes_are_exclusive_and_resolve_boring_coordinates() {
 
 #[test]
 fn report_sorts_depth_and_uses_overlapping_pid() {
-    let tables = report::tables(&fixture()).unwrap();
+    let tables = report::build(&fixture()).unwrap().tables;
     let lith = tables.iter().find(|t| t.name == "B-1 lithology").unwrap();
     assert_eq!(lith.cell(1, 0), &Cell::Number(0.0));
     let summary = tables.last().unwrap();
