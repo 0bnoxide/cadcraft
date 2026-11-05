@@ -4,6 +4,9 @@
 # UTF-8: context<TAB>English source<TAB>Chinese translation.
 # Empty context = ordinary label; @plural = one|other forms with {n}.
 # Command IDs, typed keywords, technology/product names and user data stay unchanged.
+	Surface Volumes	曲面土方量
+	Groundwater Contours	地下水等值线
+	Surface Audit	曲面审核
 	Batch Labels	批量标注
 	Place Callouts	放置标注框
 	Drone Survey QA	无人机测量质检
