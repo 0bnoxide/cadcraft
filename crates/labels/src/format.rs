@@ -60,38 +60,46 @@ fn one() -> i64 {
 pub fn format(parts: &[Part], props: &Props, index: u64) -> String {
     let mut out = String::new();
     for part in parts {
-        match part {
-            Part::Text { text } => out.push_str(text),
+        let full = match part {
+            Part::Text { text } => push_capped(&mut out, text),
             Part::Prop { key } => match props.get(key) {
-                Some(Value::String(s)) => out.push_str(s),
-                Some(Value::Number(n)) => out.push_str(&n.to_string()),
-                Some(Value::Bool(b)) => out.push_str(if *b { "true" } else { "false" }),
-                _ => {}
+                Some(Value::String(s)) => push_capped(&mut out, s),
+                Some(Value::Number(n)) => push_capped(&mut out, &n.to_string()),
+                Some(Value::Bool(b)) => push_capped(&mut out, if *b { "true" } else { "false" }),
+                _ => false,
             },
             Part::Number { key, decimals, round_to, suffix, trim_zeros } => {
-                if let Some(text) = props.get(key).and_then(number_of).and_then(|v| format_number(v, *decimals, *round_to, *trim_zeros)) {
-                    out.push_str(&text);
-                    out.push_str(suffix);
+                match props.get(key).and_then(number_of).and_then(|v| format_number(v, *decimals, *round_to, *trim_zeros)) {
+                    Some(text) => push_capped(&mut out, &text) || push_capped(&mut out, suffix),
+                    None => false,
                 }
             }
             Part::Counter { start, step, width } => {
                 let n = i64::try_from(index).ok().and_then(|i| step.checked_mul(i)).and_then(|d| start.checked_add(d));
-                if let Some(n) = n {
-                    out.push_str(&format!("{n:0w$}", w = usize::from((*width).min(MAX_COUNTER_WIDTH))));
+                match n {
+                    Some(n) => push_capped(&mut out, &format!("{n:0w$}", w = usize::from((*width).min(MAX_COUNTER_WIDTH)))),
+                    None => false,
                 }
             }
-            Part::Newline => out.push('\n'),
-        }
-        if out.len() >= MAX_LABEL_LEN {
-            let mut cut = MAX_LABEL_LEN;
-            while !out.is_char_boundary(cut) {
-                cut -= 1;
-            }
-            out.truncate(cut);
+            Part::Newline => push_capped(&mut out, "\n"),
+        };
+        if full {
             break;
         }
     }
     out
+}
+
+/// Appends as much of `s` as fits in [`MAX_LABEL_LEN`], cut at a char boundary, so hostile input
+/// is never copied in full. `true` once the label is full.
+fn push_capped(out: &mut String, s: &str) -> bool {
+    let room = MAX_LABEL_LEN.saturating_sub(out.len());
+    let mut cut = room.min(s.len());
+    while !s.is_char_boundary(cut) {
+        cut -= 1;
+    }
+    out.push_str(s.get(..cut).unwrap_or_default());
+    out.len() >= MAX_LABEL_LEN || cut < s.len()
 }
 
 fn number_of(v: &Value) -> Option<f64> {

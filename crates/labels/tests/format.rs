@@ -95,6 +95,16 @@ fn output_is_bounded_at_a_char_boundary() {
 }
 
 #[test]
+fn huge_prop_is_cut_without_splitting_a_char() {
+    // One ASCII byte first, so the 2-byte 'é' straddles the cap and must be dropped whole.
+    let p = props(json!({"s": format!("a{}", "é".repeat(MAX_LABEL_LEN))}));
+    let parts = vec![Part::Prop { key: "s".into() }, Part::Newline];
+    let out = format(&parts, &p, 0);
+    assert_eq!(out.len(), MAX_LABEL_LEN - 1);
+    assert!(out.ends_with('é') && !out.ends_with('\n'));
+}
+
+#[test]
 fn parts_round_trip_through_json_with_defaults() {
     let parts: Vec<Part> = serde_json::from_value(json!([
         {"kind": "text", "text": "N="},
