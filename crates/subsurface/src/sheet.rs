@@ -52,7 +52,7 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Vec<Table>, SheetError> {
     if bytes.starts_with(b"PK\x03\x04") {
         check_unzipped(bytes)?;
         if is_ods(bytes) {
-            return Err(not_yet("ODS"));
+            return read_ods(bytes);
         }
         read_xlsx(bytes)
     } else if bytes.starts_with(&[0xD0, 0xCF, 0x11, 0xE0]) {
@@ -62,9 +62,9 @@ pub fn read(bytes: &[u8], name: &str) -> Result<Vec<Table>, SheetError> {
     }
 }
 
-/// XLS and ODS wait for a reader that can refuse an oversized sheet before allocating it:
-/// calamine builds them as dense ranges up to 65,536 x 65,536 (XLS) or 1,048,576 x 16,384 (ODS)
-/// cells, which a few hostile bytes can request and which aborts the process.
+/// XLS waits for a reader that can refuse an oversized sheet before allocating it: calamine
+/// builds it as a dense range of up to 65,536 x 65,536 cells, which a few hostile bytes can
+/// request and which aborts the process.
 fn not_yet(format: &str) -> SheetError {
     SheetError::Format(format!("{format} workbooks are not available yet; save as XLSX or CSV"))
 }
@@ -131,6 +131,35 @@ fn cell_ref(row: u32, col: u32) -> String {
     format!("{letters}{}", u64::from(row) + 1)
 }
 
+fn far_cell(sheet: &str, row: u64, col: u64) -> SheetError {
+    let at = match (u32::try_from(row), u32::try_from(col)) {
+        (Ok(r), Ok(c)) => cell_ref(r, c),
+        _ => format!("row {} column {}", row.saturating_add(1), col.saturating_add(1)),
+    };
+    too_large(&format!("sheet {sheet:?} has a cell at {at} past the row or column cap"))
+}
+
+/// Store a non-empty cell at a position already checked against [`MAX_ROWS`] and
+/// [`MAX_COLS`], padding the row with `Empty`. Padding counts toward `cells`, since the table
+/// really holds it.
+fn put(rows: &mut Vec<Vec<Cell>>, cells: &mut usize, r: usize, c: usize, value: Cell) -> Result<(), SheetError> {
+    if rows.len() <= r {
+        rows.resize_with(r + 1, Vec::new);
+    }
+    let Some(row) = rows.get_mut(r) else { return Ok(()) };
+    if row.len() <= c {
+        *cells = cells.saturating_add(c + 1 - row.len());
+        if *cells > MAX_CELLS {
+            return Err(too_large("more than 2,000,000 cells"));
+        }
+        row.resize(c + 1, Cell::Empty);
+    }
+    if let Some(slot) = row.get_mut(c) {
+        *slot = value;
+    }
+    Ok(())
+}
+
 /// XLSX is streamed cell by cell so a hostile far-away cell is refused before anything is
 /// allocated for it (calamine's `worksheet_range` allocates the dense bounding box first).
 fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
@@ -146,7 +175,7 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
             let (r, c) = cell.get_position();
             let (ri, ci) = (r as usize, c as usize);
             if ri >= MAX_ROWS || ci >= MAX_COLS {
-                return Err(too_large(&format!("sheet {name:?} has a cell at {} past the row or column cap", cell_ref(r, c))));
+                return Err(far_cell(&name, ri as u64, ci as u64));
             }
             let value = match cell.get_value() {
                 DataRef::Empty => Cell::Empty,
@@ -167,23 +196,192 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
             if value == Cell::Empty {
                 continue;
             }
-            if rows.len() <= ri {
-                rows.resize_with(ri + 1, Vec::new);
-            }
-            let Some(row) = rows.get_mut(ri) else { continue };
-            if row.len() <= ci {
-                // Count padding too: it is what the table really holds.
-                cells = cells.saturating_add(ci + 1 - row.len());
-                if cells > MAX_CELLS {
-                    return Err(too_large("more than 2,000,000 cells"));
-                }
-                row.resize(ci + 1, Cell::Empty);
-            }
-            if let Some(slot) = row.get_mut(ci) {
-                *slot = value;
-            }
+            put(&mut rows, &mut cells, ri, ci, value)?;
         }
         out.push(Table { name, rows });
+    }
+    Ok(out)
+}
+
+/// One attribute by local name (namespace prefix ignored), unescaped.
+fn attr(e: &quick_xml::events::BytesStart, local: &[u8]) -> Result<Option<String>, SheetError> {
+    for a in e.attributes() {
+        let a = a.map_err(|e| SheetError::Format(e.to_string()))?;
+        if a.key.local_name().as_ref().as_bytes() == local {
+            let v = a.normalized_value(quick_xml::XmlVersion::Implicit1_0).map_err(|e| SheetError::Format(e.to_string()))?;
+            return Ok(Some(v.into_owned()));
+        }
+    }
+    Ok(None)
+}
+
+/// A repeat count attribute: absent is 1; zero or unparsable is a format error.
+fn repeat(e: &quick_xml::events::BytesStart, local: &[u8]) -> Result<u64, SheetError> {
+    match attr(e, local)? {
+        None => Ok(1),
+        Some(v) => v.trim().parse::<u64>().ok().filter(|&n| n > 0).ok_or_else(|| SheetError::Format(format!("bad repeat count {v:?}"))),
+    }
+}
+
+/// An ODS cell being read: its column repeat, typed value from attributes, and text content.
+struct OdsCell {
+    repeat: u64,
+    value: Option<Cell>,
+    text: String,
+    paragraphs: usize,
+}
+
+/// The typed value an ODS cell's attributes give, if any.
+fn ods_value(e: &quick_xml::events::BytesStart, row: u64, col: u64) -> Result<Option<Cell>, SheetError> {
+    Ok(match attr(e, b"value-type")?.as_deref() {
+        Some("float" | "percentage" | "currency") => {
+            let v = attr(e, b"value")?.unwrap_or_default();
+            let n = v.trim().parse::<f64>().ok().filter(|n| n.is_finite()).ok_or_else(|| {
+                let at = u32::try_from(row).ok().zip(u32::try_from(col).ok()).map_or(String::new(), |(r, c)| cell_ref(r, c));
+                SheetError::Format(format!("cell {at} has the number value {v:?}, which is not a finite number"))
+            })?;
+            Some(Cell::Number(n))
+        }
+        Some("boolean") => Some(Cell::Bool(attr(e, b"boolean-value")?.is_some_and(|v| v.trim() == "true"))),
+        Some("date") => attr(e, b"date-value")?.map(Cell::Text),
+        Some("time") => attr(e, b"time-value")?.map(Cell::Text),
+        Some("string") => attr(e, b"string-value")?.map(Cell::Text),
+        _ => None,
+    })
+}
+
+/// ODS is read straight from `content.xml`. Repeated rows and cells cost nothing until they
+/// hold a value; every stored copy is checked against the caps first.
+fn read_ods(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
+    use quick_xml::events::Event;
+    use std::io::Read;
+    fn fmt_err(e: impl fmt::Display) -> SheetError {
+        SheetError::Format(e.to_string())
+    }
+    let mut zip = zip::ZipArchive::new(Cursor::new(bytes)).map_err(fmt_err)?;
+    let content = zip.by_name("content.xml").map_err(fmt_err)?;
+    let mut xml = quick_xml::Reader::from_reader(std::io::BufReader::new(content.take(MAX_UNZIPPED)));
+    let mut buf = Vec::new();
+    let mut skip = Vec::new();
+    let mut out = Vec::new();
+    let mut cells = 0usize;
+    // The open table, the position in it, the open row's repeat and values, the open cell.
+    let mut table: Option<Table> = None;
+    let (mut row, mut col, mut row_repeat) = (0u64, 0u64, 1u64);
+    let mut row_values: Vec<(u64, u64, Cell)> = Vec::new();
+    let mut cell: Option<OdsCell> = None;
+    loop {
+        buf.clear();
+        let event = xml.read_event_into(&mut buf).map_err(fmt_err)?;
+        let mut ended: Option<Vec<u8>> = None;
+        match &event {
+            Event::Start(e) | Event::Empty(e) => {
+                let empty = matches!(event, Event::Empty(_));
+                let local = e.local_name().as_ref().as_bytes().to_vec();
+                match local.as_slice() {
+                    b"table" => {
+                        table = Some(Table { name: attr(e, b"name")?.unwrap_or_default(), rows: Vec::new() });
+                        row = 0;
+                    }
+                    b"table-row" => {
+                        row_repeat = repeat(e, b"number-rows-repeated")?;
+                        col = 0;
+                        row_values.clear();
+                    }
+                    b"table-cell" | b"covered-table-cell" => {
+                        let value = ods_value(e, row, col)?;
+                        cell = Some(OdsCell { repeat: repeat(e, b"number-columns-repeated")?, value, text: String::new(), paragraphs: 0 });
+                    }
+                    b"annotation" if !empty => {
+                        // A comment's text is not the cell's value.
+                        xml.read_to_end_into(e.name(), &mut skip).map_err(fmt_err)?;
+                        skip.clear();
+                    }
+                    b"p" if !empty => {
+                        if let Some(c) = cell.as_mut() {
+                            if c.paragraphs > 0 {
+                                c.text.push('\n');
+                            }
+                            c.paragraphs += 1;
+                        }
+                    }
+                    b"s" => {
+                        if let Some(c) = cell.as_mut() {
+                            // shortcut: a run of spaces is capped at 1,024; raise it if real text needs more.
+                            let n = attr(e, b"c")?.and_then(|v| v.trim().parse::<usize>().ok()).unwrap_or(1).min(1024);
+                            c.text.extend(std::iter::repeat_n(' ', n));
+                        }
+                    }
+                    b"tab" => cell.iter_mut().for_each(|c| c.text.push('\t')),
+                    b"line-break" => cell.iter_mut().for_each(|c| c.text.push('\n')),
+                    _ => {}
+                }
+                if empty {
+                    ended = Some(local);
+                }
+            }
+            Event::End(e) => ended = Some(e.local_name().as_ref().as_bytes().to_vec()),
+            Event::Text(t) => {
+                if let Some(c) = cell.as_mut() {
+                    c.text.push_str(&t.xml10_content());
+                }
+            }
+            Event::GeneralRef(r) => {
+                if let Some(c) = cell.as_mut() {
+                    let ch = match r.resolve_char_ref().map_err(fmt_err)? {
+                        Some(ch) => Some(ch),
+                        None => match r.xml10_content().as_ref() {
+                            "lt" => Some('<'),
+                            "gt" => Some('>'),
+                            "amp" => Some('&'),
+                            "apos" => Some('\''),
+                            "quot" => Some('"'),
+                            _ => None,
+                        },
+                    };
+                    c.text.extend(ch);
+                }
+            }
+            Event::Eof => break,
+            _ => {}
+        }
+        match ended.as_deref() {
+            Some(b"table-cell" | b"covered-table-cell") => {
+                let Some(c) = cell.take() else { continue };
+                let value = match c.value {
+                    Some(v) => v,
+                    None if !c.text.is_empty() => Cell::Text(c.text),
+                    None => Cell::Empty,
+                };
+                if value != Cell::Empty {
+                    if col.saturating_add(c.repeat) > MAX_COLS as u64 {
+                        let name = table.as_ref().map_or("", |t| t.name.as_str());
+                        return Err(far_cell(name, row, col.saturating_add(c.repeat) - 1));
+                    }
+                    row_values.push((col, c.repeat, value));
+                }
+                col = col.saturating_add(c.repeat);
+            }
+            Some(b"table-row") => {
+                if let Some(t) = table.as_mut().filter(|_| !row_values.is_empty()) {
+                    if row.saturating_add(row_repeat) > MAX_ROWS as u64 {
+                        return Err(far_cell(&t.name, row.saturating_add(row_repeat) - 1, 0));
+                    }
+                    // Every index fits usize: rows are under MAX_ROWS, columns under MAX_COLS.
+                    // `put` fails past MAX_CELLS, which bounds these loops.
+                    for r in row..row + row_repeat {
+                        for (c0, n, v) in &row_values {
+                            for c in *c0..*c0 + *n {
+                                put(&mut t.rows, &mut cells, r as usize, c as usize, v.clone())?;
+                            }
+                        }
+                    }
+                }
+                row = row.saturating_add(row_repeat);
+            }
+            Some(b"table") => out.extend(table.take()),
+            _ => {}
+        }
     }
     Ok(out)
 }

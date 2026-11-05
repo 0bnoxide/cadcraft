@@ -13,3 +13,5 @@ serde = { workspace = true }
 serde_json = { workspace = true }
 calamine = { version = "0.38", default-features = false }
 rust_xlsxwriter = { version = "0.102", default-features = false }
+zip = { version = "9", default-features = false, features = ["deflate"] }
+quick-xml = { version = "0.42", default-features = false }

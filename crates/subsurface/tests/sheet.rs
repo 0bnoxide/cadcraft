@@ -116,7 +116,7 @@ fn zip(entries: &[(&str, &[u8])], lie_size: Option<u32>) -> Vec<u8> {
         let mut local = Vec::new();
         local.extend_from_slice(b"PK\x03\x04");
         local.extend_from_slice(&[20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        local.extend_from_slice(&0u32.to_le_bytes()); // crc
+        local.extend_from_slice(&crc32(data).to_le_bytes());
         local.extend_from_slice(&(data.len() as u32).to_le_bytes());
         local.extend_from_slice(&size.to_le_bytes());
         local.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -126,7 +126,7 @@ fn zip(entries: &[(&str, &[u8])], lie_size: Option<u32>) -> Vec<u8> {
         out.extend_from_slice(data);
         central.extend_from_slice(b"PK\x01\x02");
         central.extend_from_slice(&[20, 0, 20, 0, 0, 0, 0, 0, 0, 0, 0, 0]);
-        central.extend_from_slice(&0u32.to_le_bytes());
+        central.extend_from_slice(&crc32(data).to_le_bytes());
         central.extend_from_slice(&(data.len() as u32).to_le_bytes());
         central.extend_from_slice(&size.to_le_bytes());
         central.extend_from_slice(&(name.len() as u16).to_le_bytes());
@@ -147,9 +147,7 @@ fn zip(entries: &[(&str, &[u8])], lie_size: Option<u32>) -> Vec<u8> {
 }
 
 #[test]
-fn ods_is_refused_and_zip_bomb_directory_is_too_large() {
-    let ods = zip(&[("mimetype", b"application/vnd.oasis.opendocument.spreadsheet")], None);
-    assert!(matches!(sheet::read(&ods, "a.ods"), Err(SheetError::Format(m)) if m.contains("ODS")));
+fn zip_bomb_directory_is_too_large() {
     let bomb = zip(&[("a", b"x"), ("b", b"y")], Some(200 << 20));
     assert!(matches!(sheet::read(&bomb, "a.xlsx"), Err(SheetError::TooLarge(_))));
 }
@@ -227,5 +225,88 @@ fn hostile_bytes_never_panic() {
     }
     for junk in [&b"PK\x03\x04"[..], b"PK\x03\x04PK\x05\x06", &[0xD0, 0xCF, 0x11, 0xE0], b"\"unterminated", b""] {
         let _ = sheet::read(junk, "j");
+    }
+}
+
+fn ods(tables: &str) -> Vec<u8> {
+    let content = format!(
+        r#"<?xml version="1.0" encoding="UTF-8"?><office:document-content xmlns:office="urn:oasis:names:tc:opendocument:xmlns:office:1.0" xmlns:table="urn:oasis:names:tc:opendocument:xmlns:table:1.0" xmlns:text="urn:oasis:names:tc:opendocument:xmlns:text:1.0"><office:body><office:spreadsheet>{tables}</office:spreadsheet></office:body></office:document-content>"#
+    );
+    zip(&[("mimetype", b"application/vnd.oasis.opendocument.spreadsheet"), ("content.xml", content.as_bytes())], None)
+}
+
+#[test]
+fn ods_reads_types_repeats_paragraphs_and_skips_comments() {
+    let wb = ods(concat!(
+        r#"<table:table table:name="lithology"><table:table-column/>"#,
+        r#"<table:table-row><table:table-cell office:value-type="string"><text:p>BoringID</text:p></table:table-cell>"#,
+        r#"<table:table-cell table:number-columns-repeated="2"/><table:table-cell office:value-type="string"><text:p>Top</text:p></table:table-cell></table:table-row>"#,
+        r#"<table:table-row table:number-rows-repeated="2"><table:table-cell office:value-type="string"><office:annotation><text:p>note</text:p></office:annotation><text:p>B&amp;1</text:p><text:p>two<text:s text:c="2"/>x</text:p></table:table-cell>"#,
+        r#"<table:table-cell office:value-type="float" office:value="2.5" table:number-columns-repeated="2"><text:p>2.5</text:p></table:table-cell>"#,
+        r#"<table:table-cell office:value-type="boolean" office:boolean-value="true"/></table:table-row>"#,
+        r#"<table:table-row table:number-rows-repeated="1048000"><table:table-cell table:number-columns-repeated="16384"/></table:table-row>"#,
+        r#"</table:table><table:table table:name="dates"><table:table-row><table:table-cell table:number-columns-repeated="3"/>"#,
+        r#"<table:table-cell office:value-type="date" office:date-value="2026-01-02"><text:p>02/01/26</text:p></table:table-cell></table:table-row></table:table>"#,
+    ));
+    let back = sheet::read(&wb, "p.ods").unwrap();
+    assert_eq!(back.len(), 2);
+    assert_eq!(back[0].name, "lithology");
+    assert_eq!(back[0].header(), ["BoringID", "", "", "Top"]);
+    let data = vec![t("B&1\ntwo  x"), Cell::Number(2.5), Cell::Number(2.5), Cell::Bool(true)];
+    assert_eq!(back[0].rows[1..], [data.clone(), data]);
+    assert_eq!(back[1].rows, vec![vec![Cell::Empty, Cell::Empty, Cell::Empty, t("2026-01-02")]]);
+}
+
+#[test]
+fn hostile_ods_repeats_are_refused_before_allocation() {
+    let far_row = ods(
+        r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="1048000"><table:table-cell/></table:table-row><table:table-row><table:table-cell office:value-type="float" office:value="1"/></table:table-row></table:table>"#,
+    );
+    assert!(matches!(sheet::read(&far_row, "a.ods"), Err(SheetError::TooLarge(_))));
+    let wide = ods(
+        r#"<table:table table:name="s"><table:table-row><table:table-cell office:value-type="float" office:value="1" table:number-columns-repeated="4000000000"/></table:table-row></table:table>"#,
+    );
+    assert!(matches!(sheet::read(&wide, "a.ods"), Err(SheetError::TooLarge(_))));
+    let tall = ods(
+        r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="99999"><table:table-cell office:value-type="float" office:value="1" table:number-columns-repeated="500"/></table:table-row></table:table>"#,
+    );
+    assert!(matches!(sheet::read(&tall, "a.ods"), Err(SheetError::TooLarge(m)) if m.contains("cells")));
+    let overflow = ods(r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="99999999999999999999999"/></table:table>"#);
+    assert!(matches!(sheet::read(&overflow, "a.ods"), Err(SheetError::Format(_))));
+    let nan = ods(
+        r#"<table:table table:name="s"><table:table-row><table:table-cell office:value-type="float" office:value="NaN"/></table:table-row></table:table>"#,
+    );
+    assert!(matches!(sheet::read(&nan, "a.ods"), Err(SheetError::Format(m)) if m.contains("A1")));
+}
+
+/// CRC-32 (IEEE), as zip entries carry it.
+fn crc32(data: &[u8]) -> u32 {
+    let mut crc = !0u32;
+    for &b in data {
+        crc ^= u32::from(b);
+        for _ in 0..8 {
+            crc = if crc & 1 != 0 { (crc >> 1) ^ 0xEDB8_8320 } else { crc >> 1 };
+        }
+    }
+    !crc
+}
+
+#[test]
+fn hostile_ods_bytes_never_panic() {
+    let good = ods(
+        r#"<table:table table:name="s"><table:table-row table:number-rows-repeated="3"><table:table-cell office:value-type="float" office:value="1" table:number-columns-repeated="3"><text:p>a<text:s text:c="9"/></text:p></table:table-cell></table:table-row></table:table>"#,
+    );
+    assert!(sheet::read(&good, "g.ods").is_ok());
+    let mut seed = 0x9e37_79b9_7f4a_7c15u64;
+    for _ in 0..500 {
+        let mut b = good.clone();
+        for _ in 0..4 {
+            seed ^= seed << 13;
+            seed ^= seed >> 7;
+            seed ^= seed << 17;
+            let i = 90 + (seed as usize) % (b.len() - 90); // keep the mimetype so the ODS path runs
+            b[i] = (seed >> 40) as u8;
+        }
+        let _ = sheet::read(&b, "f.ods");
     }
 }

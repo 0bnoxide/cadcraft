@@ -858,9 +858,11 @@ name = "cadcraft-subsurface"
 version = "0.17.0"
 dependencies = [
  "calamine",
+ "quick-xml 0.42.0",
  "rust_xlsxwriter",
  "serde",
  "serde_json",
+ "zip",
 ]
 
 [[package]]
