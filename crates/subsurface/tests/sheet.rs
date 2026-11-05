@@ -101,7 +101,7 @@ fn csv_caps() {
 }
 
 #[test]
-fn xls_and_ods_report_not_available() {
+fn truncated_xls_is_a_format_error() {
     let xls = [0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1, 0, 0];
     assert!(matches!(sheet::read(&xls, "a.xls"), Err(SheetError::Format(m)) if m.contains("XLS")));
 }
@@ -308,5 +308,217 @@ fn hostile_ods_bytes_never_panic() {
             b[i] = (seed >> 40) as u8;
         }
         let _ = sheet::read(&b, "f.ods");
+    }
+}
+
+fn rec(typ: u16, data: &[u8]) -> Vec<u8> {
+    let mut r = typ.to_le_bytes().to_vec();
+    r.extend_from_slice(&(data.len() as u16).to_le_bytes());
+    r.extend_from_slice(data);
+    r
+}
+
+/// A row/column/xf prefix for a BIFF cell record.
+fn rcx(r: u16, c: u16) -> Vec<u8> {
+    [r.to_le_bytes(), c.to_le_bytes(), 0u16.to_le_bytes()].concat()
+}
+
+const BOF8: [u8; 16] = [0x00, 0x06, 0x05, 0x00, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0, 0];
+
+/// A BIFF8 workbook stream: one sheet "Data" holding `cells` (already-encoded records), with
+/// `sst` as the shared string table records (SST and any CONTINUE).
+fn biff(sst: &[u8], cells: &[u8]) -> Vec<u8> {
+    let sheet_rec_len = 4 + 4 + 2 + 2 + "Data".len();
+    let globals_len = 4 + BOF8.len() + sheet_rec_len + sst.len() + 4;
+    let mut s = rec(0x0809, &BOF8);
+    let mut bs = (globals_len as u32).to_le_bytes().to_vec();
+    bs.extend_from_slice(&[0, 0, 4, 0]);
+    bs.extend_from_slice(b"Data");
+    s.extend(rec(0x0085, &bs));
+    s.extend_from_slice(sst);
+    s.extend(rec(0x000A, &[]));
+    assert_eq!(s.len(), globals_len);
+    s.extend(rec(0x0809, &BOF8));
+    s.extend_from_slice(cells);
+    s.extend(rec(0x000A, &[]));
+    s
+}
+
+/// A version 3 compound file holding `stream` as "Workbook"; streams under 4096 bytes go in
+/// the mini stream. `cycle` makes the stream's sector chain point at itself.
+fn cfb(stream: &[u8], cycle: bool) -> Vec<u8> {
+    const END: u32 = 0xFFFF_FFFE;
+    const FREE: u32 = 0xFFFF_FFFF;
+    let mini = stream.len() < 4096;
+    let mut body = stream.to_vec();
+    if mini {
+        body.resize(stream.len().div_ceil(64) * 64, 0);
+    }
+    let nbody = body.len().div_ceil(512);
+    let first_body = if mini { 3 } else { 2 };
+    let mut fat = vec![FREE; 128];
+    fat[0] = 0xFFFF_FFFD;
+    fat[1] = END;
+    if mini {
+        fat[2] = END;
+    }
+    for i in 0..nbody {
+        fat[first_body + i] = if i + 1 == nbody { END } else { (first_body + i + 1) as u32 };
+    }
+    if cycle && !mini {
+        fat[first_body] = first_body as u32;
+    }
+    let mut minifat = vec![FREE; 128];
+    if mini {
+        let n = body.len() / 64;
+        for (i, m) in minifat.iter_mut().enumerate().take(n) {
+            *m = if i + 1 == n { END } else { (i + 1) as u32 };
+        }
+        if cycle {
+            minifat[0] = 0;
+        }
+    }
+    let entry = |name: &str, typ: u8, start: u32, size: u32| {
+        let mut e = vec![0u8; 128];
+        let units: Vec<u8> = name.encode_utf16().chain([0]).flat_map(u16::to_le_bytes).collect();
+        e[..units.len()].copy_from_slice(&units);
+        e[0x40..0x42].copy_from_slice(&(units.len() as u16).to_le_bytes());
+        e[0x42] = typ;
+        e[0x44..0x50].copy_from_slice(&[0xFF; 12]);
+        e[0x74..0x78].copy_from_slice(&start.to_le_bytes());
+        e[0x78..0x7C].copy_from_slice(&size.to_le_bytes());
+        e
+    };
+    let mut dir = if mini { entry("Root Entry", 5, first_body as u32, body.len() as u32) } else { entry("Root Entry", 5, END, 0) };
+    dir.extend(entry("Workbook", 2, if mini { 0 } else { first_body as u32 }, stream.len() as u32));
+    dir.resize(512, 0);
+    let mut h = vec![0u8; 512];
+    h[..8].copy_from_slice(&[0xD0, 0xCF, 0x11, 0xE0, 0xA1, 0xB1, 0x1A, 0xE1]);
+    for (o, v) in [(0x18, 0x3Eu16), (0x1A, 3), (0x1C, 0xFFFE), (0x1E, 9), (0x20, 6)] {
+        h[o..o + 2].copy_from_slice(&v.to_le_bytes());
+    }
+    for (o, v) in [(0x2C, 1u32), (0x30, 1), (0x38, 4096), (0x3C, if mini { 2 } else { END }), (0x40, u32::from(mini)), (0x44, END), (0x48, 0)] {
+        h[o..o + 4].copy_from_slice(&v.to_le_bytes());
+    }
+    for i in 0..109 {
+        h[0x4C + 4 * i..0x50 + 4 * i].copy_from_slice(&(if i == 0 { 0 } else { FREE }).to_le_bytes());
+    }
+    let words = |w: &[u32]| w.iter().flat_map(|v| v.to_le_bytes()).collect::<Vec<u8>>();
+    let mut out = h;
+    out.extend(words(&fat));
+    out.extend(dir);
+    if mini {
+        out.extend(words(&minifat));
+    }
+    body.resize(nbody * 512, 0);
+    out.extend(body);
+    out
+}
+
+fn sample_cells() -> (Vec<u8>, Vec<u8>) {
+    // SST: "BoringID" whole, then "Top" split by a CONTINUE that switches to UTF-16.
+    let mut sst = 2u32.to_le_bytes().to_vec();
+    sst.extend(2u32.to_le_bytes());
+    sst.extend([8, 0, 0]);
+    sst.extend(b"BoringID");
+    sst.extend([3, 0, 0]);
+    sst.extend(b"T");
+    let mut sst_recs = rec(0x00FC, &sst);
+    sst_recs.extend(rec(0x003C, &[1, b'o', 0, b'p', 0]));
+    let mut cells = Vec::new();
+    cells.extend(rec(0x00FD, &[rcx(0, 0), 0u32.to_le_bytes().to_vec()].concat()));
+    cells.extend(rec(0x00FD, &[rcx(0, 1), 1u32.to_le_bytes().to_vec()].concat()));
+    cells.extend(rec(0x0204, &[rcx(1, 0), vec![3, 0, 0], b"B-1".to_vec()].concat()));
+    cells.extend(rec(0x0203, &[rcx(1, 1), 2.5f64.to_le_bytes().to_vec()].concat()));
+    // MULRK at row 2, columns 1..=2: integer 7 and 1.23 (123 / 100).
+    let mut mulrk = [2u16.to_le_bytes(), 1u16.to_le_bytes()].concat();
+    mulrk.extend([0, 0]);
+    mulrk.extend(((7u32 << 2) | 2).to_le_bytes());
+    mulrk.extend([0, 0]);
+    mulrk.extend(((123u32 << 2) | 3).to_le_bytes());
+    mulrk.extend(2u16.to_le_bytes());
+    cells.extend(rec(0x00BD, &mulrk));
+    cells.extend(rec(0x0205, &[rcx(2, 3), vec![1, 0]].concat()));
+    // A formula with a cached text result, then its STRING record.
+    let mut f = rcx(3, 0);
+    f.extend([0, 0, 0, 0, 0, 0, 0xFF, 0xFF]);
+    f.extend([0; 6]);
+    cells.extend(rec(0x0006, &f));
+    cells.extend(rec(0x0207, &[vec![2, 0, 0], b"ok".to_vec()].concat()));
+    (sst_recs, cells)
+}
+
+fn expected() -> Vec<Vec<Cell>> {
+    vec![
+        vec![t("BoringID"), t("Top")],
+        vec![t("B-1"), Cell::Number(2.5)],
+        vec![Cell::Empty, Cell::Number(7.0), Cell::Number(1.23), Cell::Bool(true)],
+        vec![t("ok")],
+    ]
+}
+
+#[test]
+fn xls_reads_cells_from_regular_and_mini_streams() {
+    let (sst, cells) = sample_cells();
+    let stream = biff(&sst, &cells);
+    assert!(stream.len() < 4096);
+    let small = sheet::read(&cfb(&stream, false), "a.xls").unwrap();
+    assert_eq!(small.len(), 1);
+    assert_eq!(small[0].name, "Data");
+    assert_eq!(small[0].rows, expected());
+    let mut big = stream.clone();
+    big.resize(5000, 0); // trailing bytes after the sheet EOF are ignored
+    assert_eq!(sheet::read(&cfb(&big, false), "a.xls").unwrap()[0].rows, expected());
+}
+
+#[test]
+fn hostile_xls_is_refused() {
+    let (sst, cells) = sample_cells();
+    let stream = biff(&sst, &cells);
+    let mut big = stream.clone();
+    big.resize(5000, 0);
+    for cyclic in [cfb(&stream, true), cfb(&big, true)] {
+        assert!(matches!(sheet::read(&cyclic, "c.xls"), Err(SheetError::Format(m)) if m.contains("loops")));
+    }
+    let far = rec(0x0203, &[rcx(0, 600), 1f64.to_le_bytes().to_vec()].concat());
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &far), false), "f.xls"), Err(SheetError::TooLarge(_))));
+    let mut wide = [0u16.to_le_bytes(), 400u16.to_le_bytes()].concat();
+    for _ in 0..200 {
+        wide.extend([0, 0, 2, 0, 0, 0]);
+    }
+    wide.extend(599u16.to_le_bytes());
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &rec(0x00BD, &wide)), false), "w.xls"), Err(SheetError::TooLarge(_))));
+    let err = rec(0x0205, &[rcx(0, 0), vec![7, 1]].concat());
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &err), false), "e.xls"), Err(SheetError::Format(m)) if m.contains("A1")));
+    let nan = rec(0x0203, &[rcx(0, 0), f64::NAN.to_le_bytes().to_vec()].concat());
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &nan), false), "n.xls"), Err(SheetError::Format(_))));
+    let mut odd = rcx(0, 0);
+    odd.extend([9, 0, 0, 0, 0, 0, 0xFF, 0xFF, 0, 0, 0, 0, 0, 0]);
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &rec(0x0006, &odd)), false), "o.xls"), Err(SheetError::Format(m)) if m.contains("formula")));
+    let missing = rec(0x00FD, &[rcx(0, 0), 9u32.to_le_bytes().to_vec()].concat());
+    assert!(matches!(sheet::read(&cfb(&biff(&sst, &missing), false), "m.xls"), Err(SheetError::Format(_))));
+    let mut biff5 = biff(&sst, &cells);
+    biff5[4..6].copy_from_slice(&0x0500u16.to_le_bytes());
+    assert!(matches!(sheet::read(&cfb(&biff5, false), "5.xls"), Err(SheetError::Format(m)) if m.contains("not supported")));
+}
+
+#[test]
+fn hostile_xls_bytes_never_panic() {
+    let (sst, cells) = sample_cells();
+    let mut big = biff(&sst, &cells);
+    big.resize(5000, 0);
+    for good in [cfb(&biff(&sst, &cells), false), cfb(&big, false)] {
+        let mut seed = 0x1234_5678_9abc_def1u64;
+        for _ in 0..500 {
+            let mut b = good.clone();
+            for _ in 0..4 {
+                seed ^= seed << 13;
+                seed ^= seed >> 7;
+                seed ^= seed << 17;
+                let i = 8 + (seed as usize) % (b.len() - 8); // keep the signature so the XLS path runs
+                b[i] = (seed >> 40) as u8;
+            }
+            let _ = sheet::read(&b, "f.xls");
+        }
     }
 }

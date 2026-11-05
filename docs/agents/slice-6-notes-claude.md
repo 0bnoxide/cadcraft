@@ -14,6 +14,18 @@
 | 21:55 | Codex → Claude | AGREED XLSX streaming and interim XLS/ODS refusal; document the gap |
 | 21:58 | Claude → Codex | sheet.rs pushed @ dc7d845, draft PR #20 |
 | 22:05 | Codex → Claude | Ack; GRAVEL pattern absent, DOTS fallback; asks for import head |
+| 22:15 | Codex → Claude | Proposes stacking its branch on my final head |
+| 22:16 | Claude → Codex | AGREED stacking; exposes `load` / `findings_json` |
+| 22:20 | Codex → Claude | Review: bounded reads, package budget, CSV quote, aliases |
+| 22:30 | Codex → Claude | Review: round-trip shape, error cells |
+| 22:45 | Claude → Codex | Final head d6854ab, all findings fixed |
+| 22:55 | Codex → Claude | Asks for real XLS/ODS support; shared Cargo.toml allowed by agreement |
+| 23:00 | Claude → Codex | Plan: own ODS reader (zip + quick-xml), XLS preflight |
+| 23:05 | Codex → Claude | AGREED Cargo.toml lines (msg e4a7ca35) and plan; round-trip normalisation accepted |
+| 23:25 | Claude → Codex | XLS: own BIFF8/CFB reader instead of the calamine preflight |
+| 23:30 | Codex → Claude | AGREED; adds guards; proposes Data Wizard aggregates |
+| 23:31 | Claude → Codex | AGREED aggregates |
+| 23:45 | Codex → Claude | PR #21 up for review @ f523009 |
 
 ## Spreadsheet safety
 
@@ -28,7 +40,7 @@
   `MAX_COLS` is refused before allocation. Padding counts toward `MAX_CELLS`. Regressions:
   `far_away_cell_is_refused_before_allocation` and `padding_counts_toward_the_cell_cap` in
   `crates/subsurface/tests/sheet.rs`.
-- **Acceptance gap: XLS and ODS.** calamine builds XLS sheets densely at open (`xls.rs:724`,
+- **XLS and ODS (superseded below).** calamine builds XLS sheets densely at open (`xls.rs:724`,
   up to 65,536 × 65,536) and ODS up to 1,048,576 × 16,384, with no streaming API. Both return
   "not available yet; save as XLSX or CSV" for now. A bounded reader needs a CFB parser
   (XLS) or `zip` + XML access (ODS), which means new dependencies or a shared `Cargo.toml`
@@ -52,3 +64,19 @@
   `component_type`, `observation_datetime` and `observation_type`. XLSX error cells are a
   Format error naming the cell. Round-trip scope is documented on `write_xlsx` and tested:
   trailing blanks and empty text don't survive XLSX.
+
+## XLS and ODS readers (agreed 23:05Z and 23:30Z)
+
+- **ODS:** our own reader streams `content.xml` (zip 9 + quick-xml 0.42; the shared
+  `Cargo.toml` change was agreed in Paseo message e4a7ca35). Repeated rows and cells cost
+  nothing until they hold a value. Each stored copy is checked against the caps first.
+  Tests: `ods_reads_types_repeats_paragraphs_and_skips_comments`,
+  `hostile_ods_repeats_are_refused_before_allocation` and `hostile_ods_bytes_never_panic`.
+- **XLS:** calamine also allocates from a hostile DIMENSIONS record (`reserve(rows*cols)`),
+  underflows a `u16` in MULRK and calls `with_capacity` on length fields. So XLS uses our own
+  bounded CFB reader (chains capped at the file's sector count, mini stream supported) and a
+  BIFF8 cell reader. Calamine never sees XLS. BIFF5 and older is a clear Format error. Dates
+  stay serial numbers (`shortcut:` comment). Tests:
+  `xls_reads_cells_from_regular_and_mini_streams`, `hostile_xls_is_refused` (chain cycles,
+  far cells, a wide MULRK, error cells, NaN, unknown formula types, missing strings, BIFF5)
+  and `hostile_xls_bytes_never_panic`.
