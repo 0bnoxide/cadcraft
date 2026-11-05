@@ -43,7 +43,9 @@ pub const TIN_BREAKLINE_CROSS: &str = "TIN-BREAKLINE-CROSS";
 pub const TIN_SPIKE: &str = "TIN-SPIKE";
 
 /// Above this many breakline segments the crossing check is skipped (and the receipt says so).
-pub const MAX_BREAKLINE_SEGMENTS: usize = 100_000;
+pub const MAX_BREAKLINE_SEGMENTS: usize = 20_000;
+/// Issues listed per code; past this they are only counted, so hostile input can't exhaust memory.
+pub const MAX_ISSUES_PER_CODE: usize = 10_000;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum Severity {
@@ -111,35 +113,33 @@ pub struct PreflightOptions {
 
 /// Survey Preflight: is this point set fit to build an existing-ground surface from?
 pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
-    let mut issues = Vec::new();
-    let issue = |code, severity, message: String, at, refs| Issue { code, severity, message, at, refs };
+    let mut issues = Sink::default();
     if points.is_empty() {
-        issues.push(issue(PF_EMPTY, Severity::Error, "the point set is empty".into(), None, vec![]));
+        issues.push(PF_EMPTY, Severity::Error, "the point set is empty".into(), None, vec![]);
     }
     if let (Some(have), Some(want)) = (&opts.points_crs, &opts.expected_crs)
         && !have.trim().eq_ignore_ascii_case(want.trim())
     {
-        issues.push(issue(PF_CRS_MISMATCH, Severity::Error, format!("points are in {have:?} but {want:?} is expected"), None, vec![]));
+        issues.push(PF_CRS_MISMATCH, Severity::Error, format!("points are in {have:?} but {want:?} is expected"), None, vec![]);
     }
 
     // Duplicate numbers, reported once per number in first-seen order.
-    let mut seen: HashMap<&str, usize> = HashMap::new();
+    let mut seen: HashMap<&str, (usize, [f64; 3])> = HashMap::new();
     let mut order = Vec::new();
     for p in points {
         let n = p.number.trim();
         if n.is_empty() {
             continue;
         }
-        let c = seen.entry(n).or_insert(0);
-        if *c == 1 {
+        let c = seen.entry(n).or_insert((0, p.xyz));
+        if c.0 == 1 {
             order.push(n);
         }
-        *c += 1;
+        c.0 += 1;
     }
     for n in order {
-        let count = seen.get(n).copied().unwrap_or(0);
-        let at = points.iter().find(|p| p.number.trim() == n).map(|p| p.xyz);
-        issues.push(issue(PF_DUP_NUMBER, Severity::Error, format!("point number {n} is used {count} times"), at, vec![n.to_owned()]));
+        let (count, at) = seen.get(n).map_or((0, None), |&(c, at)| (c, Some(at).filter(|p| p.iter().all(|v| v.is_finite()))));
+        issues.push(PF_DUP_NUMBER, Severity::Error, format!("point number {n} is used {count} times"), at, vec![n.to_owned()]);
     }
 
     let finite = |p: &SurveyPoint| p.xyz.iter().all(|v| v.is_finite());
@@ -147,7 +147,7 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
     for p in points {
         let refs = vec![p.number.clone()];
         if !finite(p) {
-            issues.push(issue(PF_BAD_COORD, Severity::Error, format!("point {} has a non-finite coordinate", p.number), None, refs));
+            issues.push(PF_BAD_COORD, Severity::Error, format!("point {} has a non-finite coordinate", p.number), None, refs);
             continue;
         }
         good.push(p);
@@ -155,25 +155,25 @@ pub fn preflight(points: &[SurveyPoint], opts: &PreflightOptions) -> Audit {
             let code = p.description.split_whitespace().next().unwrap_or("");
             if !keys.iter().any(|k| key_matches(k, code)) {
                 let what = if code.is_empty() { "has no description code".to_owned() } else { format!("code {code:?} matches no description key") };
-                issues.push(issue(PF_CODE_UNKEYED, Severity::Warning, format!("point {} {what}", p.number), Some(p.xyz), refs.clone()));
+                issues.push(PF_CODE_UNKEYED, Severity::Warning, format!("point {} {what}", p.number), Some(p.xyz), refs.clone());
             }
         }
         if let Some((lo, hi)) = opts.elevation_band
             && !(lo..=hi).contains(&p.xyz[2])
         {
             let msg = format!("point {} elevation {} is outside {lo}..{hi}", p.number, p.xyz[2]);
-            issues.push(issue(PF_ELEV_BAND, Severity::Error, msg, Some(p.xyz), refs.clone()));
+            issues.push(PF_ELEV_BAND, Severity::Error, msg, Some(p.xyz), refs.clone());
         }
         if let Some(r) = &opts.extent
             && !r.contains([p.xyz[0], p.xyz[1]])
         {
-            issues.push(issue(PF_OUTSIDE_EXTENT, Severity::Warning, format!("point {} is outside the site extent", p.number), Some(p.xyz), refs));
+            issues.push(PF_OUTSIDE_EXTENT, Severity::Warning, format!("point {} is outside the site extent", p.number), Some(p.xyz), refs);
         }
     }
     if let Some(tol) = opts.neighbor_tolerance {
         for (p, median) in neighbor_outliers(&good, tol) {
             let msg = format!("point {} elevation {} is {:.3} from its neighbours' median {median}", p.number, p.xyz[2], (p.xyz[2] - median).abs());
-            issues.push(issue(PF_ELEV_NEIGHBOR, Severity::Warning, msg, Some(p.xyz), vec![p.number.clone()]));
+            issues.push(PF_ELEV_NEIGHBOR, Severity::Warning, msg, Some(p.xyz), vec![p.number.clone()]);
         }
     }
 
@@ -226,7 +226,7 @@ fn neighbor_outliers<'a>(points: &[&'a SurveyPoint], tol: f64) -> Vec<(&'a Surve
         zs.sort_by(f64::total_cmp);
         let mid = zs.len() / 2;
         let median = match (zs.get(mid), mid.checked_sub(1).and_then(|i| zs.get(i))) {
-            (Some(&b), Some(&a)) if zs.len() % 2 == 0 => (a + b) / 2.0,
+            (Some(&b), Some(&a)) if zs.len().is_multiple_of(2) => (a + b) / 2.0,
             (Some(&b), _) => b,
             _ => continue,
         };
@@ -254,26 +254,20 @@ impl Default for TinAuditOptions {
 
 /// Audit EG Surface: checks a TIN, its outer boundary and the breaklines it was built from.
 pub fn audit_tin(tin: &Tin, boundary: Option<&Region>, breaklines: &[Vec<[f64; 3]>], opts: &TinAuditOptions) -> Audit {
-    let mut issues = Vec::new();
+    let mut issues = Sink::default();
     if tin.triangles.is_empty() {
-        issues.push(Issue { code: TIN_EMPTY, severity: Severity::Error, message: "the surface has no triangles".into(), at: None, refs: vec![] });
+        issues.push(TIN_EMPTY, Severity::Error, "the surface has no triangles".into(), None, vec![]);
     }
     if !boundary.is_some_and(Region::is_valid) {
-        let message = if boundary.is_some() { "the outer boundary is not a valid ring" } else { "the surface has no outer boundary" };
-        issues.push(Issue { code: TIN_NO_BOUNDARY, severity: Severity::Warning, message: message.into(), at: None, refs: vec![] });
+        let message = if boundary.is_some() { "the outer boundary is not a valid ring" } else { "no outer boundary was given for the surface" };
+        issues.push(TIN_NO_BOUNDARY, Severity::Warning, message.into(), None, vec![]);
     }
 
     for (i, t) in tin.triangles.iter().enumerate() {
         let refs = vec![i.to_string()];
         let v = t.map(|k| tin.vertices.get(k as usize).copied());
         let [Some(a), Some(b), Some(c)] = v else {
-            issues.push(Issue {
-                code: TIN_BAD_TRIANGLE,
-                severity: Severity::Error,
-                message: format!("triangle {i} names a missing vertex"),
-                at: None,
-                refs,
-            });
+            issues.push(TIN_BAD_TRIANGLE, Severity::Error, format!("triangle {i} names a missing vertex"), None, refs);
             continue;
         };
         let at = Some([(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0]);
@@ -289,7 +283,7 @@ pub fn audit_tin(tin: &Tin, boundary: Option<&Region>, breaklines: &[Vec<[f64; 3
         };
         if let Some(why) = bad {
             let at = at.filter(|p| p.iter().all(|v| v.is_finite()));
-            issues.push(Issue { code: TIN_BAD_TRIANGLE, severity: Severity::Error, message: format!("triangle {i} {why}"), at, refs });
+            issues.push(TIN_BAD_TRIANGLE, Severity::Error, format!("triangle {i} {why}"), at, refs);
             continue;
         }
         // Slope of the triangle's plane: atan(|horizontal normal| / |vertical normal|).
@@ -299,7 +293,7 @@ pub fn audit_tin(tin: &Tin, boundary: Option<&Region>, breaklines: &[Vec<[f64; 3
         let edge = [(a, b), (b, c), (c, a)].iter().map(|(p, q)| (q[0] - p[0]).hypot(q[1] - p[1])).fold(f64::INFINITY, f64::min);
         if slope > opts.max_slope_deg && edge < opts.min_edge {
             let msg = format!("triangle {i} slopes {slope:.1}° with a {edge:.3} plan edge");
-            issues.push(Issue { code: TIN_SPIKE, severity: Severity::Warning, message: msg, at, refs });
+            issues.push(TIN_SPIKE, Severity::Warning, msg, at, refs);
         }
     }
 
@@ -314,10 +308,14 @@ pub fn audit_tin(tin: &Tin, boundary: Option<&Region>, breaklines: &[Vec<[f64; 3
     if segments.len() > MAX_BREAKLINE_SEGMENTS {
         inputs.insert("crossing_check".into(), format!("skipped: more than {MAX_BREAKLINE_SEGMENTS} breakline segments"));
     } else {
-        for (s, t, p) in crossings(segments.clone()) {
+        let found = crossings(segments.clone(), MAX_ISSUES_PER_CODE + 1);
+        if found.len() > MAX_ISSUES_PER_CODE {
+            inputs.insert("crossing_check".into(), format!("stopped after {MAX_ISSUES_PER_CODE} crossings"));
+        }
+        for (s, t, p) in found.into_iter().take(MAX_ISSUES_PER_CODE) {
             let msg = format!("breakline {} segment {} crosses breakline {} segment {} (z {:.3} vs {:.3})", s.line, s.k, t.line, t.k, p[2], p[3]);
             let refs = vec![s.line.to_string(), t.line.to_string()];
-            issues.push(Issue { code: TIN_BREAKLINE_CROSS, severity: Severity::Error, message: msg, at: Some([p[0], p[1], p[2]]), refs });
+            issues.push(TIN_BREAKLINE_CROSS, Severity::Error, msg, Some([p[0], p[1], p[2]]), refs);
         }
     }
     let thresholds = BTreeMap::from([("max_slope_deg".into(), opts.max_slope_deg), ("min_edge".into(), opts.min_edge)]);
@@ -340,7 +338,7 @@ struct Segment {
 
 /// Pairs of segments that meet away from a shared vertex, with `[x, y, z on first, z on second]`.
 /// Sweeps in x so only overlapping x ranges are compared.
-fn crossings(mut segs: Vec<Segment>) -> Vec<(Segment, Segment, [f64; 4])> {
+fn crossings(mut segs: Vec<Segment>, limit: usize) -> Vec<(Segment, Segment, [f64; 4])> {
     let lo = |s: &Segment| s.a[0].min(s.b[0]);
     segs.sort_by(|s, t| lo(s).total_cmp(&lo(t)));
     let mut out = Vec::new();
@@ -353,6 +351,10 @@ fn crossings(mut segs: Vec<Segment>) -> Vec<(Segment, Segment, [f64; 4])> {
             let (s, t) = if (s.line, s.k) <= (t.line, t.k) { (s, t) } else { (t, s) };
             if let Some(p) = meet(s, t) {
                 out.push((*s, *t, p));
+                if out.len() >= limit {
+                    out.sort_by_key(|(s, t, _)| (s.line, s.k, t.line, t.k));
+                    return out;
+                }
             }
         }
     }
@@ -382,20 +384,43 @@ fn meet(s: &Segment, t: &Segment) -> Option<[f64; 4]> {
     Some([s.a[0] + u * d[0], s.a[1] + u * d[1], lerp(s.a, s.b, u), lerp(t.a, t.b, v)])
 }
 
-/// Builds the audit with the shared counts: `issues`, `errors`, `warnings` and one per code.
+/// Collects issues, listing at most [`MAX_ISSUES_PER_CODE`] per code but counting them all.
+#[derive(Default)]
+struct Sink {
+    issues: Vec<Issue>,
+    per_code: BTreeMap<&'static str, usize>,
+    errors: usize,
+    warnings: usize,
+}
+
+impl Sink {
+    fn push(&mut self, code: &'static str, severity: Severity, message: String, at: Option<[f64; 3]>, refs: Vec<String>) {
+        let n = self.per_code.entry(code).or_insert(0);
+        *n += 1;
+        match severity {
+            Severity::Error => self.errors += 1,
+            Severity::Warning => self.warnings += 1,
+        }
+        if *n <= MAX_ISSUES_PER_CODE {
+            self.issues.push(Issue { code, severity, message, at, refs });
+        }
+    }
+}
+
+/// Builds the audit with the shared counts: `issues`, `errors`, `warnings` and one per code (all
+/// true totals), plus `listed`, the issues actually returned.
 fn finish<const N: usize>(
     check: &str,
     inputs: BTreeMap<String, String>,
     thresholds: BTreeMap<String, f64>,
     sizes: [(&str, usize); N],
-    issues: Vec<Issue>,
+    sink: Sink,
 ) -> Audit {
     let mut counts: BTreeMap<String, usize> = sizes.iter().map(|(k, v)| ((*k).to_owned(), *v)).collect();
-    counts.insert("issues".into(), issues.len());
-    counts.insert("errors".into(), issues.iter().filter(|i| i.severity == Severity::Error).count());
-    counts.insert("warnings".into(), issues.iter().filter(|i| i.severity == Severity::Warning).count());
-    for i in &issues {
-        *counts.entry(i.code.to_owned()).or_insert(0) += 1;
-    }
-    Audit { receipt: Receipt { check: check.into(), version: VERSION, inputs, thresholds, counts }, issues }
+    counts.insert("issues".into(), sink.errors + sink.warnings);
+    counts.insert("errors".into(), sink.errors);
+    counts.insert("warnings".into(), sink.warnings);
+    counts.insert("listed".into(), sink.issues.len());
+    counts.extend(sink.per_code.iter().map(|(k, v)| ((*k).to_owned(), *v)));
+    Audit { receipt: Receipt { check: check.into(), version: VERSION, inputs, thresholds, counts }, issues: sink.issues }
 }

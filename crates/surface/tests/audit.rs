@@ -158,3 +158,26 @@ fn crossing_breaklines_are_found_and_shared_vertices_are_not() {
     let tee = vec![vec![[0., 5., 0.], [10., 5., 0.]], vec![[5., 5., 0.], [5., 10., 0.]]];
     assert_eq!(codes(&audit_tin(&flat(), Some(&square(10.)), &tee, &opts)), vec![TIN_BREAKLINE_CROSS]);
 }
+
+#[test]
+fn issues_are_capped_per_code_but_counted_in_full() {
+    let n = MAX_ISSUES_PER_CODE + 5;
+    let pts: Vec<SurveyPoint> = (0..n).map(|i| pt(&i.to_string(), i as f64, 0., 0., "")).collect();
+    let a = preflight(&pts, &PreflightOptions { keys: Some(vec![]), ..Default::default() });
+    assert_eq!(a.issues.len(), MAX_ISSUES_PER_CODE);
+    assert_eq!(a.receipt.counts.get(PF_CODE_UNKEYED), Some(&n));
+    assert_eq!(a.receipt.counts.get("issues"), Some(&n));
+    assert_eq!(a.receipt.counts.get("listed"), Some(&MAX_ISSUES_PER_CODE));
+}
+
+#[test]
+fn a_crossing_grid_stops_at_the_cap() {
+    // 101 horizontal x 101 vertical lines: 10 201 crossings, more than the cap.
+    let side = 101;
+    let len = f64::from(side);
+    let mut lines: Vec<Vec<[f64; 3]>> = (0..side).map(|i| vec![[-1., f64::from(i), 0.], [len, f64::from(i), 0.]]).collect();
+    lines.extend((0..side).map(|i| vec![[f64::from(i), -1., 0.], [f64::from(i), len, 0.]]));
+    let a = audit_tin(&flat(), Some(&square(10.)), &lines, &TinAuditOptions::default());
+    assert_eq!(a.issues.len(), MAX_ISSUES_PER_CODE);
+    assert!(a.receipt.inputs.get("crossing_check").is_some_and(|s| s.starts_with("stopped")));
+}
