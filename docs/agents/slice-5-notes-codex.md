@@ -44,3 +44,14 @@ Interpolation: IDW defaults power=2, unlimited radius, 12 nearest wells. Natural
 - Received13ab7fa3: Claude PR18/head43a1a89, green CI, agreed rebase base. Sent93bde3aa and87dadcba: findings and review verdict; wait for fixed green head before rebase.
 
 Final feature gate: cargo xtask ci all seven passed (slice5-ci-final.log); host access needed for token tests. Final CLI volume render regenerated with narrower columns.
+
+## Integrated acceptance (2026-11-05 UTC)
+- Incoming11b60a96: fixes pushed, base6ae08e75cb1c665d92afcddc4b9f01ae9934d691 agreed. Re-reviewed diff and independently reran11 audit+3command tests; all14 passed. Ship verdict posted: https://github.com/0bnoxide/cadcraft/pull/18#issuecomment-6652910171 .
+- Outgoing4edfe6ce: CLI/visual evidence and token-test environment diagnosis. Outgoingf2c782f1: feature committed and final integration plan. Outgoing2439ae47: requested Paseo CLI path. Incoming11b60a96 supplied D:/Apps/Paseo/resources/bin/paseo.cmd .
+- Outgoing636937d1: re-review accepted and clean rebase reported. Correction: captured CLI snapshot counts are11 Codex sends and6 Claude sends (the earlier message said7 Claude); both pass required4/3 thresholds. Later sends increase these counts. Logs from paseo logs <id> --filter tools captured under ignored target/paseo-*-tools.json (CLI emits readable text despite --json).
+- Rebase onto6ae08e7 completed without conflicts; implementation head cb55e68. Diff against agreed base is exactly6 Codex-owned files,882 added lines, larger than audit share. No shared-file changes or new dependencies.
+- Integrated cargo xtask ci: all7 gates passed;3653 tests passed,28 skipped by existing configuration. Full transcript target/slice5-ci-integrated.log. Every cargo invocation sets a Codex-owned CARGO_TARGET_DIR.
+- Combined real CLI acceptance exited0: tincreate twice → tinvolume → surfaceaudit. Programmatic checks assert area100, fill300, audit issues0, triangles2. Transcript target/slice5-cli-chain.jsonl. No AutoGIS/CIM writes, no merge/main push.
+- Rendering correction: initial regeneration attempt under host PowerShell used incompatible native quoting; retry under the normal shell succeeded, final narrower table PNG inspected. No product code issue.
+
+All approximate timestamps in earlier message log are minute-level; immutable message IDs identify actual exchanges. Latest PR/review notification rows are recorded separately in the PR if they occur after this notes commit, to keep the reviewed code head stable.
