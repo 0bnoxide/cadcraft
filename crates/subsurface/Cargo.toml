@@ -1,0 +1,15 @@
+[package]
+name = "cadcraft-subsurface"
+description = "Spreadsheet I/O and subsurface drawings for CADCraft: boring logs, stick logs, subsurface profiles and data extraction tables"
+version.workspace = true
+edition.workspace = true
+license.workspace = true
+
+[lints]
+workspace = true
+
+[dependencies]
+serde = { workspace = true }
+serde_json = { workspace = true }
+calamine = { version = "0.38", default-features = false }
+rust_xlsxwriter = { version = "0.102", default-features = false }
