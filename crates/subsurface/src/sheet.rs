@@ -149,7 +149,10 @@ fn read_xlsx(bytes: &[u8]) -> Result<Vec<Table>, SheetError> {
                 return Err(too_large(&format!("sheet {name:?} has a cell at {} past the row or column cap", cell_ref(r, c))));
             }
             let value = match cell.get_value() {
-                DataRef::Empty | DataRef::Error(_) => Cell::Empty,
+                DataRef::Empty => Cell::Empty,
+                DataRef::Error(e) => {
+                    return Err(SheetError::Format(format!("sheet {name:?} cell {} holds the error {e}", cell_ref(r, c))));
+                }
                 DataRef::String(s) => Cell::Text(s.clone()),
                 DataRef::SharedString(s) => Cell::Text((*s).to_string()),
                 DataRef::Bool(b) => Cell::Bool(*b),
@@ -265,6 +268,11 @@ fn sheet_name(want: &str, used: &mut Vec<String>) -> String {
 }
 
 /// Write tables to XLSX bytes, one sheet per table. A non-finite number is an error.
+///
+/// XLSX stores no empty cells, so reading the result back gives the same table except that
+/// trailing `Empty` cells in a row and trailing empty rows are gone, and an empty `Text` reads
+/// back as `Empty` (both have the same [`Cell::text`]). Leading and inner blanks
+/// keep their places.
 pub fn write_xlsx(tables: &[Table]) -> Result<Vec<u8>, SheetError> {
     let fmt_err = |e: rust_xlsxwriter::XlsxError| SheetError::Format(e.to_string());
     let mut book = rust_xlsxwriter::Workbook::new();

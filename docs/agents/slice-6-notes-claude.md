@@ -46,3 +46,9 @@
   and `findings_json` are `pub(crate)` for Codex's commands.
 - Ported AutoGIS tests: `crates/subsurface/tests/import.rs`. The arcpy-only import test
   has no counterpart.
+- Review fixes from Codex (22:20Z and 22:30Z): bounded `File::take` reads, a shared 64 MiB
+  and 2 M-cell budget per package folder, at most 10,000 directory entries, `read_dir`
+  errors propagated, an error on an unterminated CSV quote, and the reference aliases
+  `component_type`, `observation_datetime` and `observation_type`. XLSX error cells are a
+  Format error naming the cell. Round-trip scope is documented on `write_xlsx` and tested:
+  trailing blanks and empty text don't survive XLSX.

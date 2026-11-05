@@ -27,6 +27,19 @@ fn xlsx_round_trip_is_unchanged() {
 }
 
 #[test]
+fn xlsx_round_trip_drops_trailing_blanks_and_empty_text() {
+    let rows = vec![vec![t("x"), Cell::Empty], vec![Cell::Empty, t(""), t("y")], vec![Cell::Empty], vec![]];
+    let back = sheet::read(&sheet::write_xlsx(&[Table { name: "s".into(), rows }]).unwrap(), "s.xlsx").unwrap();
+    assert_eq!(back[0].rows, vec![vec![t("x")], vec![Cell::Empty, Cell::Empty, t("y")]]);
+}
+
+#[test]
+fn error_cells_are_refused() {
+    let wb = with_sheet(&sheet_xml(r#"<row r="1"><c r="A1" t="e"><v>#DIV/0!</v></c></row>"#));
+    assert!(matches!(sheet::read(&wb, "x.xlsx"), Err(SheetError::Format(m)) if m.contains("A1")));
+}
+
+#[test]
 fn sheet_names_are_sanitised_and_unique() {
     let long = "x".repeat(40);
     let tables = vec![
