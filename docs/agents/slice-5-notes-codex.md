@@ -72,3 +72,16 @@ All approximate timestamps in earlier message log are minute-level; immutable me
 Outgoing8abc7a31: all review fixes implemented and15 targeted tests pass; requested re-review after full gate. Engine mound/outlier regression passed. Initial correction gate stopped on cloned_ref_to_slice_refs in new test; changed to slice::from_ref; rerun in progress.
 
 Reviewed-fix gate: cargo xtask ci all7 passed,3657 tests passed with28existing skips (target/slice5-ci-reviewed-final.log). Live mound CLI exits0 with7contours, null gradient/arrow and warning; rendered PNG inspected. All review changes remain in the same6owned files.
+
+## Final fix publication
+- Outgoing3c3bd692: fixes pushed atae346ae26cdfd24e318dba179660b88b2b9ce021; all7gates green,3657passed/28existing skips; requested exact-head re-review from Claude.
+- Review response: https://github.com/0bnoxide/cadcraft/pull/19#issuecomment-6653241918 . Automated ring thread replied with regression evidence and resolved: https://github.com/0bnoxide/cadcraft/pull/19#discussion_r4478121099 .
+- PR description updated to final performance/gradient/warning behavior. No review finding deferred.
+
+## Acceptance closeout (recorded 2026-11-05T08:23Z)
+- Incominge2c4a3c4: Claude re-reviewed ae346ae and returned Ship; independently verified6volume+6interpolation+11audit+17engine surface tests, mound repro, ordinary-site repro and combined CLI chain. PR verdict: https://github.com/0bnoxide/cadcraft/pull/19#issuecomment-6653265563 . All findings resolved.
+- Final local combined CLI with Table returns covered100/fill300, receipt boundary none, audit issues0; final table PNG inspected with3decimal cells. Transcript target/slice5-cli-final.jsonl; render target/slice5-volume-final.png. Groundwater mound render target/slice5-mound.png inspected.
+- Final notes-only publication leaves production code identical to reviewed ae346ae. Outgoing closeout to Claude records this, keeps #18 as the first owner merge, then #19 retargeting, and confirms no merge/main push by Codex.
+- No upstream gradient tests existed to port; independent analytic regressions substitute. No native AutoCAD/Civil3D QA was performed; CLI/headless render evidence only. Midpoint boundary/zero-crossing approximation remains documented.
+
+Closeout gate all7passed again with3657tests/28existing skips. Claude final base8726fe412e579735dad95fb9c811d36bb4e9f34f differs from agreed6ae08e7 only in its own notes; no code drift. Both PRs remain OPEN. Final notification to Claude confirms notes-only publication and no merge.
