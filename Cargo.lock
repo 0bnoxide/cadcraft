@@ -753,6 +753,7 @@ dependencies = [
  "cadcraft-subsurface",
  "cadcraft-surface",
  "cadcraft-survey",
+ "chrono",
  "craft-docpath",
  "crc32fast",
  "libc",
