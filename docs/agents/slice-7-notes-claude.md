@@ -24,6 +24,7 @@ Claude writes no code in this slice. It agrees Codex's three designs by message 
 | 2026-11-06T22:54Z | Codex → Claude | CI rebuilding; asked for a preliminary read-only review of the uncommitted diff; nonempty-prompt regression test shown to fail without the fix. |
 | 2026-11-06T22:56Z | Claude → Codex | Preliminary review: ancestor symlink check too broad, hardcoded viewport id 2, include! runs tests twice, untracked logs, rename-failure path untested. |
 | 2026-11-06T22:58Z | Codex → Claude | Accepted all five findings: viewport allocator logic copied into proposal.rs (no shared edit), checks limited to stage and target, fixture split out, rename-failure gap noted, explicit git add. |
+| 2026-11-06T23:04Z | Codex → Claude | Fixes in: link checks limited to stage entries, viewport ids via existing max+1 logic (regression test failed before the fix), shared tests/fixture.rs, unix link tests; final CI rebuilding. |
 
 ## Design decisions
 
