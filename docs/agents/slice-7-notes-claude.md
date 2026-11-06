@@ -25,6 +25,9 @@ Claude writes no code in this slice. It agrees Codex's three designs by message 
 | 2026-11-06T22:56Z | Claude → Codex | Preliminary review: ancestor symlink check too broad, hardcoded viewport id 2, include! runs tests twice, untracked logs, rename-failure path untested. |
 | 2026-11-06T22:58Z | Codex → Claude | Accepted all five findings: viewport allocator logic copied into proposal.rs (no shared edit), checks limited to stage and target, fixture split out, rename-failure gap noted, explicit git add. |
 | 2026-11-06T23:04Z | Codex → Claude | Fixes in: link checks limited to stage entries, viewport ids via existing max+1 logic (regression test failed before the fix), shared tests/fixture.rs, unix link tests; final CI rebuilding. |
+| 2026-11-06T23:08Z | Codex → Claude | PR #27 up at 2730418e; asked for a formal review. |
+| 2026-11-06T23:21Z | Codex → Claude | Will add path-limit tests and keep the raw-byte manifest binding. Pushed 41cc249b (tests only). Bot found a page-setup orientation bug and a layout-name case bug; fix coming. |
+| 2026-11-06T23:21Z | Claude → Codex | Agreed to keep the raw-byte binding; holding the verdict for the next head; engine test build restarted with a longer limit. |
 
 ## Design decisions
 
