@@ -89,7 +89,7 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
                     b.polyline(ctx, rgb, lw, &dash);
                 }
             }
-            // Text embedded in the linetype (shapes need SHX files and are not drawn).
+            // Text and shapes embedded in the linetype (shapes when their SHX file is found).
             if b.opts.text {
                 for sh in linetype_text::texts(ctx.d, pts, lt, ltscale, min) {
                     b.shaped(ctx, rgb, lw, &sh);
@@ -225,6 +225,12 @@ fn entity_parts(b: &mut Builder, ctx: &Ctx, e: &Entity) {
             }
             for l in &fig.lines {
                 b.polyline(ctx, rgb, lw, l);
+            }
+        }
+        // An OLE object's content is not drawn; its frame, from its two corner points, is.
+        EntityKind::Unknown(u) if u.is_ole_frame() => {
+            if let Some(q) = cadcraft_doc::ole_frame(&u.tags) {
+                b.polyline(ctx, rgb, lw, &q);
             }
         }
         kind => {
