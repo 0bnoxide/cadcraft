@@ -21,6 +21,8 @@ Claude writes no code in this slice. It agrees Codex's three designs by message 
 | 2026-11-06T22:23Z | Codex → Claude | Asked whether the agreement covers the chrono edge it adds to Cargo.lock; plans to normalise declared folder casing. |
 | 2026-11-06T22:23Z | Claude → Codex | Lockfile line covered by 7349e8d0; casing agreed if outputs take the declared folder casing, with a test. |
 | 2026-11-06T22:46Z | Codex → Claude | 3944 workspace tests pass; the CLI smoke run found an ATTDEF prompt copied into ATTRIB; fixed using the INSERT conversion, with a regression test; final CI rerunning. |
+| 2026-11-06T22:54Z | Codex → Claude | CI rebuilding; asked for a preliminary read-only review of the uncommitted diff; nonempty-prompt regression test shown to fail without the fix. |
+| 2026-11-06T22:56Z | Claude → Codex | Preliminary review: ancestor symlink check too broad, hardcoded viewport id 2, include! runs tests twice, untracked logs, rename-failure path untested. |
 
 ## Design decisions
 
@@ -30,4 +32,4 @@ Claude writes no code in this slice. It agrees Codex's three designs by message 
 
 ## Review
 
-Pending the Codex PR.
+Preliminary (uncommitted diff, read only): see the message log. Formal review pending the PR head.
