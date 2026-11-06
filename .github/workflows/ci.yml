@@ -26,6 +26,10 @@ jobs:
       timeout-minutes: 120
       # The fork gates on Windows too (Greg's dev machine); rust-cache saves on main only.
       os: '["ubuntu-24.04","windows-latest"]'
+      # Fork only: the Windows leg builds and runs the tests; the Linux leg runs the full
+      # `cargo xtask ci`. That saves Windows a full clippy build. Lost: clippy on cfg(windows) code,
+      # which still has to compile for the tests.
+      windows-command: cargo nextest run --workspace --lib --bins --tests
       packages: >-
         pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
         libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
