@@ -30,6 +30,14 @@ jobs:
       # `cargo xtask ci`. That saves Windows a full clippy build. Lost: clippy on cfg(windows) code,
       # which still has to compile for the tests.
       windows-command: cargo nextest run --workspace --lib --bins --tests
+      # EXPERIMENT (not for merge as is): workspace crates at opt-level 0 (dependencies stay at 2
+      # via profile.dev.package."*") and rust-lld instead of link.exe for the ~160 test binaries.
+      windows-env: |
+        CARGO_PROFILE_DEV_OPT_LEVEL=0
+        CARGO_TARGET_X86_64_PC_WINDOWS_MSVC_LINKER=rust-lld.exe
+      # EXPERIMENT: lets a manually dispatched run of this branch save its own cache, so a second
+      # dispatch measures a warm build.
+      cache-save-on-dispatch: true
       packages: >-
         pkg-config libxkbcommon-dev libwayland-dev libx11-dev libxcb1-dev libxcursor-dev
         libxrandr-dev libxi-dev libfontconfig1-dev libfreetype-dev mesa-vulkan-drivers
