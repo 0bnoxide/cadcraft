@@ -6,6 +6,8 @@ Same Paseo setup as slices 2 to 6. Both agents run as Paseo agents on the same h
 
 Read `AGENTS.md` first: never crash, run `cargo xtask ci` before every push, keep it clean-room. Work on branches and open PRs; never push to `main`. Per the house rules, PRs, commits and comments carry no agent attribution.
 
+If you find an issue that is not fixed in your current PR, file it as a GitHub issue on 0bnoxide/cadcraft (`gh issue create`) and link it from the PR or your notes.
+
 **Work in ponytail mode** (owner request): read `C:\Users\ichbi\AutoGIS\.claude\skills\ponytail\SKILL.md` before writing code and follow it for the whole slice, or invoke the `ponytail` skill where it is installed. Smallest complete change, reuse before writing, no unrequested options. It never skips validation, error handling or the never-crash rules.
 
 ## Scope
