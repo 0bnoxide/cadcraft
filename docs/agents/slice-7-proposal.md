@@ -6,6 +6,8 @@ Same Paseo setup as slices 2 to 6. Both agents run as Paseo agents on the same h
 
 Read `AGENTS.md` first: never crash, run `cargo xtask ci` before every push, keep it clean-room. Work on branches and open PRs; never push to `main`. Per the house rules, PRs, commits and comments carry no agent attribution.
 
+**Work in ponytail mode** (owner request): read `C:\Users\ichbi\AutoGIS\.claude\skills\ponytail\SKILL.md` before writing code and follow it for the whole slice, or invoke the `ponytail` skill where it is installed. Smallest complete change, reuse before writing, no unrequested options. It never skips validation, error handling or the never-crash rules.
+
 ## Scope
 
 All new library code lives in `crates/proposal` (standalone: no workspace dependencies), ported from behaviour only, from AutoGIS-Civil3D (`C:\Users\ichbi\AutoGIS-Civil3D`, read only): `src/AutoGIS.Civil3D.Proposal/*`, the preview, approval, executor and verifier in `src/AutoGIS.Civil3D.Adapter/*`, and `tests/AutoGIS.Civil3D.Proposal.Tests/*`. Port behaviour and the tests' intent, not the C# structure.
