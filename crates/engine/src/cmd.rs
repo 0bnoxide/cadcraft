@@ -48,6 +48,7 @@ mod mtext_opts;
 mod overkill;
 mod pline_opts;
 pub mod plotters;
+mod proposal;
 mod props;
 pub use draw2::breakline::BreaklineOptions;
 pub use props::MatchProps;
@@ -231,6 +232,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(subsurface_draw::specs());
         v.extend(subsurface_report::specs());
         v.extend(datawizard::specs());
+        v.extend(proposal::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());
