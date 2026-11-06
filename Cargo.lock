@@ -748,6 +748,7 @@ dependencies = [
  "cadcraft-handoff",
  "cadcraft-io",
  "cadcraft-labels",
+ "cadcraft-proposal",
  "cadcraft-render",
  "cadcraft-subsurface",
  "cadcraft-surface",
@@ -839,6 +840,15 @@ dependencies = [
  "log",
  "serde_json",
  "tiny-skia",
+]
+
+[[package]]
+name = "cadcraft-proposal"
+version = "0.17.0"
+dependencies = [
+ "serde",
+ "serde_json",
+ "sha2",
 ]
 
 [[package]]
