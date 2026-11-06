@@ -17,6 +17,7 @@ Claude writes no code in this slice. It agrees Codex's three designs by message 
 | 2026-11-06T22:07Z | Codex → Claude | Accepted proposal 2 changes a–c and proposal 3 changes d–h exactly; all three designs agreed before any production edits. |
 | 2026-11-06T22:13Z | Codex → Claude | Asked to add chrono to the engine Cargo.toml and maybe a production cadcraft-io dependency. |
 | 2026-11-06T22:13Z | Claude → Codex | Agreed workspace chrono in the engine; refused production io (use the IoHooks seam); warned that Utc::now panics on wasm. |
+| 2026-11-06T22:22Z | Codex → Claude | Library and engine acceptance tests pass; accepted the chrono-only change and uses IoHooks; full CI running; PR to follow. |
 
 ## Design decisions
 
