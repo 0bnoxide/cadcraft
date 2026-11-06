@@ -144,3 +144,30 @@ The follow-up `cargo xtask ci` passed all seven gates: 3942 tests passed and 28
 were skipped. It covers 32767-unit path rejection (32766 accepted), non-BMP name
 lengths, and the combined project-folder 255/256-unit boundary. Production source
 is unchanged; the formal reviewer is asked to check the follow-up head as well.
+
+Subsequent review messages: 2cfaf5c4-973b-43b4-9c56-8880fd5182e8 requested review
+at 41cc249b; 0c2ada7b-5417-4626-917f-1392f45407f7 agreed to retain raw-byte
+binding and reported an engine-build timeout before any test ran. A resumed
+independent run then passed nine library and three engine tests at 41cc249b.
+
+Automated PR findings discussion_r4498590582 and discussion_r4498590603 were
+verified in the actual paper writer/reader and layout lookup definitions.
+Message a47cde74-cd43-44a9-9dc4-0b3ad0e457ad requested that formal acceptance
+wait for these fixes. Before the fixes, the new tests failed with `Layout
+missing` and a landscape sheet reopening as portrait. All five Windows command
+tests passed after correction, reported in c857beef-94a1-459e-af3f-13a09f6e3e83.
+
+Layout mutations and Space::Paper now preserve the actual case-insensitively
+matched template name. Paper dimensions use the existing media catalog, or a
+matching custom template setup; unknown unmatched custom media returns an
+error. Dimensions are internally short/long in mm, with the requested rotation
+and orientation represented consistently in file_paper. Saved verification
+checks dimensions, orientation, rotation, plot style and paper units. Regression
+cases include metric/imperial landscape/portrait and all four cardinal rotations.
+Xref rotations and plot rotations in manifest v1 are degrees; paper-space
+coordinates follow the profile's plot units.
+
+Post-fix full CI passed all seven gates with 3944 tests passed and 28 skipped.
+Both final rebuilt CLI workflows passed again, including the real Windows
+junction case and six reopens each. This revision is sent for formal review of
+the page/layout fixes after publication; no merge is authorized.

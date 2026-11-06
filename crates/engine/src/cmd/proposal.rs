@@ -455,8 +455,22 @@ mod native {
         if d.layout(&p.layout).is_none() {
             d.layouts.push(Layout::new(&p.layout, 1));
         }
-        d.active_layout = Some(p.layout.clone());
-        let layout = d.layouts.iter_mut().find(|l| l.name == p.layout).ok_or("Layout missing")?;
+        if p.plot.units == "Inches" {
+            d.header.set_i64("MEASUREMENT", 0);
+        }
+        let layout = d.layouts.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&p.layout)).ok_or("Layout missing")?;
+        let layout_name = layout.name.clone();
+        d.active_layout = Some(layout_name.clone());
+        let (width, height) = if let Some(paper) = cadcraft_render::paper::paper_size(&p.plot.media) {
+            (paper.width_mm, paper.height_mm)
+        } else if layout.page.paper.replace('_', " ").eq_ignore_ascii_case(&p.plot.media.replace('_', " ")) {
+            (layout.page.width_mm, layout.page.height_mm)
+        } else {
+            return Err("Custom media requires a matching page setup in the sheet template".into());
+        };
+        if !width.is_finite() || !height.is_finite() || width <= 0.0 || height <= 0.0 {
+            return Err("Invalid template paper dimensions".into());
+        }
         layout.page.device = p.plot.device.clone();
         layout.page.paper = p.plot.media.clone();
         layout.page.plot_style_table = p.plot.style_sheet.clone();
@@ -464,12 +478,15 @@ mod native {
         layout.page.scale_to_fit = false;
         layout.page.paper_mm = p.plot.units == "Millimeters";
         layout.page.landscape = p.orientation == "Landscape";
-        let factor = if layout.page.paper_mm { 1.0 } else { 25.4 };
-        layout.page.width_mm = p.printable_area.width * factor;
-        layout.page.height_mm = p.printable_area.height * factor;
+        layout.page.width_mm = width.min(height);
+        layout.page.height_mm = width.max(height);
         layout.page.margins_mm = [0.0; 4];
-        layout.page.file_paper = Some((p.printable_area.width, p.printable_area.height, i64::from(p.plot.rotation / 90)));
-        let space = Space::Paper(p.layout.clone());
+        let rotation = i64::from(p.plot.rotation / 90);
+        let wide = (rotation % 2 != 0) != layout.page.landscape;
+        let (raw_width, raw_height) =
+            if wide { (layout.page.height_mm, layout.page.width_mm) } else { (layout.page.width_mm, layout.page.height_mm) };
+        layout.page.file_paper = Some((raw_width, raw_height, rotation));
+        let space = Space::Paper(layout_name);
         let block = d.block(&p.title_block).cloned().ok_or("Title block definition is missing")?;
         let mut insert = Insert { block: p.title_block.clone(), ..Default::default() };
         let values = planner::input_values(&plan.inputs);
@@ -636,7 +653,15 @@ mod native {
                     if !equivalent(&json!(content(l)?), &json!(content(expected)?)) {
                         return Err("Saved sheet geometry differs".into());
                     }
-                    if l.page.device != profile.plot.device || l.page.paper != profile.plot.media || (l.page.scale - profile.plot.scale).abs() > 1e-8
+                    if l.page.device != profile.plot.device
+                        || l.page.paper != profile.plot.media
+                        || (l.page.scale - profile.plot.scale).abs() > 1e-8
+                        || l.page.landscape != (profile.orientation == "Landscape")
+                        || (l.page.width_mm - expected.page.width_mm).abs() > 1e-8
+                        || (l.page.height_mm - expected.page.height_mm).abs() > 1e-8
+                        || l.page.file_paper.map(|(_, _, r)| r) != Some(i64::from(profile.plot.rotation / 90))
+                        || l.page.plot_style_table != profile.plot.style_sheet
+                        || cadcraft_render::paper::page_unit_mm(actual, &l.page) != if profile.plot.units == "Inches" { 25.4 } else { 1.0 }
                     {
                         return Err("Saved plot settings differ".into());
                     }
@@ -811,6 +836,82 @@ mod tests {
         assert!(native::child(&stage, "../escape").is_err());
         assert!(native::child(&stage, "/escape").is_err());
         assert!(native::child(&stage, "nested/artifact.json").is_ok());
+    }
+
+    #[test]
+    fn existing_layout_name_matching_is_consistent() {
+        let (root, mut params, hooks) = project();
+        let path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        manifest["profiles"][0]["layout"] = json!("PROPOSAL");
+        std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let mut template = cadcraft_io::read(&std::fs::read(root.join("sheet.dxf")).unwrap(), "sheet.dxf").unwrap();
+        template.layouts.push(cadcraft_doc::Layout::new("Proposal", 1));
+        std::fs::write(root.join("sheet.dxf"), cadcraft_io::write(&template, "sheet.dxf").unwrap()).unwrap();
+        let preview = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = preview["hash"].clone();
+        let result = native::run(&params, &hooks).unwrap();
+        assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
+        let sheet = root.join("Client - Site/Sheets/0.dxf");
+        let d = cadcraft_io::read(&std::fs::read(&sheet).unwrap(), &sheet).unwrap();
+        assert_eq!(d.layouts.iter().filter(|l| l.name.eq_ignore_ascii_case("proposal")).count(), 1);
+        assert!(
+            d.space(&cadcraft_doc::Space::Paper("Proposal".into()))
+                .unwrap()
+                .iter()
+                .any(|e| matches!(&e.kind,cadcraft_doc::EntityKind::Insert(i) if i.block=="Title"))
+        );
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn plot_orientation_dimensions_rotation_and_units_survive_reopen() {
+        for (orientation, units, rotation) in
+            [("Landscape", "Millimeters", 0), ("Portrait", "Millimeters", 90), ("Landscape", "Inches", 180), ("Portrait", "Inches", 270)]
+        {
+            let (root, mut params, hooks) = project();
+            let path = root.join("standards.json");
+            let mut manifest: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+            let profile = &mut manifest["profiles"][0];
+            profile["orientation"] = json!(orientation);
+            profile["plot"]["units"] = json!(units);
+            profile["plot"]["rotation"] = json!(rotation);
+            profile["plot"]["scale"] = json!(2.5);
+            profile["plot"]["style_sheet"] = json!("monochrome.ctb");
+            let (width, height) = if units == "Inches" {
+                (1, 1)
+            } else if orientation == "Landscape" {
+                (420, 297)
+            } else {
+                (297, 420)
+            };
+            profile["printable_area"]["width"] = json!(width);
+            profile["printable_area"]["height"] = json!(height);
+            if units == "Inches" {
+                for p in profile["placeholders"].as_array_mut().unwrap() {
+                    p["rectangle"]["width"] = json!(1);
+                    p["rectangle"]["height"] = json!(1);
+                }
+            }
+            std::fs::write(&path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+            params["inputs"]["orientation"] = json!(orientation);
+            let preview = native::run(&params, &hooks).unwrap();
+            params["action"] = json!("create");
+            params["approved_hash"] = preview["hash"].clone();
+            let result = native::run(&params, &hooks).unwrap();
+            assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
+            let path = root.join("Client - Site/Sheets/0.dxf");
+            let d = cadcraft_io::read(&std::fs::read(&path).unwrap(), &path).unwrap();
+            let p = &d.layout("Proposal").unwrap().page;
+            assert_eq!(p.landscape, orientation == "Landscape");
+            assert!((p.width_mm - 297.0).abs() < 1e-8);
+            assert!((p.height_mm - 420.0).abs() < 1e-8);
+            assert_eq!(p.file_paper.unwrap().2, rotation / 90);
+            assert_eq!(p.plot_style_table, "monochrome.ctb");
+            assert_eq!(cadcraft_render::paper::page_unit_mm(&d, p), if units == "Inches" { 25.4 } else { 1.0 });
+            std::fs::remove_dir_all(root).unwrap();
+        }
     }
 
     #[test]
