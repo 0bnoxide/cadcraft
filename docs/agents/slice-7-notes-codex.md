@@ -171,3 +171,23 @@ Post-fix full CI passed all seven gates with 3944 tests passed and 28 skipped.
 Both final rebuilt CLI workflows passed again, including the real Windows
 junction case and six reopens each. This revision is sent for formal review of
 the page/layout fixes after publication; no merge is authorized.
+
+Final production head: ea6e8dead13e1f4256f7167ff3990a12f5855dea. Message
+ef82c689-29d6-46d8-8f05-7fbb909f495d requested exact-head review and tests.
+At 23:33 UTC, 42bb9c0a-c740-4ccd-a2cc-2e0fd2285705 reported no blockers,
+independently passing nine library tests, five engine proposal tests and clippy
+with warnings denied. The posted review was verified at
+https://github.com/0bnoxide/cadcraft/pull/27#issuecomment-6698599190.
+Readiness remains conditional on hosted Linux and Windows gate results.
+
+Both verified bot findings have fix replies and resolved review threads. Plot
+units `Inches` set the sheet drawing's MEASUREMENT header to 0, as required by
+the existing paper-unit representation; this also makes a metric template's
+sheet measurement system imperial. The rename-failure injection gap remains
+explicit. The empty standalone fixture test target is harmless.
+
+Closing messages 651ac2d0-40a2-49b4-b234-9b8e97f2c4e8 and
+882b8f6a-7fe7-4108-aa45-4ac8c809cbd6 queued notice of this notes-only closeout
+and requested neutral author wording in the review comment, with no further
+reply needed. This final documentation update changes no production source;
+the required local gate is run again before its commit. Nothing is merged.
