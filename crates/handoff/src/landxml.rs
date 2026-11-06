@@ -131,9 +131,34 @@ fn decode<'a, R: Read + 'a>(mut input: R) -> io::Result<Box<dyn BufRead + 'a>> {
     };
     let rest = io::Cursor::new(seen.get(skip..).unwrap_or_default().to_vec()).chain(input);
     Ok(match wide {
-        None => Box::new(BufReader::new(rest)),
-        Some(wide) => Box::new(BufReader::new(Transcoder { inner: rest, wide, carry: Vec::new(), out: Vec::new(), pos: 0, high: None })),
+        None => Box::new(BufReader::new(Legal { inner: rest, tail: [0; 2] })),
+        Some(wide) => Box::new(BufReader::new(Legal {
+            inner: Transcoder { inner: rest, wide, carry: Vec::new(), out: Vec::new(), pos: 0, high: None },
+            tail: [0; 2],
+        })),
     })
+}
+
+/// Refuses characters XML 1.0 forbids anywhere in a document (C0 controls other than tab, LF and
+/// CR, U+FFFE, U+FFFF) in the UTF-8 stream, as the reference validator's XmlReader does.
+struct Legal<R> {
+    inner: R,
+    /// The last two bytes read, to catch U+FFFE/U+FFFF (EF BF BE/BF) split across reads.
+    tail: [u8; 2],
+}
+
+impl<R: Read> Read for Legal<R> {
+    fn read(&mut self, buf: &mut [u8]) -> io::Result<usize> {
+        let n = self.inner.read(buf)?;
+        for &b in buf.get(..n).unwrap_or_default() {
+            if (b < 0x20 && !matches!(b, b'\t' | b'\n' | b'\r')) || (self.tail == [0xEF, 0xBF] && b >= 0xBE) {
+                return Err(bad_encoding());
+            }
+            let [_, last] = self.tail;
+            self.tail = [last, b];
+        }
+        Ok(n)
+    }
 }
 
 /// Streams UTF-16 or UTF-32 as UTF-8. Unpaired surrogates, invalid code points and a partial
@@ -260,6 +285,8 @@ struct State {
     keep_geometry: bool,
     /// Open elements as (local name, in the LandXML namespace).
     ancestors: Vec<(String, bool)>,
+    /// Any event was read; an XML declaration is only allowed first.
+    started: bool,
     root_seen: bool,
     root_closed: bool,
     points: HashMap<u64, TinPoint>,
@@ -353,11 +380,44 @@ fn element_name<R>(reader: &NsReader<R>, e: &BytesStart<'_>) -> Result<(String, 
     Ok((local, in_ns))
 }
 
+/// Checks the declaration's pseudo-attributes: `version="1.0"`, then optional `encoding` and
+/// `standalone`, in that order, each at most once, with values the XML grammar allows.
+fn declaration_ok(decl: &quick_xml::events::BytesDecl<'_>) -> bool {
+    let mut expected = ["version", "encoding", "standalone"].into_iter();
+    let mut first = true;
+    // The declaration's text starts with its target, `xml`.
+    let content = quick_xml::events::BytesStart::from_content(&**decl, 3);
+    for attr in content.attributes() {
+        let Ok(attr) = attr else {
+            return false;
+        };
+        let key = attr.key.as_ref();
+        // `find` consumes the names it passes, so a repeated or out-of-order name is refused.
+        if (first && key != "version") || expected.find(|k| *k == key).is_none() {
+            return false;
+        }
+        first = false;
+        let v = attr.value.as_bytes();
+        let ok = match key {
+            "version" => v == b"1.0",
+            "encoding" => v.first().is_some_and(u8::is_ascii_alphabetic) && v.iter().all(|c| c.is_ascii_alphanumeric() || b"._-".contains(c)),
+            _ => v == b"yes" || v == b"no",
+        };
+        if !ok {
+            return false;
+        }
+    }
+    !first
+}
+
 /// Checks every attribute is well-formed and returns the unprefixed ones by name.
 fn attributes(e: &BytesStart<'_>) -> Result<Vec<(String, String)>, Stop> {
     let mut out = Vec::new();
     for attr in e.attributes() {
         let attr = attr.map_err(|_| Stop::Malformed)?;
+        if attr.value.contains('<') {
+            return Err(Stop::Malformed);
+        }
         let value = attr.normalized_value(XmlVersion::Explicit1_0).map_err(|_| Stop::Malformed)?.into_owned();
         if attr.key.prefix().is_none() {
             let key = attr.key.as_ref().to_owned();
@@ -389,10 +449,10 @@ fn run<R: BufRead>(reader: &mut NsReader<R>, state: &mut State) -> Result<(), St
         buf.clear();
         let event = reader.read_event_into(&mut buf)?;
         let outside = state.ancestors.is_empty();
+        let first = !std::mem::replace(&mut state.started, true);
         match event {
             Event::Decl(decl) => {
-                let version = decl.version().map_err(|_| Stop::Malformed)?;
-                if version.as_ref() != "1.0" || state.root_seen {
+                if !first || !declaration_ok(&decl) {
                     return Err(Stop::Malformed);
                 }
             }
@@ -786,6 +846,35 @@ mod doctype_tests {
             Ok(Err(issue)) => Some(issue.code),
             Err(_) => Some("stage"),
         }
+    }
+
+    /// Documents the reference validator's XmlReader refuses as not well-formed.
+    #[test]
+    fn ill_formed_prolog_and_characters_are_malformed() {
+        let body = surface("", "");
+        let body = body.split_once("?>").map_or("", |(_, b)| b);
+        for decl in [
+            r#"<?xml version="1.0" ending="utf-8"?>"#,
+            r#"<?xml version="1.0" encoding"utf-8"?>"#,
+            r#"<?xml encoding="utf-8" version="1.0"?>"#,
+            r#"<?xml version="1.0" standalone="maybe"?>"#,
+            r#"<?xml version="1.0" standalone="yes" encoding="utf-8"?>"#,
+            r#"<?xml version="1.0" encoding="utf-8" encoding="utf-8"?>"#,
+            r#"<?xml version="1.0" encoding="8bit"?>"#,
+            r#"<?xml?>"#,
+            r#"<!--c--><?xml version="1.0"?>"#,
+            r#" <?xml version="1.0"?>"#,
+        ] {
+            assert_eq!(code(&format!("{decl}{body}")), Some(codes::LANDXML_MALFORMED), "{decl}");
+        }
+        for ok in [r#"<?xml version="1.0"?>"#, r#"<?xml version='1.0' encoding='UTF-8' standalone='no'?>"#, ""] {
+            assert_eq!(code(&format!("{ok}{body}")), None, "{ok}");
+        }
+        for bad in ["\u{1}", "\u{1F}", "\u{FFFE}", "\u{FFFF}"] {
+            assert_eq!(code(&surface("", &format!("<Project name=\"p\">{bad}</Project>"))), Some(codes::LANDXML_MALFORMED), "{bad:?}");
+        }
+        assert_eq!(code(&surface("", "<Project name=\"a<b\"/>")), Some(codes::LANDXML_MALFORMED));
+        assert_eq!(code(&surface("", "<Project name=\"p\">\t\u{FFFD}\u{10000}</Project>")), None);
     }
 
     #[test]
