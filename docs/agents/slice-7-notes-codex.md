@@ -123,3 +123,24 @@ Both rebuilt-CLI probes (ordinary root and a real Windows junction above the
 manifest/templates/base root) succeeded: six drawings reopened, second create
 refused as `target_exists`, changed inputs refused as `stale_approval`. The
 junction probe removes its temporary link in a finally block.
+
+At 23:08 UTC, PR #27 was opened at 2730418e2e8be0d58707d26a8e2445567cf97de9.
+Message 0e15d6a7-f0b4-4ec6-94f1-043094332665 requested complete formal review and
+independent tests at that exact head, with findings posted on the PR. Hosted
+Linux and Windows CI had started. Local CI logs were moved into ignored
+`plan/slice7-ci/`; no logs or target artifacts entered the commit.
+
+The initial formal-review update independently passed the seven library tests
+and confirmed the bounded link checks and viewport allocation in code. It
+suggested path-length and combined-name boundary tests, and noted conservative
+approval invalidation on manifest reformatting. Reply
+0c02118a-6c6a-4cf3-acdc-f4af94e801eb requested completion of the engine build and
+formal PR verdict. The boundary tests were added. Exact-byte source binding is
+retained as agreed: formatting-only manifest changes also require new approval.
+The forced-rename test gap stays explicit. Production code is unchanged from
+2730418e; the follow-up consists of tests and this protocol log.
+
+The follow-up `cargo xtask ci` passed all seven gates: 3942 tests passed and 28
+were skipped. It covers 32767-unit path rejection (32766 accepted), non-BMP name
+lengths, and the combined project-folder 255/256-unit boundary. Production source
+is unchanged; the formal reviewer is asked to check the follow-up head as well.

@@ -28,3 +28,17 @@ fn collisions_include_unicode_and_file_parents() {
     }
     assert!(collisions(&[("a".into(), false), ("a/b".into(), true)]).is_empty());
 }
+
+#[test]
+fn extended_path_limit_counts_utf16_units() {
+    let mut boundary = vec!["x".repeat(255); 128].join("/");
+    assert_eq!(boundary.encode_utf16().count(), 32767);
+    assert!(relative(&boundary).is_err());
+    boundary.pop();
+    assert!(relative(&boundary).is_ok());
+    assert!(absolute(&format!("/{boundary}")).is_err());
+    boundary.pop();
+    assert!(absolute(&format!("/{boundary}")).is_ok());
+    assert!(component(&"😀".repeat(128)).is_err());
+    assert!(component(&"😀".repeat(127)).is_ok());
+}

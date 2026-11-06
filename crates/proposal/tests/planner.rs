@@ -78,3 +78,23 @@ fn nested_folder_dependencies_preserve_declared_casing() {
     assert_eq!(plan.actions.iter().filter(|a| a.relative_path == "Support").count(), 1);
     assert!(plan.actions.iter().any(|a| a.relative_path == "Support/Nested/project.json"));
 }
+
+#[test]
+fn combined_project_folder_must_fit_one_portable_component() {
+    let m = Manifest::parse(&serde_json::to_vec(&sample::fixture()).unwrap()).unwrap();
+    let hashes = BTreeMap::from([("model.dxf".into(), "a".repeat(64)), ("sheet.dxf".into(), "b".repeat(64)), ("manifest".into(), "c".repeat(64))]);
+    let mut inputs = Inputs {
+        client_name: "a".repeat(200),
+        site_name: "b".repeat(100),
+        proposal_year: 2026,
+        orientation: "Landscape".into(),
+        sheet_size: "A3".into(),
+        ..Inputs::default()
+    };
+    assert_eq!(build(&inputs, &m, &hashes).unwrap_err().first().unwrap().code, "invalid_input");
+    inputs.client_name = "a".repeat(125);
+    inputs.site_name = "b".repeat(127);
+    assert!(build(&inputs, &m, &hashes).is_ok());
+    inputs.site_name.push('b');
+    assert!(build(&inputs, &m, &hashes).is_err());
+}
