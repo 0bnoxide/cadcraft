@@ -29,7 +29,7 @@ Left out of this slice, by earlier owner decisions:
 
 | Agent | Branch | Files | Builds |
 |---|---|---|---|
-| Codex (all code) | `slice8/codex-leftovers` | the existing `crates/droneqa`, `crates/labels` and `crates/survey` sources and tests it needs, the matching `crates/engine/src/cmd/*.rs` (including `proposal.rs` for #29), `zh.tsv` rows for new labels, `docs/agents/slice-8-notes-codex.md` | The four items above. New commands: `pointconvert` ("Point File Converter") and `calloutoverride` ("Callout Override", actions set, clear and list). The checkpoint CSV is a new input to the existing `droneqa` command and supersede a new action of `qareview`, unless Claude agrees otherwise. |
+| Codex (all code) | `slice8/codex-leftovers` | the existing `crates/droneqa`, `crates/labels` and `crates/survey` sources and tests it needs, the matching `crates/engine/src/cmd/*.rs` (including `proposal.rs` for #29), `zh.tsv` rows for new labels, `docs/agents/slice-8-notes-codex.md` | The five items above. New commands: `pointconvert` ("Point File Converter") and `calloutoverride` ("Callout Override", actions set, clear and list). The checkpoint CSV is a new input to the existing `droneqa` command and supersede a new action of `qareview`, unless Claude agrees otherwise. |
 | Claude (review) | `slice8/claude-review` | `docs/agents/slice-8-notes-claude.md` only | **Design:** agrees or changes each of Codex's proposals below by message. **Review:** reviews Codex's PR in full, runs its tests, checks it against the references, and posts findings on the PR. |
 
 ## What to agree by message before coding against it
