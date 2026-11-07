@@ -63,3 +63,20 @@ Hosted workflow coverage was verified from the existing ci.yml: Linux runs cargo
 
 Final checkpoint CSV review added quoted-field coverage (quoted headers, numeric fields and an ID containing a comma). The regression failed before the parser fix and passed afterward. Full CI after demo cleanup passed; full CI is running again on this last parser change before publication.
 2026-11-07T02:44:40.4276470Z - Final pre-push cargo xtask ci passed all seven gates on Windows with host access (3954 tests passed, 28 skipped). No source changes after this run.
+2026-11-07T02:45:36.5601089Z - Sent PR-up/full-review request 14d70de6 for PR 33 at c5f645b79a8c706e8b301efcbc02ae977f3867c5 through Paseo. Hosted Linux full gate and Windows test gate were in progress on the initial live check. No merge.
+2026-11-07T02:54:34.4481698Z - Received changes-requested review f41ea9ea on c5f645b7 (PR comment 6701253199), with independent engine/droneqa/labels test passes. Sent acknowledgments 7cc9c317 and f3344346. Missing-clear false was agreed; the reference distinguishes idempotent clear from missing unlock.
+
+## Review fixes
+
+1. pointconvert uses the canonical input parent and is enabled with no drawing. The integration test now starts with Session::empty and exercises a bare relative filename.
+2. Checkpoint summaries now report per-point IDs, XYZ residuals, horizontal/vertical errors in feet and pass flags from configured H/Z criteria. The parser still feeds the existing aggregate QA engine. Missing criteria cannot establish a pass. Ported the good/bad per-point flag case; source-derived private data hides the detailed summary, with a regression observed failing before the guard.
+3. labelbatch decodes override blocks once into a template-scoped source map before its source loop, with the existing label-count bound. Standalone callout remains a single lookup.
+4. Supersede tests assert SUPERSESSION_TARGET for cross-mission and uncommitted prior records, and SUPERSESSION_NOT_REVIEWED for plain commit of a replacement; refusal writes no event.
+5. clear reports false for a missing key and remains idempotent, with repeat-clear coverage.
+
+Per-point API and no-drawing regressions were observed failing before implementation. Targeted checkpoint, converter, override and nine workflow tests passed before the final privacy guard; full seven-gate CI is running for the combined review-fix head. No merge.
+
+Review-fix details: decoded overrides are indexed once for the selected template and keyed by source, preserving the same (template, source) identity without cloning a template key for every lookup. Detailed checkpoint output is checkpoints.results; point_pass is null when available criteria do not establish a pass, and false whenever a configured H/Z limit is exceeded. Coordinate errors and summary RMS values explicitly use feet. Credential-like content is scrubbed and source-derived details are hidden when related mission/report fields are private.
+
+Sent progress caa48cca and publication-cleanup request beb09028. Received c7168333: the reviewer has a permission request pending for removing attribution wording from its existing public comment. That independent edit does not block source review; no attribution was added to implementation commits or PR description.
+2026-11-07T02:58:02.3915923Z - Review-fix cargo xtask ci passed all seven gates with 3956 tests passed and 28 skipped. No source changes after the run. Preparing the fix commit and exact-head re-review request.

@@ -70,7 +70,7 @@ fn supersede_commits_replacement_and_marks_prior_atomically() {
     other["expected_draft_hash"] = foreign["draft_hash"].clone();
     other["prior_draft_id"] = old["draft_id"].clone();
     other["note"] = json!("must refuse");
-    assert!(execute(&file.0, &other).is_err(), "global mission identity must match");
+    assert!(execute(&file.0, &other).unwrap_err().starts_with("SUPERSESSION_TARGET"), "global mission identity must match");
     let event = execute(&file.0, &p).expect("supersede");
     assert_eq!(event["state"], "COMMITTED");
     assert_eq!(event["supersedes_draft_id"], old["draft_id"]);
@@ -87,6 +87,26 @@ fn supersede_commits_replacement_and_marks_prior_atomically() {
     again["expected_draft_hash"] = next["draft_hash"].clone();
     again["note"] = json!("must not supersede twice");
     assert!(execute(&file.0, &again).unwrap_err().starts_with("SUPERSESSION_TARGET"));
+}
+
+#[test]
+fn replacement_refuses_plain_commit_and_uncommitted_prior_without_appending() {
+    let file = History::new();
+    let old = execute(&file.0, &inputs()).unwrap();
+    let mut p = inputs();
+    p["supersedes_draft_id"] = old["draft_id"].clone();
+    let replacement = execute(&file.0, &p).unwrap();
+    execute(&file.0, &review(&replacement)).unwrap();
+    p["draft_id"] = replacement["draft_id"].clone();
+    p["expected_draft_hash"] = replacement["draft_hash"].clone();
+    p["note"] = json!("replacement");
+    p["action"] = json!("commit");
+    let before = std::fs::read(&file.0).unwrap();
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SUPERSESSION_NOT_REVIEWED"));
+    p["action"] = json!("supersede");
+    p["prior_draft_id"] = old["draft_id"].clone();
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SUPERSESSION_TARGET"));
+    assert_eq!(std::fs::read(&file.0).unwrap(), before);
 }
 
 #[test]

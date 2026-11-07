@@ -70,6 +70,17 @@ pub(super) fn find(d: &Drawing, template: &str, source: &str) -> Option<Override
     d.blocks.values().filter_map(|b| decode(b)).find(|o| o.template == template && o.source == source)
 }
 
+pub(super) fn index(d: &Drawing, template: &str) -> Result<std::collections::BTreeMap<String, Override>> {
+    let mut out = std::collections::BTreeMap::new();
+    for value in d.blocks.values().filter_map(|b| decode(b)).filter(|o| o.template == template) {
+        if out.len() >= cadcraft_labels::placement::MAX_LABELS && !out.contains_key(&value.source) {
+            return Err(bad("labelbatch", "too many placement overrides"));
+        }
+        out.entry(value.source.clone()).or_insert(value);
+    }
+    Ok(out)
+}
+
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("calloutoverride", "Callout Override", run)
@@ -103,10 +114,11 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
             let existing =
                 s.doc()?.blocks.iter().find_map(|(name, b)| decode(b).filter(|o| o.template == template && o.source == source).map(|_| name.clone()));
             if action == "clear" {
+                let cleared = existing.is_some();
                 if let Some(name) = existing {
                     s.doc_mut()?.blocks.remove(&name);
                 }
-                return Ok(json!({"cleared":true}));
+                return Ok(json!({"cleared":cleared}));
             }
             let mut fields = p.as_object().cloned().ok_or_else(|| bad(id, "object required"))?;
             fields.remove("action");
@@ -160,5 +172,6 @@ mod tests {
         p.as_object_mut().unwrap().remove("preferred_quadrant");
         s.execute("calloutoverride", &p).unwrap();
         assert!(find(s.doc().unwrap(), &template, &source).is_none());
+        assert_eq!(s.execute("calloutoverride", &p).unwrap()["cleared"], false);
     }
 }

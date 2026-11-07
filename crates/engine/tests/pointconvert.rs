@@ -12,7 +12,7 @@ fn converts_only_codes_and_refuses_existing_output() {
     std::fs::write(&map, "from,to\nA,Tree\n").unwrap();
     std::fs::write(&input, "# keep this\r\n1, 02.00,A\r\n2,3,Z\nshort\n").unwrap();
     let p = json!({"inputs":[input],"map_path":map,"code_column":3});
-    let mut s = Session::new();
+    let mut s = Session::empty();
     let result = s.execute("pointconvert", &p).unwrap();
     assert_eq!(std::fs::read_to_string(&output).unwrap(), "# keep this\r\n1, 02.00,Tree\r\n2,3,Z\nshort\n");
     assert!(result.to_string().contains('Z'));
@@ -31,5 +31,11 @@ fn converts_only_codes_and_refuses_existing_output() {
     quoted["suffix"] = json!("_refused");
     assert!(s.execute("pointconvert", &quoted).is_err());
     assert!(!root.join("points_refused.csv").exists());
+    let previous = std::env::current_dir().unwrap();
+    std::env::set_current_dir(&root).unwrap();
+    let relative = s.execute("pointconvert", &json!({"inputs":["points.csv"],"map_path":map,"code_column":3,"suffix":"_relative"}));
+    std::env::set_current_dir(previous).unwrap();
+    relative.unwrap();
+    assert!(root.join("points_relative.csv").exists());
     std::fs::remove_dir_all(root).unwrap();
 }

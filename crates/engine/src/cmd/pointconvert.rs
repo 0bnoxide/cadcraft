@@ -11,7 +11,7 @@ const ID: &str = "pointconvert";
 const MAX: u64 = 25_000_000;
 
 pub fn specs() -> Vec<CommandSpec> {
-    vec![CommandSpec::new(ID,"Point File Converter",run).noundo().params("{inputs:[path],map_path,code_column:1-based,delimiter?:comma|tab,prefix?:string,suffix?:_converted,output_dir?:path,tab_output?:false,code_separator?:character} -> {files,unmatched,short_rows}")]
+    vec![CommandSpec::new(ID,"Point File Converter",run).enabled(super::always).noundo().params("{inputs:[path],map_path,code_column:1-based,delimiter?:comma|tab,prefix?:string,suffix?:_converted,output_dir?:path,tab_output?:false,code_separator?:character} -> {files,unmatched,short_rows}")]
 }
 
 fn read(path: &Path) -> Result<Vec<u8>> {
@@ -132,7 +132,7 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         }
         let parent = str_param(p, "output_dir")
             .map(PathBuf::from)
-            .unwrap_or_else(|| path.parent().unwrap_or(Path::new(".")).to_path_buf())
+            .unwrap_or_else(|| canonical.parent().unwrap_or(Path::new(".")).to_path_buf())
             .canonicalize()
             .map_err(|_| bad(ID, "output directory missing"))?;
         let stem = path.file_stem().and_then(|s| s.to_str()).ok_or_else(|| bad(ID, "invalid filename"))?;

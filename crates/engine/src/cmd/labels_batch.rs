@@ -184,6 +184,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         .map_err(|e| bad("labelbatch", e.to_string()))?;
     t.validate().map_err(|e| bad("labelbatch", e))?;
     let sources = samples(s, &t, p)?;
+    let overrides = super::callout_override::index(s.doc()?, &t.id)?;
     let mut texts = Vec::new();
     let mut requests = Vec::new();
     for (i, source) in sources.iter().enumerate() {
@@ -191,7 +192,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         let (width, height) = measure(s, &contents, t.height)?;
         texts.push(contents);
         let mut request = Request { anchor: source.at, width, height, origin: None, locked: false };
-        if let Some(o) = super::callout_override::find(s.doc()?, &t.id, &source.key) {
+        if let Some(o) = overrides.get(&source.key) {
             o.apply(&mut request, t.height);
         }
         requests.push(request);

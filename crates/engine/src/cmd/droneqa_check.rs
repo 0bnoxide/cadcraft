@@ -46,12 +46,16 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         (None, Some(text)) => Some(pix4d::parse(text.as_bytes(), content_type)),
         (None, None) => None,
     };
+    let mut checkpoints = Value::Null;
     if let Some(csv) = opt_str(p, "checkpoint_csv")? {
         if report.is_some() {
             return Err(bad(ID, "INVALID_CHECKPOINT_CSV: give only one report input"));
         }
         let units = opt_str(p, "checkpoint_units")?.ok_or_else(|| bad(ID, "INVALID_CHECKPOINT_CSV: checkpoint_units required"))?;
-        let mut parsed = cadcraft_droneqa::checkpoint::parse(csv, units).map_err(|e| bad(ID, e))?;
+        let (mut parsed, results) =
+            cadcraft_droneqa::checkpoint::evaluate(csv, units, ruleset.accuracy.maximum_rmse_horizontal_feet, ruleset.accuracy.maximum_rmse_z_feet)
+                .map_err(|e| bad(ID, e))?;
+        checkpoints = cadcraft_droneqa::redact::redact(&serde_json::to_value(results).map_err(|_| bad(ID, "invalid checkpoint results"))?, &[]);
         parsed.metrics.checkpoints_independent = mission.checkpoints_independent;
         parsed.metrics.checkpoints_bare_ground = mission.checkpoints_bare_ground;
         report = Some(parsed);
@@ -61,7 +65,23 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
     }
     let analysis = analyze(&mission, &ruleset, report.as_ref(), Some(&sensitive));
     let summary = summarize(&analysis);
-    Ok(json!({ "analysis": analysis, "summary": summary }))
+    if !checkpoints.is_null()
+        && sensitive.iter().any(|field| {
+            matches!(
+                field.as_str(),
+                "attachments"
+                    | "rmse_x_feet"
+                    | "rmse_y_feet"
+                    | "rmse_z_feet"
+                    | "checkpoint_count"
+                    | "checkpoints_independent"
+                    | "checkpoints_bare_ground"
+            )
+        })
+    {
+        checkpoints = json!("[REDACTED]");
+    }
+    Ok(json!({ "analysis": analysis, "summary": summary, "checkpoints": checkpoints }))
 }
 
 /// An optional string parameter; present but not a string is an error, never ignored.
@@ -93,6 +113,11 @@ mod tests {
         let z = v["analysis"]["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "ACCURACY.RMSE_Z").unwrap();
         assert_eq!(z["outcome"], "FAIL");
         assert!((z["observed"].as_f64().unwrap() - 1.0 / 0.3048).abs() < 1e-9);
+        assert_eq!(v["checkpoints"]["results"][0]["gcp_id"], "A");
+        assert_eq!(v["checkpoints"]["results"][0]["point_pass"], false);
+        p["sensitive_fields"] = json!(["attachments"]);
+        let private = s.execute(ID, &p).unwrap();
+        assert_eq!(private["checkpoints"], "[REDACTED]");
     }
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../droneqa/tests/fixtures");

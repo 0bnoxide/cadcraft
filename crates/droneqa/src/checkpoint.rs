@@ -1,6 +1,23 @@
 //! Checkpoint coordinates become ordinary QA report metrics, in feet.
 use crate::{ParseResult, QAMetrics};
 
+#[derive(Debug, serde::Serialize)]
+pub struct PointResult {
+    pub gcp_id: String,
+    pub delta_xyz_feet: [f64; 3],
+    pub horizontal_error_feet: f64,
+    pub vertical_error_feet: f64,
+    /// Missing project criteria cannot establish a per-point pass.
+    pub point_pass: Option<bool>,
+}
+
+#[derive(Debug, serde::Serialize)]
+pub struct Summary {
+    pub hrms_feet: f64,
+    pub vrms_feet: f64,
+    pub results: Vec<PointResult>,
+}
+
 fn fields(line: &str) -> Result<Vec<String>, String> {
     let invalid = || "INVALID_CHECKPOINT_CSV: malformed CSV row".to_string();
     let mut out = Vec::new();
@@ -39,7 +56,14 @@ fn fields(line: &str) -> Result<Vec<String>, String> {
 }
 
 pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
+    evaluate(text, units, None, None).map(|(report, _)| report)
+}
+
+pub fn evaluate(text: &str, units: &str, horizontal_limit: Option<f64>, vertical_limit: Option<f64>) -> Result<(ParseResult, Summary), String> {
     let invalid = || "INVALID_CHECKPOINT_CSV: invalid columns, coordinates or units".to_string();
+    if horizontal_limit.iter().chain(vertical_limit.iter()).any(|v| !v.is_finite() || *v < 0.0) {
+        return Err(invalid());
+    }
     let factor = match units {
         "m" => 1.0 / 0.3048,
         "ft" => 1.0,
@@ -65,6 +89,7 @@ pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
         positions.push(*matches.first().ok_or_else(invalid)?);
     }
     let mut rms = [0.0_f64; 3];
+    let mut results = Vec::new();
     let mut count = 0_u32;
     for line in lines.filter(|l| !l.trim().is_empty()) {
         if count >= 100_000 {
@@ -75,7 +100,8 @@ pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
             return Err(invalid());
         }
         count += 1;
-        for (axis, value) in rms.iter_mut().enumerate() {
+        let mut deltas = [0.0; 3];
+        for (axis, (value, residual)) in rms.iter_mut().zip(deltas.iter_mut()).enumerate() {
             let coordinate = |column: usize| -> Result<f64, String> {
                 let at = positions.get(column).ok_or_else(invalid)?;
                 fields.get(*at).ok_or_else(invalid)?.parse::<f64>().ok().filter(|v| v.is_finite()).ok_or_else(invalid)
@@ -86,7 +112,23 @@ pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
             }
             // Hypot avoids overflowing the sum of squared residuals.
             *value = value.hypot(delta);
+            *residual = delta;
         }
+        let [dx, dy, dz] = deltas;
+        let horizontal_error_feet = dx.hypot(dy);
+        let vertical_error_feet = dz.abs();
+        if !horizontal_error_feet.is_finite() {
+            return Err(invalid());
+        }
+        let failed = horizontal_limit.is_some_and(|h| horizontal_error_feet > h) || vertical_limit.is_some_and(|v| vertical_error_feet > v);
+        let point_pass = if failed { Some(false) } else { horizontal_limit.zip(vertical_limit).map(|_| true) };
+        results.push(PointResult {
+            gcp_id: fields.get(*positions.first().ok_or_else(invalid)?).ok_or_else(invalid)?.clone(),
+            delta_xyz_feet: deltas,
+            horizontal_error_feet,
+            vertical_error_feet,
+            point_pass,
+        });
     }
     if count == 0 {
         return Err("NO_CHECKPOINTS: no checkpoint rows".into());
@@ -98,11 +140,15 @@ pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
         }
     }
     let [x, y, z] = rms;
-    Ok(ParseResult {
+    if !x.hypot(y).is_finite() {
+        return Err(invalid());
+    }
+    let report = ParseResult {
         profile: "checkpoint_csv".into(),
         metrics: QAMetrics { rmse_x_feet: Some(x), rmse_y_feet: Some(y), rmse_z_feet: Some(z), ..Default::default() },
         ..Default::default()
-    })
+    };
+    Ok((report, Summary { hrms_feet: x.hypot(y), vrms_feet: z, results }))
 }
 
 #[cfg(test)]
@@ -110,6 +156,17 @@ pub fn parse(text: &str, units: &str) -> Result<ParseResult, String> {
 mod tests {
     use super::*;
     const HEADER: &str = "gcp_id,expected_x,expected_y,expected_z,measured_x,measured_y,measured_z\n";
+    #[test]
+    fn individual_point_pass_flags_follow_project_limits() {
+        let text = format!("{HEADER}A,0,0,0,0.01,0,0\nB,0,0,0,0.2,0,0\n");
+        let (_, summary) = evaluate(&text, "ft", Some(0.05), Some(0.1)).unwrap();
+        assert_eq!(summary.results.iter().map(|p| p.point_pass).collect::<Vec<_>>(), vec![Some(true), Some(false)]);
+        assert_eq!(summary.results[1].gcp_id, "B");
+        assert_eq!(summary.results[1].horizontal_error_feet, 0.2);
+        let (_, partial) = evaluate(&text, "ft", Some(0.05), None).unwrap();
+        assert_eq!(partial.results[0].point_pass, None);
+        assert_eq!(partial.results[1].point_pass, Some(false));
+    }
     #[test]
     fn reference_perfect_horizontal_and_symmetric_vertical_errors() {
         let perfect = parse(&format!("{HEADER}A,100,200,50,100,200,50\n"), "m").unwrap();
