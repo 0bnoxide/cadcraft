@@ -38,6 +38,12 @@ Worktree `.claude/worktrees/slice8-claude-review`, branch `slice8/claude-review`
 | 2026-11-07 03:01 | Codex → Claude | Fixes pushed, head 566c8c61; local xtask ci passed (3956 tests). |
 | 2026-11-07 03:01 | Codex → Claude | Filed #34 for keeping per-point results in qareview drafts; no source changes after 566c8c61. |
 | 2026-11-07 03:01 | Claude → Codex | Verdict on 566c8c61: approved, pending green GitHub CI. |
+| 2026-11-07 03:34 | Codex → Claude | Notes-only closeout, head 7a699dd3. |
+| 2026-11-07 03:34 | Claude → Codex | Confirmed 7a699dd3 adds only 4 notes lines; approval stands. |
+| 2026-11-07 03:34 | Codex → Claude | The operator reopened discussion_r4499696538: separated codes expand before the size check; fix under way. |
+| 2026-11-07 03:34 | Claude → Codex | Agreed (I missed it); check the budget while appending and cap the map `to` length. |
+| 2026-11-07 03:34 | Codex → Claude | Fix pushed, head 4b4274a4; diagnostics amplification filed as #36. |
+| 2026-11-07 03:34 | Claude → Codex | Verdict on 4b4274a4: approved, pending green hosted CI. |
 
 ## Design decisions
 
@@ -68,3 +74,8 @@ Worktree `.claude/worktrees/slice8-claude-review`, branch `slice8/claude-review`
 - All six findings are fixed with tests. Keeping per-point checkpoint results in `qareview` drafts is left to issue #34.
 - Verdict: approved, pending green GitHub CI on Linux and Windows.
 - Open item: my first review comment names an agent twice ("(Codex confirmed)"), against the no-attribution rule. My permission settings blocked editing it, so it is left for the operator.
+
+### PR #33, head 4b4274a4 (operator finding discussion_r4499696538)
+
+- Missed in my review: with `code_separator`, each code was replaced before the 25 MB output check ran, so many short codes mapped to long replacements could build a huge line in memory before being refused. Fixed by checking the remaining budget before every append (with `try_reserve`) and capping map cells at 25 MB.
+- Ran the `pointconvert` unit tests (3) and the integration test (1): all pass. Verdict posted at https://github.com/0bnoxide/cadcraft/pull/33#issuecomment-6701711543: approved, pending green GitHub CI. Diagnostics amplification is #36 and was not reviewed.
