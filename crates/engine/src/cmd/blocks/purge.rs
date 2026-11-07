@@ -185,7 +185,12 @@ pub(in crate::cmd) fn candidates(d: &Drawing, kind: Kind) -> Vec<String> {
     match kind {
         Kind::Blocks => {
             let used = used_blocks(d);
-            d.blocks.values().filter(|b| !used.contains(&b.name.to_ascii_uppercase())).map(|b| b.name.clone()).collect()
+            // Uninserted override blocks hold persistent placement data, not unused geometry.
+            d.blocks
+                .values()
+                .filter(|b| !b.name.starts_with(super::super::callout_override::PREFIX) && !used.contains(&b.name.to_ascii_uppercase()))
+                .map(|b| b.name.clone())
+                .collect()
         }
         Kind::Layers => {
             let used = super::super::layer::used_layers(d);

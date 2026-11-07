@@ -6,6 +6,110 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn legacy_record_remains_readable_but_cannot_be_superseded() {
+    use sha2::{Digest, Sha256};
+    let file = History::new();
+    let mut old = execute(&file.0, &inputs()).unwrap();
+    old["draft"].as_object_mut().unwrap().remove("mission_key");
+    let legacy: cadcraft_droneqa::workflow::Draft = serde_json::from_value(old["draft"].clone()).unwrap();
+    old["draft_hash"] = json!(format!("{:x}", Sha256::digest(serde_json::to_vec(&legacy).unwrap())));
+    let mut line = serde_json::to_vec(&old).unwrap();
+    line.push(b'\n');
+    std::fs::write(&file.0, line).unwrap();
+    execute(&file.0, &review(&old)).unwrap();
+    let mut p = inputs();
+    p["action"] = json!("commit");
+    p["draft_id"] = old["draft_id"].clone();
+    p["expected_draft_hash"] = old["draft_hash"].clone();
+    p["note"] = json!("legacy commit");
+    execute(&file.0, &p).unwrap();
+    p = inputs();
+    p["supersedes_draft_id"] = old["draft_id"].clone();
+    let new = execute(&file.0, &p).unwrap();
+    execute(&file.0, &review(&new)).unwrap();
+    p["action"] = json!("supersede");
+    p["draft_id"] = new["draft_id"].clone();
+    p["expected_draft_hash"] = new["draft_hash"].clone();
+    p["prior_draft_id"] = old["draft_id"].clone();
+    p["note"] = json!("replacement");
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("LEGACY_SUPERSESSION_TARGET"));
+}
+
+#[test]
+fn supersede_commits_replacement_and_marks_prior_atomically() {
+    let file = History::new();
+    let mut p = inputs();
+    let old = execute(&file.0, &p).expect("old draft");
+    execute(&file.0, &review(&old)).expect("approve");
+    p["action"] = json!("commit");
+    p["draft_id"] = old["draft_id"].clone();
+    p["expected_draft_hash"] = old["draft_hash"].clone();
+    p["note"] = json!("original");
+    execute(&file.0, &p).expect("commit");
+    p = inputs();
+    p["supersedes_draft_id"] = old["draft_id"].clone();
+    let replacement = execute(&file.0, &p).expect("replacement");
+    execute(&file.0, &review(&replacement)).expect("approve replacement");
+    p["action"] = json!("supersede");
+    p["draft_id"] = replacement["draft_id"].clone();
+    p["expected_draft_hash"] = replacement["draft_hash"].clone();
+    p["prior_draft_id"] = old["draft_id"].clone();
+    p["note"] = json!("corrected evidence");
+    let mut wrong = p.clone();
+    wrong["prior_draft_id"] = replacement["draft_id"].clone();
+    assert!(execute(&file.0, &wrong).unwrap_err().starts_with("SUPERSESSION_NOT_REVIEWED"));
+    wrong["prior_draft_id"] = json!("another-record");
+    assert!(execute(&file.0, &wrong).unwrap_err().starts_with("SUPERSESSION_NOT_REVIEWED"));
+    let mut other = inputs();
+    other["mission"]["global_id"] = json!("22222222-2222-4222-8222-222222222222");
+    other["supersedes_draft_id"] = old["draft_id"].clone();
+    let foreign = execute(&file.0, &other).expect("other mission draft");
+    execute(&file.0, &review(&foreign)).expect("approve other");
+    other["action"] = json!("supersede");
+    other["draft_id"] = foreign["draft_id"].clone();
+    other["expected_draft_hash"] = foreign["draft_hash"].clone();
+    other["prior_draft_id"] = old["draft_id"].clone();
+    other["note"] = json!("must refuse");
+    assert!(execute(&file.0, &other).unwrap_err().starts_with("SUPERSESSION_TARGET"), "global mission identity must match");
+    let event = execute(&file.0, &p).expect("supersede");
+    assert_eq!(event["state"], "COMMITTED");
+    assert_eq!(event["supersedes_draft_id"], old["draft_id"]);
+    let history = execute(&file.0, &json!({"action":"history"})).expect("replay");
+    assert_eq!(history.as_array().unwrap().len(), 8);
+    assert!(execute(&file.0, &p).is_err());
+    let mut again = inputs();
+    again["supersedes_draft_id"] = old["draft_id"].clone();
+    let next = execute(&file.0, &again).unwrap();
+    execute(&file.0, &review(&next)).unwrap();
+    again["action"] = json!("supersede");
+    again["prior_draft_id"] = old["draft_id"].clone();
+    again["draft_id"] = next["draft_id"].clone();
+    again["expected_draft_hash"] = next["draft_hash"].clone();
+    again["note"] = json!("must not supersede twice");
+    assert!(execute(&file.0, &again).unwrap_err().starts_with("SUPERSESSION_TARGET"));
+}
+
+#[test]
+fn replacement_refuses_plain_commit_and_uncommitted_prior_without_appending() {
+    let file = History::new();
+    let old = execute(&file.0, &inputs()).unwrap();
+    let mut p = inputs();
+    p["supersedes_draft_id"] = old["draft_id"].clone();
+    let replacement = execute(&file.0, &p).unwrap();
+    execute(&file.0, &review(&replacement)).unwrap();
+    p["draft_id"] = replacement["draft_id"].clone();
+    p["expected_draft_hash"] = replacement["draft_hash"].clone();
+    p["note"] = json!("replacement");
+    p["action"] = json!("commit");
+    let before = std::fs::read(&file.0).unwrap();
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SUPERSESSION_NOT_REVIEWED"));
+    p["action"] = json!("supersede");
+    p["prior_draft_id"] = old["draft_id"].clone();
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SUPERSESSION_TARGET"));
+    assert_eq!(std::fs::read(&file.0).unwrap(), before);
+}
+
+#[test]
 fn hostile_report_and_nested_unknown_input_are_rejected_before_persistence() {
     let file = History::new();
     let mut input = inputs();

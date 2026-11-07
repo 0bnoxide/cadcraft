@@ -455,9 +455,8 @@ mod native {
         if d.layout(&p.layout).is_none() {
             d.layouts.push(Layout::new(&p.layout, 1));
         }
-        if p.plot.units == "Inches" {
-            d.header.set_i64("MEASUREMENT", 0);
-        }
+        let paper_unit = if p.plot.units == "Millimeters" { 1.0 } else { cadcraft_render::paper::paper_unit_mm(d) };
+        let profile_scale = if p.plot.units == "Inches" { 25.4 } else { 1.0 } / paper_unit;
         let layout = d.layouts.iter_mut().find(|l| l.name.eq_ignore_ascii_case(&p.layout)).ok_or("Layout missing")?;
         let layout_name = layout.name.clone();
         d.active_layout = Some(layout_name.clone());
@@ -561,7 +560,11 @@ mod native {
             }
         }
         for placeholder in &p.placeholders {
-            let r = &placeholder.rectangle;
+            let mut r = placeholder.rectangle.clone();
+            r.x *= profile_scale;
+            r.y *= profile_scale;
+            r.width *= profile_scale;
+            r.height *= profile_scale;
             if placeholder.kind == "DisabledViewport" {
                 let id = d
                     .layouts
@@ -609,7 +612,7 @@ mod native {
                 Default::default(),
                 EntityKind::Text(cadcraft_doc::Text {
                     insert: Vec3::new(r.x, r.y, 0.0),
-                    height: 2.5,
+                    height: 2.5 * profile_scale,
                     value: placeholder.label.clone(),
                     align_pt: None,
                     rotation: 0.0,
@@ -661,7 +664,7 @@ mod native {
                         || (l.page.height_mm - expected.page.height_mm).abs() > 1e-8
                         || l.page.file_paper.map(|(_, _, r)| r) != Some(i64::from(profile.plot.rotation / 90))
                         || l.page.plot_style_table != profile.plot.style_sheet
-                        || cadcraft_render::paper::page_unit_mm(actual, &l.page) != if profile.plot.units == "Inches" { 25.4 } else { 1.0 }
+                        || cadcraft_render::paper::page_unit_mm(actual, &l.page) != cadcraft_render::paper::page_unit_mm(wanted, &expected.page)
                     {
                         return Err("Saved plot settings differ".into());
                     }
@@ -903,13 +906,19 @@ mod tests {
             assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
             let path = root.join("Client - Site/Sheets/0.dxf");
             let d = cadcraft_io::read(&std::fs::read(&path).unwrap(), &path).unwrap();
+            assert_eq!(d.header.i64("MEASUREMENT", 0), 1, "keep metric template measurement");
             let p = &d.layout("Proposal").unwrap().page;
             assert_eq!(p.landscape, orientation == "Landscape");
             assert!((p.width_mm - 297.0).abs() < 1e-8);
             assert!((p.height_mm - 420.0).abs() < 1e-8);
             assert_eq!(p.file_paper.unwrap().2, rotation / 90);
             assert_eq!(p.plot_style_table, "monochrome.ctb");
-            assert_eq!(cadcraft_render::paper::page_unit_mm(&d, p), if units == "Inches" { 25.4 } else { 1.0 });
+            assert_eq!(cadcraft_render::paper::page_unit_mm(&d, p), 1.0);
+            if units == "Inches" {
+                assert!(d.layout("Proposal").unwrap().entities.iter().any(|e| {
+                    matches!(&e.kind, cadcraft_doc::EntityKind::Line(line) if ((line.b.x - line.a.x).hypot(line.b.y - line.a.y) - 25.4).abs() < 1e-8)
+                }));
+            }
             std::fs::remove_dir_all(root).unwrap();
         }
     }
