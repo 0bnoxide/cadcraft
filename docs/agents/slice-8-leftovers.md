@@ -12,12 +12,14 @@ If you find an issue that is not fixed in your current PR, file it as a GitHub i
 
 ## Scope
 
-Four small items that extend crates that already exist. No new crate, no new dependency. Port behaviour and the tests' intent, not the reference structure.
+Five small items that extend crates that already exist. No new crate, no new dependency. Port behaviour and the tests' intent, not the reference structure.
 
 1. **Checkpoint CSV for `droneqa`.** From the AutoGIS reference repo (read only) `autogis/core/envmon/drone_checkpoint_qa.py` and `tests/envmon/test_drone_checkpoint_qa.py`: read a GCP checkpoint CSV (expected and measured XYZ per point), compute horizontal and vertical RMSE, and grade them against thresholds. Reuse the RMSE and grading code `droneqa` already has for PIX4D reports; the CSV is a second input, not a second engine.
 2. **Supersede in `qareview`.** From the AIGIS3D reference repo (read only) `src/agol_uas_qa/workflow.py` (`supersede`, `SupersedesGlobalID`) and its tests in `tests/test_workflow.py` and `tests/test_workflow_adversarial.py`: commit a replacement draft that names the prior record, mark the prior record superseded, refuse a prior record from another mission or a draft that does not name it, and append an audit entry. Storage stays the drawing or JSON that slice 3 uses (no AGOL).
 3. **Callout placement overrides.** From AutoGIS `autogis/core/envmon/manage_callout_overrides.py` and `tests/envmon/test_manage_callout_overrides.py`, `test_cli_callout_overrides.py`: a per-location manual placement (anchor, offset, preferred quadrant, locked) that a `labelbatch` or `callout` rerun keeps instead of re-placing. The reference stores rows in a GDB table; here they live in the drawing. Reuse slice 4's owner tag (`labels::template::{APP_ID, Owner}`) if it fits.
 4. **Point File Converter.** From `CIM-Project-Suite-REVENG/docs/phase2/features/point_file_converter.md` only. Treat it as a **behaviour description only**: it came from a commercial product. Use our own names, settings and file format, never its enum names, settings schema or structure, and don't read anything else in that repo. Behaviour: translate the feature-code column of one or more point files (CSV or text) using a code map read with `subsurface::sheet` (XLSX/XLS/ODS/CSV), keep every other column and comment line unchanged, write one output per input with a prefix/suffix and optional tab delimiter, report unmatched codes, and refuse to overwrite an input or an existing output.
+
+5. **Fix #29.** `newproposal` sets a sheet drawing's `MEASUREMENT` header to 0 when the plot units are inches, which turns a metric template imperial. Keep the template's `MEASUREMENT` and store plot units on the layout's page setup only (or fix the paper code that reads `MEASUREMENT`), with a regression test that fails before the fix. Close #29 from the PR.
 
 Left out of this slice, by earlier owner decisions:
 - `soil_interval_selector`: it tiers lab results against screening levels, and lab data stays out of the fork (2026-11-04).
@@ -27,7 +29,7 @@ Left out of this slice, by earlier owner decisions:
 
 | Agent | Branch | Files | Builds |
 |---|---|---|---|
-| Codex (all code) | `slice8/codex-leftovers` | the existing `crates/droneqa`, `crates/labels` and `crates/survey` sources and tests it needs, the matching `crates/engine/src/cmd/*.rs`, `zh.tsv` rows for new labels, `docs/agents/slice-8-notes-codex.md` | The four items above. New commands: `pointconvert` ("Point File Converter") and `calloutoverride` ("Callout Override", actions set, clear and list). The checkpoint CSV is a new input to the existing `droneqa` command and supersede a new action of `qareview`, unless Claude agrees otherwise. |
+| Codex (all code) | `slice8/codex-leftovers` | the existing `crates/droneqa`, `crates/labels` and `crates/survey` sources and tests it needs, the matching `crates/engine/src/cmd/*.rs` (including `proposal.rs` for #29), `zh.tsv` rows for new labels, `docs/agents/slice-8-notes-codex.md` | The four items above. New commands: `pointconvert` ("Point File Converter") and `calloutoverride` ("Callout Override", actions set, clear and list). The checkpoint CSV is a new input to the existing `droneqa` command and supersede a new action of `qareview`, unless Claude agrees otherwise. |
 | Claude (review) | `slice8/claude-review` | `docs/agents/slice-8-notes-claude.md` only | **Design:** agrees or changes each of Codex's proposals below by message. **Review:** reviews Codex's PR in full, runs its tests, checks it against the references, and posts findings on the PR. |
 
 ## What to agree by message before coding against it
@@ -43,5 +45,5 @@ Codex proposes each one; Claude agrees or asks for changes.
 - [ ] `paseo logs <id> --filter tools` shows `send_agent_prompt` calls both ways: at least 3 from Claude and at least 4 from Codex.
 - [ ] All three items above were agreed by message before the dependent code was committed. Both notes logs show this with timestamps.
 - [ ] All code is on the Codex branch. Claude's branch changes only its notes file.
-- [ ] The listed AutoGIS and AIGIS3D tests are ported (adapted to our storage) and pass. Through the CLI or control channel: a checkpoint CSV grades a mission; a supersede marks the old record and a cross-mission supersede is refused; a `labelbatch` rerun keeps an overridden callout where it was put; `pointconvert` writes converted files and lists unmatched codes, and a second run onto the same outputs is refused.
+- [ ] The listed AutoGIS and AIGIS3D tests are ported (adapted to our storage) and pass. Through the CLI or control channel: a checkpoint CSV grades a mission; a supersede marks the old record and a cross-mission supersede is refused; a `labelbatch` rerun keeps an overridden callout where it was put; `pointconvert` writes converted files and lists unmatched codes, and a second run onto the same outputs is refused; a `newproposal` sheet from a metric template keeps `MEASUREMENT` 1 with inch plot units.
 - [ ] `cargo xtask ci` passes in GitHub CI on Linux and Windows for each head, and both merge without anyone fixing a conflict by hand. Merge `slice8/codex-leftovers` first, then Claude's notes.
