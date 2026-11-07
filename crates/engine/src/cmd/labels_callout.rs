@@ -14,7 +14,7 @@ use serde_json::{Value, json};
 pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("callout", "Place Callouts", run)
-            .params("{anchor:[x,y],record:{},rows:[[format parts]],height?:1,padding?:0.35,boundary?:Rect,kind?:table|mtext} -> {handles,overlap}"),
+            .params("{anchor:[x,y],record:{},rows:[[format parts]],height?:1,padding?:0.35,boundary?:Rect,kind?:table|mtext,template?:override template key,source?:override source key} -> {handles,overlap}"),
     ]
 }
 
@@ -100,7 +100,13 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         p.get("boundary").map(|v| serde_json::from_value(v.clone())).transpose().map_err(|e| bad("callout", e.to_string()))?;
     let flat = cells.iter().map(|c| literal(&c.text)).collect::<Vec<_>>().join("\\P");
     let (width, box_height) = if str_param(p, "kind") == Some("mtext") { measure(s, &flat, height)? } else { (g.bounds.width(), g.bounds.height()) };
-    let request = Request { anchor, width, height: box_height, origin: None, locked: false };
+    let mut request = Request { anchor, width, height: box_height, origin: None, locked: false };
+    if let (Some(template), Some(source)) = (str_param(p, "template"), str_param(p, "source"))
+        && let Some(o) = super::callout_override::find(s.doc()?, template, source)
+    {
+        o.apply(&mut request, height);
+    }
+    let anchor = request.anchor;
     let d = s.doc()?;
     let obstacles: Vec<_> = d
         .space(&s.space())
