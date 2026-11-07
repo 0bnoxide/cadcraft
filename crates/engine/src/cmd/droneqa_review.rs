@@ -11,7 +11,7 @@ pub fn specs() -> Vec<CommandSpec> {
         CommandSpec::new("pix4dimport", "Import PIX4D Report", import).enabled(always).noundo()
             .params("{text?: UTF-8 report | path?: report file, content_type?: text/plain} → ParseResult; PDF is not supported yet"),
         CommandSpec::new("qareview", "QA Review", review).enabled(always).noundo()
-            .params("{action: draft/review/commit/history, history: explicit JSONL sidecar path; draft: mission/ruleset/report or report_text/sensitive_fields; review: draft_id/expected_draft_hash/decision/reviewer/note; commit: draft_id/expected_draft_hash/note plus original draft inputs} → immutable audit event or history"),
+            .params("{action: draft/review/commit/supersede/history, history: explicit JSONL sidecar path; draft: mission/ruleset/report or report_text or checkpoint_csv+checkpoint_units:m|ft/sensitive_fields/supersedes_draft_id?; review: draft_id/expected_draft_hash/decision/reviewer/note; commit: draft_id/expected_draft_hash/note plus original draft inputs; supersede: commit inputs plus prior_draft_id matching the reviewed replacement link} → immutable audit event or history"),
     ]
 }
 

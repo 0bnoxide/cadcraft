@@ -17,7 +17,7 @@ const DEFAULT_SENSITIVE: &[&str] = &["pilot"];
 pub fn specs() -> Vec<CommandSpec> {
     vec![CommandSpec::new(ID, "Drone Survey QA", run).enabled(always).noundo().params(
         "{mission: canonical mission object, ruleset: ruleset object, report?: ParseResult (from pix4dimport) | \
-                 report_text?: report text + content_type?: (default text/plain), sensitive_fields?: [mission field] (default [\"pilot\"])} \
+                 report_text?: report text + content_type?: (default text/plain) | checkpoint_csv?: CSV text + checkpoint_units:m|ft, sensitive_fields?: [mission field] (default [\"pilot\"])} \
                  → {analysis: {findings, outcome, risk_level, ruleset_version}, summary}; findings from a sensitive field carry [REDACTED]",
     )]
 }
@@ -36,7 +36,7 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
     check_field_names("sensitive_fields", &sensitive).map_err(|e| bad(ID, e))?;
     let text = opt_str(p, "report_text")?;
     let content_type = opt_str(p, "content_type")?.unwrap_or("text/plain");
-    let report: Option<ParseResult> = match (p.get("report").filter(|v| !v.is_null()), text) {
+    let mut report: Option<ParseResult> = match (p.get("report").filter(|v| !v.is_null()), text) {
         (Some(_), Some(_)) => return Err(bad(ID, "give `report` or `report_text`, not both")),
         (Some(r), None) => {
             check_shape("report", r).map_err(|e| bad(ID, e))?;
@@ -46,6 +46,16 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         (None, Some(text)) => Some(pix4d::parse(text.as_bytes(), content_type)),
         (None, None) => None,
     };
+    if let Some(csv) = opt_str(p, "checkpoint_csv")? {
+        if report.is_some() {
+            return Err(bad(ID, "INVALID_CHECKPOINT_CSV: give only one report input"));
+        }
+        let units = opt_str(p, "checkpoint_units")?.ok_or_else(|| bad(ID, "INVALID_CHECKPOINT_CSV: checkpoint_units required"))?;
+        let mut parsed = cadcraft_droneqa::checkpoint::parse(csv, units).map_err(|e| bad(ID, e))?;
+        parsed.metrics.checkpoints_independent = mission.checkpoints_independent;
+        parsed.metrics.checkpoints_bare_ground = mission.checkpoints_bare_ground;
+        report = Some(parsed);
+    }
     if let Some(r) = &report {
         validate_report(r).map_err(|e| bad(ID, e))?;
     }
@@ -67,6 +77,23 @@ fn opt_str<'a>(p: &'a Value, key: &str) -> Result<Option<&'a str>> {
 #[allow(clippy::unwrap_used, clippy::expect_used, clippy::panic)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn checkpoint_csv_requires_units_and_grades_converted_errors() {
+        let mut s = Session::new();
+        let (mut mission, ruleset) = scenario("pass");
+        for name in ["rmse_x_feet", "rmse_y_feet", "rmse_z_feet"] {
+            mission.as_object_mut().unwrap().remove(name);
+        }
+        let mut p = json!({"mission":mission,"ruleset":ruleset,
+            "checkpoint_csv":"gcp_id,expected_x,expected_y,expected_z,measured_x,measured_y,measured_z\nA,0,0,0,0,0,1\n"});
+        assert!(s.execute(ID, &p).is_err(), "units are mandatory");
+        p["checkpoint_units"] = json!("m");
+        let v = s.execute(ID, &p).unwrap();
+        let z = v["analysis"]["findings"].as_array().unwrap().iter().find(|f| f["rule_id"] == "ACCURACY.RMSE_Z").unwrap();
+        assert_eq!(z["outcome"], "FAIL");
+        assert!((z["observed"].as_f64().unwrap() - 1.0 / 0.3048).abs() < 1e-9);
+    }
 
     const FIXTURES: &str = concat!(env!("CARGO_MANIFEST_DIR"), "/../droneqa/tests/fixtures");
 

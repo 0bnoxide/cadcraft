@@ -190,7 +190,11 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         let contents = literal(&format(&t.content, &source.props, i as u64));
         let (width, height) = measure(s, &contents, t.height)?;
         texts.push(contents);
-        requests.push(Request { anchor: source.at, width, height, origin: None, locked: false });
+        let mut request = Request { anchor: source.at, width, height, origin: None, locked: false };
+        if let Some(o) = super::callout_override::find(s.doc()?, &t.id, &source.key) {
+            o.apply(&mut request, t.height);
+        }
+        requests.push(request);
     }
     let placed = place(&requests, &[], t.boundary, t.height, 0.0).map_err(|e| bad("labelbatch", e))?;
     let mut existing: std::collections::BTreeMap<String, Vec<Handle>> = std::collections::BTreeMap::new();
@@ -206,11 +210,12 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
     let mut updated = 0;
     let mut overlaps = 0;
     for ((source, contents), position) in sources.iter().zip(texts).zip(placed) {
+        let anchor = requests.get(position.index).ok_or_else(|| bad("labelbatch", "missing placement request"))?.anchor;
         let at = Pt { x: position.rect.min_x, y: position.rect.max_y };
         let label = text(contents, at, t.height);
         let kind = if t.leader {
             EntityKind::MLeader(MLeader {
-                leaders: vec![vec![Vec3 { x: source.at.x, y: source.at.y, z: 0.0 }]],
+                leaders: vec![vec![Vec3 { x: anchor.x, y: anchor.y, z: 0.0 }]],
                 landing: label.insert,
                 dogleg: 0.0,
                 text: Some(label),
@@ -254,6 +259,41 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
 mod tests {
     use crate::Session;
     use serde_json::json;
+    #[test]
+    fn override_survives_rerun() {
+        let mut s = Session::new();
+        s.execute("point", &json!({"at":[1,2,3]})).unwrap();
+        let source = s.doc().unwrap().model.iter().next().unwrap().handle.hex();
+        s.execute("calloutoverride", &json!({"action":"set","template":"manual","source":source,"anchor":[10,20],"offset":[3,4],"locked":true}))
+            .unwrap();
+        let p = json!({"template":{"id":"manual","source":{"kind":"points"},"content":[],"height":1.0,"leader":true}});
+        let a = s.execute("labelbatch", &p).unwrap();
+        let b = s.execute("labelbatch", &p).unwrap();
+        assert_eq!(a["handles"], b["handles"]);
+        s.execute("purge", &json!({"type":"blocks"})).unwrap();
+        assert_eq!(s.execute("calloutoverride", &json!({"action":"list"})).unwrap()["overrides"].as_array().unwrap().len(), 1);
+        let h = cadcraft_doc::Handle::parse_hex(a["handles"][0].as_str().unwrap()).unwrap();
+        let e = s.doc().unwrap().entity(h).unwrap();
+        match &e.kind {
+            cadcraft_doc::EntityKind::MLeader(m) => {
+                assert!((m.text.as_ref().unwrap().insert.x - 13.0).abs() < 1e-8);
+                assert_eq!(m.leaders[0][0].x, 10.0);
+                assert_eq!(m.leaders[0][0].y, 20.0);
+            }
+            _ => panic!("expected label"),
+        }
+        for name in ["overrides.dxf", "overrides.dwg"] {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), name).unwrap();
+            let drawing = cadcraft_io::read(&bytes, name).unwrap();
+            assert!(super::super::callout_override::find(&drawing, "manual", &source).is_some(), "{name}");
+            *s.doc_mut().unwrap() = drawing;
+            let rerun = s.execute("labelbatch", &p).unwrap();
+            let h = cadcraft_doc::Handle::parse_hex(rerun["handles"][0].as_str().unwrap()).unwrap();
+            assert!(
+                matches!(&s.doc().unwrap().entity(h).unwrap().kind, cadcraft_doc::EntityKind::MLeader(m) if m.text.as_ref().is_some_and(|t| (t.insert.x-13.0).abs()<1e-8))
+            );
+        }
+    }
     #[test]
     fn batch_rerun_updates_handles_and_delete_keeps_source() {
         let mut s = Session::new();

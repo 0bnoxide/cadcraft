@@ -1497,4 +1497,6 @@ menu	View	视图
 	Xref Clip Frame	外部参照剪裁边框
 	Ctrl+Enter to apply	Ctrl+Enter 应用
 	Edit Text	编辑文字
+	Point File Converter	点文件转换器
+	Callout Override	标注位置覆盖
 	The drawing changed. Close the window and open it again.	图纸已切换。请关闭窗口后重新打开。

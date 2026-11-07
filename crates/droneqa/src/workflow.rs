@@ -97,13 +97,24 @@ fn context(params: &Value) -> Result<Context, String> {
         Some(Value::String(value)) => value,
         _ => return Err("INVALID_INPUT: content_type must be a string".into()),
     };
-    let report = match (params.get("report").filter(|value| !value.is_null()), params.get("report_text").filter(|value| !value.is_null())) {
+    let mut report = match (params.get("report").filter(|value| !value.is_null()), params.get("report_text").filter(|value| !value.is_null())) {
         (Some(_), Some(_)) => return Err("INVALID_INPUT: give report or report_text, not both".into()),
         (Some(value), None) => Some(serde_json::from_value(value.clone()).map_err(|_| "INVALID_INPUT: invalid report")?),
         (None, Some(Value::String(text))) => Some(pix4d::parse(text.as_bytes(), content_type)),
         (None, Some(_)) => return Err("INVALID_INPUT: report_text must be a string".into()),
         (None, None) => None,
     };
+    if let Some(csv) = params.get("checkpoint_csv").filter(|v| !v.is_null()) {
+        if report.is_some() {
+            return Err("INVALID_CHECKPOINT_CSV: give only one report input".into());
+        }
+        let text = csv.as_str().ok_or("INVALID_CHECKPOINT_CSV: text required")?;
+        let units = params.get("checkpoint_units").and_then(Value::as_str).ok_or("INVALID_CHECKPOINT_CSV: checkpoint_units required")?;
+        let mut parsed = crate::checkpoint::parse(text, units)?;
+        parsed.metrics.checkpoints_independent = mission.checkpoints_independent;
+        parsed.metrics.checkpoints_bare_ground = mission.checkpoints_bare_ground;
+        report = Some(parsed);
+    }
     if let Some(report) = &report {
         qa::validate_report(report)?;
     }
@@ -114,6 +125,10 @@ fn context(params: &Value) -> Result<Context, String> {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Draft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub mission_key: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub supersedes_draft_id: Option<String>,
     pub schema_version: u32,
     pub draft_id: String,
     pub mission_id: Option<String>,
@@ -128,6 +143,8 @@ pub struct Draft {
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 struct Event {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    supersedes_draft_id: Option<String>,
     schema_version: u32,
     draft_id: String,
     state: String,
@@ -180,6 +197,7 @@ fn load(path: &Path) -> Result<Vec<Event>, String> {
             }),
             ("APPROVED" | "REJECTED", Some(prior)) => {
                 prior.state != "COMMITTED"
+                    && !events.iter().any(|e| e.supersedes_draft_id.as_deref() == Some(&event.draft_id))
                     && event.draft.is_none()
                     && event.draft_hash == prior.draft_hash
                     && event.reviewer.as_ref().is_some_and(|value| !value.trim().is_empty())
@@ -195,6 +213,26 @@ fn load(path: &Path) -> Result<Vec<Event>, String> {
         };
         if !valid {
             return Err("INVALID_HISTORY: invalid transition or draft integrity".into());
+        }
+        if let Some(old_id) = &event.supersedes_draft_id {
+            let replacement = events.iter().find_map(|e| e.draft.as_ref().filter(|d| d.draft_id == event.draft_id));
+            let old = events.iter().rev().find(|e| &e.draft_id == old_id);
+            let old_draft = events.iter().find_map(|e| e.draft.as_ref().filter(|d| &d.draft_id == old_id));
+            if event.state != "COMMITTED"
+                || old_id == &event.draft_id
+                || old.is_none_or(|e| e.state != "COMMITTED")
+                || events.iter().any(|e| e.supersedes_draft_id.as_ref() == Some(old_id))
+                || replacement.zip(old_draft).is_none_or(|(new, old)| {
+                    new.supersedes_draft_id.as_ref() != Some(old_id)
+                        || new.mission_key.is_none()
+                        || new.mission_key != old.mission_key
+                        || new.mission_id.is_none()
+                        || new.mission_id.as_deref() == Some("[REDACTED]")
+                        || new.mission_id != old.mission_id
+                })
+            {
+                return Err("INVALID_HISTORY: invalid supersession".into());
+            }
         }
         let value = serde_json::to_value(&event).map_err(|_| "INVALID_HISTORY: invalid record")?;
         if redact(&value, &[]) != value {
@@ -227,6 +265,7 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
     let timestamp = chrono::DateTime::<Utc>::from(std::time::SystemTime::now()).to_rfc3339();
     let previous_hash = events.last().map(hash).transpose()?.unwrap_or_default();
     let mut event = Event {
+        supersedes_draft_id: None,
         schema_version: 1,
         draft_id: String::new(),
         state: String::new(),
@@ -244,6 +283,12 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
             let draft_id = hash(&json!([ctx.source_hash, timestamp, events.len()]))?;
             let mission_id = if ctx.sensitive.iter().any(|field| field == "mission_id") { Some("[REDACTED]".into()) } else { ctx.mission.mission_id };
             let draft = Draft {
+                mission_key: Some(hash(&ctx.mission.global_id)?),
+                supersedes_draft_id: params
+                    .get("supersedes_draft_id")
+                    .filter(|v| !v.is_null())
+                    .map(|_| note(params, "supersedes_draft_id", 128))
+                    .transpose()?,
                 schema_version: 1,
                 draft_id: draft_id.clone(),
                 mission_id,
@@ -259,7 +304,7 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
             event.draft_hash = hash(&draft)?;
             event.draft = Some(draft);
         }
-        "review" | "commit" => {
+        "review" | "commit" | "supersede" => {
             let draft_id = string(params, "draft_id")?;
             let prior = events.iter().rev().find(|event| event.draft_id == draft_id).ok_or("DRAFT_NOT_FOUND: prepare a draft")?;
             if string(params, "expected_draft_hash")? != prior.draft_hash {
@@ -267,6 +312,9 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
             }
             if prior.state == "COMMITTED" {
                 return Err("ALREADY_COMMITTED: no additional event written".into());
+            }
+            if events.iter().any(|e| e.supersedes_draft_id.as_deref() == Some(draft_id)) {
+                return Err("SUPERSESSION_TARGET: record is superseded".into());
             }
             event.draft_id = draft_id.into();
             event.draft_hash = prior.draft_hash.clone();
@@ -294,10 +342,36 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
                 if analysis != draft.analysis {
                     return Err("ANALYSIS_CHANGED: prepare and review a new draft".into());
                 }
+                if action == "supersede" {
+                    let old_id = string(params, "prior_draft_id")?;
+                    if old_id == draft_id || draft.supersedes_draft_id.as_deref() != Some(old_id) {
+                        return Err("SUPERSESSION_NOT_REVIEWED: replacement must name the prior record".into());
+                    }
+                    let old = events.iter().rev().find(|e| e.draft_id == old_id).ok_or("SUPERSESSION_TARGET: prior record missing")?;
+                    let old_draft = events
+                        .iter()
+                        .find_map(|e| e.draft.as_ref().filter(|d| d.draft_id == old_id))
+                        .ok_or("INVALID_HISTORY: prior draft missing")?;
+                    if old_draft.mission_key.is_none() {
+                        return Err("LEGACY_SUPERSESSION_TARGET: prior record has no verified mission identity".into());
+                    }
+                    if old.state != "COMMITTED"
+                        || events.iter().any(|e| e.supersedes_draft_id.as_deref() == Some(old_id))
+                        || draft.mission_id.as_deref().is_none_or(|id| id.is_empty() || id == "[REDACTED]")
+                        || draft.mission_id != old_draft.mission_id
+                        || draft.mission_key.is_none()
+                        || draft.mission_key != old_draft.mission_key
+                    {
+                        return Err("SUPERSESSION_TARGET: prior must be a committed current record for this mission".into());
+                    }
+                    event.supersedes_draft_id = Some(old_id.into());
+                } else if draft.supersedes_draft_id.is_some() {
+                    return Err("SUPERSESSION_NOT_REVIEWED: use supersede for a replacement".into());
+                }
                 event.state = "COMMITTED".into();
             }
         }
-        _ => return Err("INVALID_INPUT: action must be draft, review, commit or history".into()),
+        _ => return Err("INVALID_INPUT: action must be draft, review, commit, supersede or history".into()),
     }
     let value = serde_json::to_value(&event).map_err(|_| "INVALID_INPUT: cannot serialize event")?;
     if redact(&value, &[]) != value {
