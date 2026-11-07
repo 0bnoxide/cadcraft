@@ -60,8 +60,64 @@ fn fields(row: &str, delimiter: u8) -> Result<Vec<(&str, String)>> {
     Ok(out)
 }
 
-fn encode(value: &str, delimiter: u8) -> String {
-    if value.contains([delimiter as char, '"', '\r', '\n']) { format!("\"{}\"", value.replace('"', "\"\"")) } else { value.into() }
+fn append(out: &mut String, value: &str, limit: usize) -> Result<()> {
+    // Bound expansion before allocation: an allocator abort cannot be caught by Session's guard.
+    if out.len().checked_add(value.len()).is_none_or(|len| len > limit) {
+        return Err(bad(ID, "output exceeds 25 MB"));
+    }
+    out.try_reserve(value.len()).map_err(|_| bad(ID, "cannot allocate converted output"))?;
+    out.push_str(value);
+    Ok(())
+}
+
+fn encode(out: &mut String, value: &str, delimiter: u8, limit: usize) -> Result<()> {
+    if value.contains([delimiter as char, '"', '\r', '\n']) {
+        append(out, "\"", limit)?;
+        for part in value.split_inclusive('"') {
+            append(out, part, limit)?;
+            if part.ends_with('"') {
+                append(out, "\"", limit)?;
+            }
+        }
+        append(out, "\"", limit)
+    } else {
+        append(out, value, limit)
+    }
+}
+
+fn translate(
+    value: &str,
+    separator: Option<char>,
+    map: &BTreeMap<String, String>,
+    unmatched: &mut BTreeSet<String>,
+    remaining: usize,
+) -> Result<String> {
+    let mut out = String::new();
+    for (index, code) in value.split(|c| Some(c) == separator).enumerate() {
+        if index > 0
+            && let Some(sep) = separator
+        {
+            append(&mut out, sep.encode_utf8(&mut [0; 4]), remaining)?;
+        }
+        match map.get(code) {
+            Some(replacement) => append(&mut out, replacement, remaining)?,
+            None => {
+                append(&mut out, code, remaining)?;
+                unmatched.insert(code.into());
+            }
+        }
+    }
+    Ok(out)
+}
+
+fn map_text(cell: Option<&cadcraft_subsurface::Cell>) -> Result<String> {
+    // A compressed sheet can contain a cell larger than the file-read cap.
+    match cell {
+        Some(cadcraft_subsurface::Cell::Text(value)) if value.len() as u64 > MAX => Err(bad(ID, "map field exceeds 25 MB")),
+        Some(cadcraft_subsurface::Cell::Text(value)) => Ok(value.clone()),
+        Some(cell) => Ok(cell.text()),
+        None => Ok(String::new()),
+    }
 }
 
 fn run(_: &mut Session, p: &Value) -> Result<Value> {
@@ -104,16 +160,14 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
     let to = sheet.column("to").ok_or_else(|| bad(ID, "to header required"))?;
     let mut map = BTreeMap::new();
     for row in sheet.rows.iter().skip(1) {
-        if row.iter().all(|c| c.text().is_empty()) {
+        if row
+            .iter()
+            .all(|c| matches!(c, cadcraft_subsurface::Cell::Empty) || matches!(c, cadcraft_subsurface::Cell::Text(value) if value.trim().is_empty()))
+        {
             continue;
         }
-        let raw = |i| match row.get(i) {
-            Some(cadcraft_subsurface::Cell::Text(s)) => s.clone(),
-            Some(c) => c.text(),
-            None => String::new(),
-        };
-        let key = raw(from);
-        let value = raw(to);
+        let key = map_text(row.get(from))?;
+        let value = map_text(row.get(to))?;
         if key.is_empty() || map.insert(key, value.clone()).is_some_and(|old| old != value) {
             return Err(bad(ID, "blank or conflicting map key"));
         }
@@ -146,36 +200,26 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         let text = std::str::from_utf8(&bytes).map_err(|_| bad(ID, "input must be UTF-8"))?;
         let mut result = String::new();
         let (bom, text) = text.strip_prefix('\u{feff}').map_or(("", text), |s| ("\u{feff}", s));
-        result.push_str(bom);
+        append(&mut result, bom, MAX as usize)?;
         for (index, line) in text.split_inclusive('\n').enumerate() {
             let body = line.trim_end_matches(['\r', '\n']);
             let ending = line.get(body.len()..).unwrap_or("");
             if body.trim_start().starts_with(['#', ';']) || body.trim().is_empty() {
-                result.push_str(line);
+                append(&mut result, line, MAX as usize)?;
                 continue;
             }
             let parsed = fields(body, delimiter)?;
             if column >= parsed.len() {
                 short_rows.push(json!({"file":path,"row":index+1}));
-                result.push_str(line);
+                append(&mut result, line, MAX as usize)?;
                 continue;
             }
             for (i, (original, value)) in parsed.iter().enumerate() {
                 if i > 0 {
-                    result.push(if tab { '\t' } else { delimiter as char });
+                    append(&mut result, (if tab { '\t' } else { delimiter as char }).encode_utf8(&mut [0; 4]), MAX as usize)?;
                 }
                 let translated = if i == column {
-                    let convert = |code: &str, misses: &mut BTreeSet<String>| -> String {
-                        map.get(code).cloned().unwrap_or_else(|| {
-                            misses.insert(code.into());
-                            code.into()
-                        })
-                    };
-                    Some(if let Some(sep) = separator {
-                        value.split(sep).map(|c| convert(c, &mut unmatched)).collect::<Vec<_>>().join(&sep.to_string())
-                    } else {
-                        convert(value, &mut unmatched)
-                    })
+                    Some(translate(value, separator, &map, &mut unmatched, (MAX as usize).saturating_sub(result.len()))?)
                 } else {
                     None
                 };
@@ -184,17 +228,14 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
                     if value.contains(['\t', '\r', '\n']) {
                         return Err(bad(ID, "tab output cannot contain embedded tabs or newlines"));
                     }
-                    result.push_str(value);
+                    append(&mut result, value, MAX as usize)?;
                 } else if let Some(value) = translated {
-                    result.push_str(&encode(&value, delimiter));
+                    encode(&mut result, &value, delimiter, MAX as usize)?;
                 } else {
-                    result.push_str(original);
+                    append(&mut result, original, MAX as usize)?;
                 }
             }
-            result.push_str(ending);
-            if result.len() as u64 > MAX {
-                return Err(bad(ID, "output exceeds 25 MB"));
-            }
+            append(&mut result, ending, MAX as usize)?;
         }
         total_bytes = total_bytes.saturating_add(result.len());
         if total_bytes > 64_000_000 {
@@ -226,4 +267,37 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
         }
     }
     Ok(json!({"files":planned.iter().map(|(p,_)|p).collect::<Vec<_>>(),"unmatched":unmatched,"short_rows":short_rows}))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn separated_replacements_refuse_expansion_beyond_remaining_output_budget() {
+        let map = BTreeMap::from([("A".into(), "12345".into())]);
+        let mut unmatched = BTreeSet::new();
+        assert!(translate("A;A;Z", Some(';'), &map, &mut unmatched, 10).is_err());
+        assert!(unmatched.is_empty(), "stop before inspecting later codes, rather than checking after collect/join");
+        assert_eq!(translate("A;A", Some(';'), &map, &mut BTreeSet::new(), 11).unwrap(), "12345;12345");
+    }
+
+    #[test]
+    fn escaped_output_and_utf8_separators_count_bytes_before_appending() {
+        let mut out = "1234".to_string();
+        assert!(encode(&mut out, "a\"b", b',', 9).is_err());
+        assert!(out.len() <= 9);
+        let mut exact = "1234".to_string();
+        encode(&mut exact, "a\"b", b',', 10).unwrap();
+        assert_eq!(exact, "1234\"a\"\"b\"");
+        let map = BTreeMap::from([("A".into(), "é".into())]);
+        assert!(translate("A💠A", Some('💠'), &map, &mut BTreeSet::new(), 7).is_err());
+        assert_eq!(translate("A💠A", Some('💠'), &map, &mut BTreeSet::new(), 8).unwrap(), "é💠é");
+    }
+
+    #[test]
+    fn oversized_map_value_is_refused_before_cloning() {
+        let cell = cadcraft_subsurface::Cell::Text("x".repeat(MAX as usize + 1));
+        assert!(map_text(Some(&cell)).is_err());
+    }
 }
