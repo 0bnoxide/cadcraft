@@ -21,6 +21,12 @@ Role: review only. All code is on `slice9/codex-follow-ons`. This branch changes
 | 2026-11-10T00:53Z (earlier) | received | The author found a host-name guard using ASCII-only comparison; fix to come with the review fixes. |
 | 2026-11-10T00:53Z (earlier) | received | The author's plan for the five findings, with two scope questions. |
 | 2026-11-10T00:53Z | sent | Review done: changes requested, five findings on the PR; scope questions answered; #44 and #45 filed. |
+| 2026-11-10T01:00Z | received | Full-drawing comparison differs only by `EXTMIN`/`EXTMAX`, which the writer adds with the new image; the author proposes deriving the expected extents rather than exempting them. Also fixing dimension text-style name spelling. |
+| 2026-11-10T01:00Z | sent | Agreed both; exemption of exactly those two values only as a documented fallback. |
+| 2026-11-10T01:03Z | received | Status: all five fixes in place locally with the two extra fixes; extents are explicit plan actions; full CI and CLI check running before the push. |
+| 2026-11-10T01:06Z | received | Fixes pushed to #43 at head `762deafb`; hosted gates running. |
+| 2026-11-10T01:10Z | received | Hosted gates still running; the author asks for the link to the register-only note so every unfixed finding is linked from the PR. |
+| 2026-11-10T02:11Z | sent | Verdict: #43 approved at `762deafb`, no open findings, hosted gates pass; the two extra notes are items 4 and 5 on #45. (The author's agent session had been closed by then; the message was queued.) |
 
 ## Design agreements
 
@@ -57,3 +63,19 @@ Findings, posted on the PR:
 5. Attachments are not checked for resolving to the copied file.
 
 Non-blocking notes filed as issues: [#44](https://github.com/0bnoxide/cadcraft/issues/44) (stale lock file) and [#45](https://github.com/0bnoxide/cadcraft/issues/45) (clean-ups).
+
+### Round 2: PR #43 at `762deafb`, approved
+
+Read the incremental diff from `243dbc4c` in full. All five findings are fixed, each with a test:
+
+1. Only the source entry is checked for links; a source under a redirected parent is accepted.
+2. Targets under the source location or any `_superseded` folder are refused as `protected_target`.
+3. `same_drawing` compares the whole `Drawing`, normalising only `HANDSEED`, `handseed` and `Foreign.targets`. `EXTMIN`/`EXTMAX` are derived and shown as `set_extent` plan actions. A lossy writer is refused as `lossy_format`.
+4. A 2x1 PNG gives `imageattach_default` at 2:1; undecodable bytes give the recorded unit-square fallback.
+5. After publication each copy's hash is rechecked and each relative reference must resolve to the copied file.
+
+Also in the push: the host-name guard uses `paths::case_fold`, and a dimension style's text-style reference takes the existing style's spelling.
+
+Ran on Windows at `762deafb`: `cadcraft-proposal` and `cadcraft-droneqa` suites (pass), 17 engine workflow and `pointconvert` tests (pass), clippy on the three crates (clean). Hosted gates on ubuntu-24.04 and windows-latest pass on the same head. Not run locally: full `cargo xtask ci`, wasm, the CLI acceptance run, Linux or macOS.
+
+Non-blocking, added to [#45](https://github.com/0bnoxide/cadcraft/issues/45#issuecomment-6755983604): a register-only intake still rewrites and swaps `BaseModel`, and the derived extents set z to 0.
