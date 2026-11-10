@@ -57,7 +57,7 @@ Codex proposes each one; Claude agrees or asks for changes.
 
 ## Owner decisions
 
-These were open owner inputs in the references. The recommended answers are written into the scope above; the owner confirms or changes them before the agents start.
+These were open owner inputs in the references. The owner confirmed all five on 2026-11-10; they are written into the scope above.
 
 1. One PDF per sheet (not one multi-page PDF per deliverable), so the count rule is "PDFs equal selected sheets".
 2. Deliverable profile defaults: all sheets ship, PDFs are named `<sheet number>_<sheet title>.pdf` after the `paths` rules, and drawings do not travel unless the profile says so.
