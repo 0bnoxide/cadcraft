@@ -14,6 +14,13 @@ Role: review only. All code is on `slice9/codex-follow-ons`. This branch changes
 | 2026-11-10T00:10Z | received | All amendments accepted, no PR split. `manifest_path` only locates ProjectConfiguration; a differing manifest is refused as `manifest_mismatch`. Closed style field lists. Proposed a fixed 1x1 image size. |
 | 2026-11-10T00:10Z | sent | Agreed `manifest_mismatch`, the style field lists and the #34/#36 approach. Changed images: reuse the existing `imageattach` sizing; 1x1 only as a recorded fallback. |
 | 2026-11-10T00:13Z | received | Image change accepted: intake calls the existing `imageattach` code during planning; unit square only on decode failure, with the reason in the row. Regression tests fail on the baseline as expected. |
+| 2026-11-10T00:30Z | received | Status: implementation in place, testing before the PR. Two points to check at review: the image clip is canonicalised by a host-format round trip before plan hashing, and settings verification ignores `HANDSEED`. |
+| 2026-11-10T00:37Z | received | Status: fmt and clippy pass; `cargo xtask ci` on Windows fails rebuilding its own running `xtask.exe` (filed as #41), so the author runs the seven gates through a separate driver target directory. No CI or config files changed. |
+| 2026-11-10T00:44Z | received | Status: seven gates passed through the separate-driver command (4070 passed, 28 skipped); CLI acceptance passed; raw CSV hashing added for #34 staleness. Repeating CI on the final changes, PR next. |
+| 2026-11-10T00:53Z (earlier) | received | PR up: #43 at head `243dbc4c`, review requested. |
+| 2026-11-10T00:53Z (earlier) | received | The author found a host-name guard using ASCII-only comparison; fix to come with the review fixes. |
+| 2026-11-10T00:53Z (earlier) | received | The author's plan for the five findings, with two scope questions. |
+| 2026-11-10T00:53Z | sent | Review done: changes requested, five findings on the PR; scope questions answered; #44 and #45 filed. |
 
 ## Design agreements
 
@@ -37,4 +44,16 @@ Agreed by message at 2026-11-10T00:10Z, before any dependent code (the author re
 
 ## Review
 
-Pending the PR.
+### Round 1: PR #43 at `243dbc4c`, changes requested
+
+Ran on Windows: `cadcraft-proposal` and `cadcraft-droneqa` suites (pass), 14 engine workflow tests (pass), clippy on the three crates (clean). Not run: full `cargo xtask ci`, wasm, the CLI acceptance run, Linux or macOS.
+
+Findings, posted on the PR:
+
+1. Intake refuses sources under any linked parent folder; only the source itself should be checked.
+2. `configuredrawing` accepts intake copies and `_superseded/` files as targets.
+3. The lossless and "nothing else changed" comparisons cover only part of the drawing.
+4. No test for the agreed `imageattach` sizing path.
+5. Attachments are not checked for resolving to the copied file.
+
+Non-blocking notes filed as issues: [#44](https://github.com/0bnoxide/cadcraft/issues/44) (stale lock file) and [#45](https://github.com/0bnoxide/cadcraft/issues/45) (clean-ups).
