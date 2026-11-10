@@ -217,6 +217,7 @@ mod native {
             let source = profile_path.parent().ok_or("unsafe_path: profile parent missing")?.join(&extra.path);
             outgoing::safe_source(&source)?;
             let source = source.canonicalize().map_err(|e| e.to_string())?;
+            no_named_streams(&source)?;
             refs.add(&source)?;
             let name = source.file_name().and_then(|n| n.to_str()).ok_or("unsafe_path: extra filename is not Unicode")?;
             let dest = extra.destination(name).map_err(|e| format!("{}: {}", e.code, e.message))?;
@@ -237,13 +238,70 @@ mod native {
         let parent = files::child(&project.root, "Deliverables")?;
         let (package_path, zip_path) = pair(&parent)?;
         let entries: Vec<_> = entries.into_values().collect();
+        check_copy_sources(&entries)?;
         refs.check()?;
         let plan = json!({"version":1,"command":"packagedeliverables","proposal_root":project.root,"package_path":package_path,"zip_path":zip_path,
             "sheets":sheets,"files":entries,"generated_files":["checksums.json"],"fingerprints":refs.fingerprints,"project_fingerprints":project.fingerprints});
         Ok(Built { plan, project, refs, entries })
     }
+    fn no_named_streams(path: &Path) -> Checked<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            // Bound the dependency's UTF-16 path allocation and prevent Win32 NUL truncation.
+            if path.as_os_str().encode_wide().take(32_768).count() >= 32_768 || path.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err("stream_inspection_failed: path is invalid or too long".into());
+            }
+            let failed = |e| format!("stream_inspection_failed: cannot inspect {}: {e}", path.display());
+            // The lazy iterator skips only the unnamed $DATA stream on Windows. One next()
+            // inspects at most that stream and the first named stream, including empty ones.
+            // Copies and ZIPs preserve only primary bytes: never certify omitted data.
+            let mut streams = match fsquirrel::list(path) {
+                Ok(streams) => streams,
+                // FindFirstStreamW reports ERROR_HANDLE_EOF for an ordinary directory:
+                // directories have no unnamed $DATA stream. fsquirrel returns the HRESULT.
+                // Only this documented empty result is accepted; unsupported filesystems
+                // and all other inspection failures must remain errors.
+                Err(e) if e.raw_os_error() == Some(0x8007_0026_u32.cast_signed()) && path.is_dir() => return Ok(()),
+                Err(e) => return Err(failed(e)),
+            };
+            if streams.next().transpose().map_err(failed)?.is_some() {
+                return Err(format!("named_stream: {} has a named stream not covered by the package checksums", path.display()));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(all(test, windows))]
+    mod stream_tests {
+        use super::no_named_streams;
+        use std::path::Path;
+
+        #[test]
+        fn unavailable_stream_inspection_is_an_error() {
+            let missing = std::env::temp_dir().join(format!("cadcraft-missing-stream-{}", super::files::run_id()));
+            let error = no_named_streams(&missing).unwrap_err();
+            assert!(error.starts_with("stream_inspection_failed:"), "{error}");
+        }
+
+        #[test]
+        fn stream_inspection_rejects_nul_and_overlong_paths() {
+            for path in ["file\0hidden".to_string(), "x".repeat(32_768)] {
+                let error = no_named_streams(Path::new(&path)).unwrap_err();
+                assert!(error.starts_with("stream_inspection_failed:"), "{error}");
+            }
+        }
+    }
+    fn check_copy_sources(entries: &[Entry]) -> Checked<()> {
+        for entry in entries.iter().filter(|entry| entry.layout.is_none()) {
+            no_named_streams(&entry.source)?;
+        }
+        Ok(())
+    }
     fn copy(source: &Path, target: &Path) -> Checked<()> {
         outgoing::safe_source(source)?;
+        no_named_streams(source)?;
         let input = fs::File::open(source).map_err(|e| e.to_string())?;
         let size = input.metadata().map_err(|e| e.to_string())?.len();
         if size > outgoing::MAX_FILE_BYTES as u64 {
@@ -252,6 +310,7 @@ mod native {
         let mut output = fs::OpenOptions::new().create_new(true).write(true).open(target).map_err(|e| e.to_string())?;
         let copied = std::io::copy(&mut input.take(size + 1), &mut output).map_err(|e| e.to_string())?;
         output.sync_all().map_err(|e| e.to_string())?;
+        no_named_streams(source)?;
         if copied != size {
             return Err("stale_approval: source size changed".into());
         }
@@ -262,6 +321,7 @@ mod native {
             return Err("entry_limit: package folders are too deep".into());
         }
         files::reject_link(path)?;
+        no_named_streams(path)?;
         for entry in fs::read_dir(path).map_err(|e| e.to_string())? {
             let path = entry.map_err(|e| e.to_string())?.path();
             files::reject_link(&path)?;
@@ -284,7 +344,9 @@ mod native {
             return Err("verification_failed: package file set differs from plan".into());
         }
         for (name, hash) in checks {
-            if files::fingerprint(&files::child(root, name)?)? != *hash {
+            let path = files::child(root, name)?;
+            no_named_streams(&path)?;
+            if files::fingerprint(&path)? != *hash {
                 return Err("verification_failed: package hash differs".into());
             }
         }
@@ -398,6 +460,7 @@ mod native {
             let verified = verify_zip(&zip_stage, &checks)?;
             let digest = files::fingerprint(&zip_stage)?;
             zip_hash = Some(digest.clone());
+            check_copy_sources(&b.entries)?;
             b.refs.check()?;
             b.project.check(p)?;
             if parent_created {
@@ -413,9 +476,11 @@ mod native {
             mover(&zip_stage, &final_zip)?;
             published_zip = true;
             verify_folder(&final_dir, &checks)?;
+            no_named_streams(&final_zip)?;
             if files::fingerprint(&final_zip)? != digest {
                 return Err("verification_failed: published ZIP changed".into());
             }
+            check_copy_sources(&b.entries)?;
             b.refs.check()?;
             b.project.check(p)?;
             let receipt = json!({"version":1,"command":"packagedeliverables","outcome":"Succeeded","plan_sha256":hash,"package_path":final_dir,"zip_path":final_zip,"zip_sha256":digest,
@@ -426,7 +491,7 @@ mod native {
         let mut cleanup = Vec::new();
         if result.is_err() {
             if published_zip {
-                if files::fingerprint(&final_zip).ok().as_ref() == zip_hash.as_ref() {
+                if no_named_streams(&final_zip).is_ok() && files::fingerprint(&final_zip).ok().as_ref() == zip_hash.as_ref() {
                     if let Err(e) = fs::remove_file(&final_zip) {
                         cleanup.push(e.to_string());
                     }

@@ -1351,6 +1351,57 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[cfg(windows)]
+    #[test]
+    fn package_rechecks_named_streams_after_publication() {
+        super::super::file::set_io(super::super::file::IoHooks {
+            read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
+        });
+        for (location, stream_path, retain_folder, retain_zip) in [
+            ("source", "extra.txt:additional", false, false),
+            ("file", "Client - Site/Deliverables/Package/extra.txt:additional", true, false),
+            ("zip", "Client - Site/Deliverables/Package.zip:additional", false, true),
+            ("root", "Client - Site/Deliverables/Package:additional", true, false),
+            ("subdirectory", "Client - Site/Deliverables/Package/sheets:additional", true, false),
+        ] {
+            for force_failure in [false, true] {
+                let (root, mut p, _) = follow_project(json!({}));
+                let profile = root.join("profile.json");
+                std::fs::write(root.join("extra.txt"), b"primary").unwrap();
+                std::fs::write(&profile, br#"{"extra_files":[{"path":"extra.txt","role":"other"}]}"#).unwrap();
+                p["profile_path"] = json!(profile);
+                let planned = super::super::packagedeliverables::run_with_move(&p, &files::rename_no_replace);
+                assert!(planned["hash"].is_string(), "{planned}");
+                p["action"] = json!("execute");
+                p["approved_hash"] = planned["hash"].clone();
+                let package = root.join("Client - Site/Deliverables/Package");
+                let zip = root.join("Client - Site/Deliverables/Package.zip");
+                let source = root.join("extra.txt");
+                let stream = root.join(stream_path);
+                let result = super::super::packagedeliverables::run_with_move(&p, &|a, b| {
+                    files::rename_no_replace(a, b)?;
+                    if b.extension().is_some_and(|ext| ext == "zip") {
+                        std::fs::write(&stream, b"new data").map_err(|e| e.to_string())?;
+                        if force_failure {
+                            std::fs::write(root.join("extra.txt:force-failure"), b"changed source").map_err(|e| e.to_string())?;
+                        }
+                    }
+                    Ok(())
+                });
+                assert_eq!(result["receipt"]["outcome"], "Failed", "{location}, forced={force_failure}: {result}");
+                assert!(result.to_string().contains("named_stream"), "{result}");
+                assert_eq!(std::fs::read(&source).unwrap(), b"primary");
+                assert_eq!(std::fs::read(&stream).unwrap(), b"new data");
+                assert_eq!(package.exists(), retain_folder);
+                assert_eq!(zip.exists(), retain_zip);
+                assert!(!std::fs::read_dir(root.join("Client - Site")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".stage")));
+                std::fs::remove_dir_all(root).unwrap();
+            }
+        }
+    }
+
     #[test]
     fn failed_restoration_reports_retained_prior_and_removes_stage() {
         let (root, _, _) = project();
