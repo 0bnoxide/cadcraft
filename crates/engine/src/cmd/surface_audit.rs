@@ -1,12 +1,12 @@
 //! SURFACEAUDIT (Survey Preflight and Audit EG Surface; reports only). Owner: Claude (see `docs/agents/slice-5-analysis.md`).
 
-use cadcraft_surface::Region;
+use cadcraft_doc::{EntityKind, Handle};
 use cadcraft_surface::audit::{self, Audit, PreflightOptions, SurveyPoint, TinAuditOptions};
 use cadcraft_surface::triangulate::MAX_VERTICES;
+use cadcraft_surface::{Region, Tin};
 use serde_json::{Value, json};
 
 use super::curves::handle_param;
-use super::surface_build::tin_from_handle;
 use super::{CommandSpec, bad, size_param, str_param};
 use crate::{Result, Session};
 
@@ -36,7 +36,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         }
         Some("tin") => {
             let handle = handle_param(p, "surface").ok_or_else(|| bad(ID, "`surface` must be a TIN polyface handle"))?;
-            let tin = tin_from_handle(s.doc()?, handle)?;
+            let tin = audit_surface(s, handle)?;
             let boundary = ring(p, "boundary")?.map(|outer| Region { outer, holes: vec![] });
             let lines = list(p, "breaklines")?;
             // Check the combined size before converting anything, so hostile input can't allocate past the cap.
@@ -61,6 +61,37 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         a.receipt.inputs.insert(k.into(), v);
     }
     Ok(to_json(&a))
+}
+
+/// Keep damaged faces for the audit to report. The strict conversion used by export and
+/// geometry commands must not run here: it rejects exactly the defects this check diagnoses.
+fn audit_surface(s: &Session, handle: Handle) -> Result<Tin> {
+    let drawing = s.doc()?;
+    let entity = drawing.entity(handle).ok_or_else(|| bad(ID, format!("no object has handle {}", handle.hex())))?;
+    let EntityKind::PolyfaceMesh(mesh) = &entity.kind else {
+        return Err(bad(ID, format!("object {} is not a polyface mesh (a TIN surface)", handle.hex())));
+    };
+    // A hostile drawing must not make this reporting-only command allocate unbounded copies.
+    if mesh.vertices.len() > MAX_VERTICES || mesh.faces.len() > MAX_VERTICES {
+        return Err(bad(ID, format!("surface audit accepts at most {MAX_VERTICES} vertices and faces")));
+    }
+    let capacity = mesh.faces.len().checked_mul(2).ok_or_else(|| bad(ID, "the surface has too many faces"))?;
+    let vertices = mesh.vertices.iter().map(|p| [p.x, p.y, p.z]).collect();
+    let mut triangles = Vec::with_capacity(capacity);
+    for face in &mesh.faces {
+        // Zero terminates a face; missing corners stay out of range so a short face is reported
+        // once rather than dropped. The vertex cap guarantees this sentinel cannot be valid.
+        let mut corners = [u32::MAX; 4];
+        for (corner, index) in corners.iter_mut().zip(face.iter().take_while(|&&i| i != 0)) {
+            *corner = index.unsigned_abs().checked_sub(1).unwrap_or(u32::MAX);
+        }
+        let [a, b, c, d] = corners;
+        triangles.push([a, b, c]);
+        if face.iter().all(|&i| i != 0) {
+            triangles.push([a, c, d]);
+        }
+    }
+    Ok(Tin { vertices, triangles })
 }
 
 fn to_json(a: &Audit) -> Value {

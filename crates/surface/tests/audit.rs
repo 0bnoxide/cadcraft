@@ -181,3 +181,15 @@ fn a_crossing_grid_stops_at_the_cap() {
     assert_eq!(a.issues.len(), MAX_ISSUES_PER_CODE);
     assert!(a.receipt.inputs.get("crossing_check").is_some_and(|s| s.starts_with("stopped")));
 }
+
+#[test]
+fn nearly_collinear_triangles_follow_the_surface_validity_tolerance() {
+    for scale in [1.0, 1e6] {
+        let points = |height| vec![[0.0, 0.0, 0.0], [scale, 0.0, 0.0], [2.0 * scale, height * scale, 0.0]];
+        let opts = TinAuditOptions::default();
+        let bad = tin(points(1e-13), vec![[0, 1, 2]]);
+        assert_eq!(codes(&audit_tin(&bad, Some(&square(10.0 * scale)), &[], &opts)), vec![TIN_BAD_TRIANGLE]);
+        let valid = tin(points(1e-10), vec![[0, 1, 2]]);
+        assert!(audit_tin(&valid, Some(&square(10.0 * scale)), &[], &opts).issues.is_empty());
+    }
+}

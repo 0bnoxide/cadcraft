@@ -10,10 +10,11 @@ use std::collections::{BTreeMap, HashMap, HashSet};
 
 use spade::{DelaunayTriangulation, Point2, Triangulation};
 
+use crate::triangulate::signed_area2;
 use crate::{Region, Tin};
 
 /// Version of the check set; bump when a check's meaning changes.
-pub const VERSION: u32 = 1;
+pub const VERSION: u32 = 2;
 
 /// No points to check.
 pub const PF_EMPTY: &str = "PF-EMPTY";
@@ -296,12 +297,13 @@ pub fn audit_tin(tin: &Tin, boundary: Option<&Region>, breaklines: &[Vec<[f64; 3
             continue;
         };
         let at = Some([(a[0] + b[0] + c[0]) / 3.0, (a[1] + b[1] + c[1]) / 3.0, (a[2] + b[2] + c[2]) / 3.0]);
-        let area2 = (b[0] - a[0]) * (c[1] - a[1]) - (b[1] - a[1]) * (c[0] - a[0]);
+        // Use the same relative degeneracy tolerance as surface creation and strict export.
+        let (area2, degenerate) = signed_area2(a, b, c);
         let bad = if t[0] == t[1] || t[1] == t[2] || t[0] == t[2] {
             Some("repeats a vertex")
         } else if ![a, b, c].iter().flatten().all(|v| v.is_finite()) {
             Some("has a non-finite vertex")
-        } else if area2 == 0.0 || !area2.is_finite() {
+        } else if degenerate || !area2.is_finite() {
             Some("has no plan area")
         } else {
             None
