@@ -148,12 +148,17 @@ mod native {
                 _ => return Err("invalid_input: unsupported source action".into()),
             }
         }
+        let extents = d.extents(&Space::Model);
+        if !extents.is_empty() {
+            d.header.set("EXTMIN", cadcraft_doc::HVal::Point(extents.min.to3(0.0)));
+            d.header.set("EXTMAX", cadcraft_doc::HVal::Point(extents.max.to3(0.0)));
+        }
         Ok(())
     }
     fn verify(d: &Drawing, sources: &[Source], prior: &Drawing) -> Checked<()> {
         let mut wanted = prior.clone();
         apply(&mut wanted, sources)?;
-        if !files::same(&files::entities(&wanted)?, &files::entities(d)?) {
+        if !files::same_drawing(&wanted, d) {
             return Err("verification_failed: drawing content differs from intake plan".into());
         }
         for source in sources {
@@ -163,6 +168,26 @@ mod native {
                 let block = d.block(name).ok_or("verification_failed: missing xref")?;
                 if block.xref_path != row.relative_reference_path || !block.xref_overlay {
                     return Err("verification_failed: xref path or mode differs".into());
+                }
+            }
+        }
+        Ok(())
+    }
+    fn verify_copies(root: &Path, host: &Path, sources: &[Source]) -> Checked<()> {
+        for source in sources {
+            let destination = files::child(root, &source.row.relative_path)?;
+            if files::fingerprint(&destination)? != source.row.sha256 {
+                return Err("verification_failed: published source hash differs".into());
+            }
+            if let Some(relative) = &source.row.relative_reference_path {
+                let resolved = host
+                    .parent()
+                    .ok_or("verification_failed: host parent missing")?
+                    .join(relative)
+                    .canonicalize()
+                    .map_err(|_| "verification_failed: attachment does not resolve")?;
+                if resolved != destination.canonicalize().map_err(|e| e.to_string())? {
+                    return Err("verification_failed: attachment resolves to a different file".into());
                 }
             }
         }
@@ -223,9 +248,7 @@ mod native {
                 return Err("invalid_input: each source has only path and role".into());
             }
             let source = PathBuf::from(input.get("path").and_then(Value::as_str).ok_or("invalid_input: source path required")?);
-            for ancestor in source.ancestors() {
-                files::reject_link(ancestor)?;
-            }
+            files::reject_link(&source)?;
             let source = source.canonicalize().map_err(|e| e.to_string())?;
             if !originals.insert(source.clone()) {
                 return Err("output_collision: duplicate source".into());
@@ -246,7 +269,7 @@ mod native {
             };
             let reference = source.file_stem().and_then(|s| s.to_str()).ok_or("unsafe_path: source stem missing")?.to_string();
             paths::component(&reference).map_err(|e| format!("{}: {}", e.code, e.message))?;
-            if kind != "copy_only" && (reference.eq_ignore_ascii_case(host_name) || !names.insert(paths::case_fold(&reference))) {
+            if kind != "copy_only" && (paths::case_fold(&reference) == paths::case_fold(host_name) || !names.insert(paths::case_fold(&reference))) {
                 return Err("reference_name_collision: reference name conflicts with host or existing reference".into());
             }
             total = total.saturating_add(fs::metadata(&source).map_err(|e| e.to_string())?.len());
@@ -283,6 +306,9 @@ mod native {
             });
         }
         sources.sort_by(|a, b| a.row.relative_path.cmp(&b.row.relative_path));
+        let mut wanted = prior.clone();
+        apply(&mut wanted, &sources)?;
+        files::roundtrip(h, &wanted, &target)?;
         let mut actions = Vec::new();
         for source in &sources {
             actions.push(json!({"kind":"copy_source","path":source.row.relative_path,"sha256":source.row.sha256}));
@@ -290,6 +316,11 @@ mod native {
                 actions.push(json!({"kind":source.row.action,"host":model.path,"source":source.row}));
             }
             actions.push(json!({"kind":"register_source","path":support.path,"row":source.row}));
+        }
+        for name in ["EXTMIN", "EXTMAX"] {
+            if prior.header.get(name) != wanted.header.get(name) {
+                actions.push(json!({"kind":"set_extent","name":name,"current":prior.header.get(name),"planned":wanted.header.get(name)}));
+            }
         }
         let plan = Plan {
             version: 1,
@@ -368,6 +399,7 @@ mod native {
             register_swap = Some(files::swap(&register_path, &register_stage, &cadcraft_proposal::approval::sha256(&register_bytes), mover)?);
             host_swap = Some(files::swap(&target, &stage, &target_hash, mover)?);
             verify(&(h.read)(&files::read(&target, 32 << 20)?, &target.to_string_lossy())?, &plan.sources, &prior)?;
+            verify_copies(&project.root, &target, &plan.sources)?;
             let receipt = json!({"version":1,"command":"intakesource","outcome":"Succeeded","plan_sha256":hash,"drawing":host_swap,"register":register_swap,"sources":plan.sources.iter().map(|s|&s.row).collect::<Vec<_>>(),"receipt_path":receipt_path});
             files::write_new(&receipt_path, &files::encoded(&receipt)?)?;
             Ok(receipt)
@@ -414,5 +446,34 @@ mod native {
                 json!({"receipt":{"outcome":"Failed","plan_sha256":hash,"failed_checks":[{"code":"execution_failed","message":error}],"cleanup_failures":cleanup}})
             }
         })
+    }
+
+    #[cfg(test)]
+    mod tests {
+        use super::*;
+        #[test]
+        fn imageattach_sizing_and_decode_fallback_are_planned_without_distortion() {
+            super::super::super::file::set_image_decoder(|b| cadcraft_io::raster::decode(b).map_err(|e| e.to_string()));
+            let hooks = super::super::super::file::IoHooks {
+                read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+                write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+                plot: None,
+            };
+            let path = std::env::temp_dir().join(format!("slice9-image-{}.png", std::process::id()));
+            let raster = cadcraft_doc::Raster::new(2, 1, vec![255, 0, 0, 255, 0, 0, 255, 255]).unwrap();
+            std::fs::write(&path, cadcraft_io::raster::encode_png(&raster).unwrap()).unwrap();
+            let (planned, sizing) = image(&path, "source", "../sources/source.png", &hooks, Path::new("host.dxf")).unwrap();
+            assert_eq!(sizing, "imageattach_default");
+            assert_eq!(planned.size, cadcraft_geom::Vec2::new(2.0, 1.0));
+            assert_eq!(planned.u.x, 0.5);
+            assert_eq!(planned.v.y, 0.5);
+            assert_eq!(planned.insert, cadcraft_geom::Vec3::ZERO);
+            assert_eq!(planned.path, "../sources/source.png");
+            std::fs::write(&path, b"undecodable").unwrap();
+            let (fallback, sizing) = image(&path, "source", "../sources/source.png", &hooks, Path::new("host.dxf")).unwrap();
+            assert!(sizing.starts_with("unit_square_fallback"));
+            assert_eq!(fallback.size, cadcraft_geom::Vec2::new(1.0, 1.0));
+            std::fs::remove_file(path).unwrap();
+        }
     }
 }

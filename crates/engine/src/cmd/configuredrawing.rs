@@ -127,11 +127,11 @@ mod native {
     }
     fn configure_dimension_styles(d: &mut Drawing, s: &DrawingSettings, actions: &mut Vec<Value>) -> Checked<()> {
         for patch in &s.dimension_styles {
-            if let Some(name) = &patch.text_style
-                && d.text_style(name).is_none()
-            {
-                return Err("missing_dependency: dimension text style does not exist".into());
-            }
+            let text_style = patch
+                .text_style
+                .as_ref()
+                .map(|name| d.text_style(name).map(|s| s.name.clone()).ok_or("missing_dependency: dimension text style does not exist"))
+                .transpose()?;
             let existing = d.dim_styles.iter().position(|v| v.name.eq_ignore_ascii_case(&patch.name));
             let mut style =
                 existing.and_then(|i| d.dim_styles.get(i)).cloned().unwrap_or_else(|| DimStyle { name: patch.name.clone(), ..Default::default() });
@@ -145,7 +145,12 @@ mod native {
                     }
                 };
             }
-            set!(text_style);
+            if let Some(name) = text_style {
+                if existing.is_some() {
+                    changed(actions, "set_dimension_style", &style.name, "text_style", json!(style.text_style), json!(name));
+                }
+                style.text_style = name;
+            }
             set!(scale);
             set!(arrow_size);
             set!(text_height);
@@ -185,6 +190,12 @@ mod native {
         }
         let project = Project::open(p)?;
         let relative = p.get("target").and_then(Value::as_str).ok_or("invalid_input: target required")?;
+        let portable = cadcraft_proposal::paths::relative(relative).map_err(|e| format!("{}: {}", e.code, e.message))?;
+        let key = cadcraft_proposal::paths::case_fold(&portable);
+        let sources = cadcraft_proposal::paths::case_fold(project.manifest.source_location());
+        if portable.split('/').any(|part| part.eq_ignore_ascii_case("_superseded")) || key == sources || key.starts_with(&format!("{sources}/")) {
+            return Err("protected_target: intake copies and retained versions are immutable".into());
+        }
         let target = files::child(&project.root, relative)?;
         if !Path::new(relative).extension().is_some_and(|e| e.eq_ignore_ascii_case("dxf") || e.eq_ignore_ascii_case("dwg")) {
             return Err("invalid_input: target must be DXF or DWG".into());
@@ -192,6 +203,7 @@ mod native {
         let (before, prior_hash) = files::drawing(h, &target)?;
         let settings = project.manifest.drawing_settings().ok_or("manifest_v2_required: drawing settings missing")?;
         let (wanted, actions) = configure(&before, settings)?;
+        files::roundtrip(h, &wanted, &target)?;
         let plan = json!({"version":1,"command":"configuredrawing","proposal_root":project.root,"target":relative,"target_sha256":prior_hash,"fingerprints":project.fingerprints,"settings":settings,"actions":actions});
         let hash = files::hash(&plan)?;
         if action == "plan" {
@@ -214,10 +226,7 @@ mod native {
             files::write_new(&stage, &bytes)?;
             owned_stage = true;
             let actual = (h.read)(&files::read(&stage, 32 << 20)?, &target.to_string_lossy())?;
-            if !configure(&actual, settings)?.1.is_empty()
-                || !files::same(&files::settings(&actual), &files::settings(&wanted))
-                || !files::same(&files::entities(&actual)?, &files::entities(&before)?)
-            {
+            if !configure(&actual, settings)?.1.is_empty() || !files::same_drawing(&actual, &wanted) {
                 return Err("verification_failed: settings or entity contents differ after reopening".into());
             }
             project.check(p)?;
@@ -266,7 +275,7 @@ mod tests {
         style.backwards = true;
         d.text_styles.push(style);
         let original = d.clone();
-        let settings:DrawingSettings=serde_json::from_value(json!({"layers":[{"name":"Survey","color":3,"lineweight":25}],"text_styles":[{"name":"Notes","height":2.5}],"dimension_styles":[{"name":"Dims","text_style":"Notes","decimals":3}],"annotation_scales":[{"name":"1:123","paper_units":1,"drawing_units":123}]})).unwrap();
+        let settings:DrawingSettings=serde_json::from_value(json!({"layers":[{"name":"Survey","color":3,"lineweight":25}],"text_styles":[{"name":"Notes","height":2.5}],"dimension_styles":[{"name":"Dims","text_style":"notes","decimals":3}],"annotation_scales":[{"name":"1:123","paper_units":1,"drawing_units":123}]})).unwrap();
         let (changed, actions) = configure(&d, &settings).unwrap();
         assert!(!actions.is_empty());
         assert_eq!(changed.header, original.header);

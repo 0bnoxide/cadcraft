@@ -1023,16 +1023,29 @@ pub(super) mod files {
             Ok(Self { root, manifest, fingerprints })
         }
     }
+    #[cfg(test)]
     pub fn entities(d: &Drawing) -> Checked<Value> {
         Ok(
             json!({"model":d.model.iter().collect::<Vec<_>>(),"layouts":d.layouts.iter().map(|l|json!({"name":l.name,"entities":l.entities.iter().collect::<Vec<_>>() })).collect::<Vec<_>>(),"blocks":d.blocks.iter().map(|(n,b)|json!({"name":n,"entities":b.entities.iter().collect::<Vec<_>>() })).collect::<Vec<_>>() }),
         )
     }
-    pub fn settings(d: &Drawing) -> Value {
-        let mut header = d.header.clone();
-        // Adding a table record consumes a handle; HANDSEED is allocation state, not a drawing setting.
-        header.vars.remove("HANDSEED");
-        json!({"header":header,"layers":d.layers,"linetypes":d.linetypes,"text_styles":d.text_styles,"dim_styles":d.dim_styles,"scales":d.scales})
+    pub fn normalized(d: &Drawing) -> Drawing {
+        let mut d = d.clone();
+        // These are allocation/lookup bookkeeping, not saved drawing content.
+        d.header.vars.remove("HANDSEED");
+        d.handseed = 0;
+        std::sync::Arc::make_mut(&mut d.foreign).targets.clear();
+        d
+    }
+    pub fn same_drawing(a: &Drawing, b: &Drawing) -> bool {
+        normalized(a) == normalized(b)
+    }
+    pub fn roundtrip(h: &super::super::file::IoHooks, d: &Drawing, path: &Path) -> Checked<()> {
+        let reopened = (h.read)(&(h.write)(d, &path.to_string_lossy())?, &path.to_string_lossy())?;
+        if !same_drawing(d, &reopened) {
+            return Err("lossy_format: this drawing cannot round-trip in its own format".into());
+        }
+        Ok(())
     }
     pub fn same(a: &Value, b: &Value) -> bool {
         super::native::equivalent(a, b)
@@ -1044,17 +1057,7 @@ pub(super) mod files {
         if !drawing.read_notes.is_empty() || !drawing.skipped_records.is_empty() {
             return Err("lossy_format: drawing contains unreadable content".into());
         }
-        let bytes = (h.write)(&drawing, &path.to_string_lossy())?;
-        let reopened = (h.read)(&bytes, &path.to_string_lossy())?;
-        if !same(&entities(&drawing)?, &entities(&reopened)?)
-            || !same(&settings(&drawing), &settings(&reopened))
-            || path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg")) && !super::super::file::not_saved(&drawing).is_empty()
-        {
-            return Err("lossy_format: this drawing cannot round-trip in its own format".into());
-        }
-        if path.extension().is_some_and(|e| e.eq_ignore_ascii_case("dwg")) && drawing.foreign != reopened.foreign {
-            return Err("lossy_format: DWG foreign data cannot be preserved".into());
-        }
+        roundtrip(h, &drawing, path)?;
         Ok((drawing, original_hash))
     }
     pub fn issue(error: String) -> Value {
@@ -1255,7 +1258,37 @@ mod tests {
             std::os::unix::fs::symlink(dxf, &linked).unwrap();
             collision["sources"] = json!([{"path":linked,"role":"survey"}]);
             assert_eq!(super::super::intakesource::run_with_hooks(&collision, hooks).unwrap()["issues"][0]["code"], "unsafe_path");
+            let redirected = root.join("redirected-source-parent");
+            std::os::unix::fs::symlink(root, &redirected).unwrap();
+            collision["sources"] = json!([{"path":redirected.join("model.dxf"),"role":"survey"}]);
+            let redirected = super::super::intakesource::run_with_hooks(&collision, hooks).unwrap();
+            assert!(redirected["hash"].is_string(), "{redirected}");
         }
+    }
+
+    #[test]
+    fn intake_host_names_use_portable_unicode_casefold() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({});
+        manifest["models"][0]["path"] = json!("Models/Öbase.dxf");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let plan = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = plan["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let source = root.join("öbase.DXF");
+        std::fs::copy(root.join("model.dxf"), &source).unwrap();
+        let result = super::super::intakesource::run_with_hooks(
+            &json!({"proposal_root":root.join("Client - Site"),"manifest_path":manifest_path,"sources":[{"path":source,"role":"survey"}]}),
+            &hooks,
+        )
+        .unwrap();
+        assert_eq!(result["issues"][0]["code"], "reference_name_collision", "{result}");
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
@@ -1315,6 +1348,17 @@ mod tests {
         assert_eq!(std::fs::read(&register).unwrap(), old_register);
         assert_eq!(std::fs::read(&host).unwrap(), before);
         assert!(!proposal.join("Support/Sources/survey/survey.dxf").exists());
+        let missing_copy = |from: &std::path::Path, to: &std::path::Path| {
+            files::rename_no_replace(from, to)?;
+            if to.file_name().is_some_and(|name| name == "survey.dxf") {
+                std::fs::remove_file(to).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+        let missing = super::super::intakesource::run_with_move(&p, &hooks, &missing_copy).unwrap();
+        assert_eq!(missing["receipt"]["outcome"], "Failed", "{missing}");
+        assert_eq!(std::fs::read(&register).unwrap(), old_register);
+        assert_eq!(std::fs::read(&host).unwrap(), before);
         let result = super::super::intakesource::run_with_hooks(&p, &hooks).unwrap();
         assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
         let reopened = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
@@ -1326,21 +1370,38 @@ mod tests {
         let rows: Value = serde_json::from_slice(&std::fs::read(&register).unwrap()).unwrap();
         assert_eq!(rows["entries"].as_array().unwrap().len(), 3);
         assert!(host.parent().unwrap().join("_superseded").is_dir());
+        let retained = std::fs::read_dir(host.parent().unwrap().join("_superseded")).unwrap().next().unwrap().unwrap().path();
+        for protected in
+            ["Support/Sources/survey/survey.dxf".to_string(), retained.strip_prefix(&proposal).unwrap().to_string_lossy().replace('\\', "/")]
+        {
+            let refused = super::super::configuredrawing::run_with_hooks(
+                &json!({"proposal_root":proposal,"manifest_path":manifest_path,"target":protected}),
+                &hooks,
+            )
+            .unwrap();
+            assert_eq!(refused["issues"][0]["code"], "protected_target", "{refused}");
+        }
+        configuration_and_noop(&proposal, &manifest_path, &hooks);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn configuration_and_noop(proposal: &std::path::Path, manifest_path: &std::path::Path, hooks: &super::super::file::IoHooks) {
+        let host = proposal.join("Models/base.dxf");
         let mut c = json!({"action":"plan","proposal_root":proposal,"manifest_path":manifest_path,"target":"Models/base.dxf"});
-        let config = super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap();
+        let config = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
         assert_eq!(config["plan"]["actions"].as_array().unwrap().len(), 2, "{config}");
         c["action"] = json!("create");
         c["approved_hash"] = config["hash"].clone();
         let mut changed = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
         changed.header.set_i64("LUPREC", 7);
         std::fs::write(&host, cadcraft_io::write(&changed, &host).unwrap()).unwrap();
-        let stale = super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap();
+        let stale = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
         assert_eq!(stale["receipt"]["failed_checks"][0]["code"], "stale_approval");
         c["action"] = json!("plan");
-        let plan = super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap();
+        let plan = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
         c["action"] = json!("create");
         c["approved_hash"] = plan["hash"].clone();
-        let result = super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap();
+        let result = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
         assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
         let d = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
         assert_eq!(d.header.i64("INSUNITS", 0), 2);
@@ -1350,13 +1411,52 @@ mod tests {
         let bytes = std::fs::read(&host).unwrap();
         let listing = std::fs::read_dir(host.parent().unwrap()).unwrap().count();
         c["action"] = json!("plan");
-        let noop = super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap();
+        let noop = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
         assert_eq!(noop["plan"]["actions"], json!([]));
         c["action"] = json!("create");
         c.as_object_mut().unwrap().remove("approved_hash");
-        assert_eq!(super::super::configuredrawing::run_with_hooks(&c, &hooks).unwrap()["receipt"]["outcome"], "NoChanges");
+        assert_eq!(super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap()["receipt"]["outcome"], "NoChanges");
         assert_eq!(std::fs::read(&host).unwrap(), bytes);
         assert_eq!(std::fs::read_dir(host.parent().unwrap()).unwrap().count(), listing);
+    }
+
+    #[test]
+    fn configuration_refuses_lost_block_metadata_before_approval() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({"headers":{"INSUNITS":2}});
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let plan = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = plan["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let proposal = root.join("Client - Site");
+        let host = proposal.join("Models/base.dxf");
+        let mut d = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        std::sync::Arc::make_mut(d.blocks.get_mut("Title").unwrap()).description = "must survive".into();
+        std::fs::write(&host, cadcraft_io::write(&d, &host).unwrap()).unwrap();
+        let original = std::fs::read(&host).unwrap();
+        let corrupt = super::super::file::IoHooks {
+            read: hooks.read,
+            write: |d, n| {
+                let mut d = d.clone();
+                for block in d.blocks.values_mut() {
+                    std::sync::Arc::make_mut(block).description.clear();
+                }
+                cadcraft_io::write(&d, n).map_err(|e| e.to_string())
+            },
+            plot: None,
+        };
+        let result = super::super::configuredrawing::run_with_hooks(
+            &json!({"proposal_root":proposal,"manifest_path":manifest_path,"target":"Models/base.dxf"}),
+            &corrupt,
+        )
+        .unwrap();
+        assert_eq!(result["issues"][0]["code"], "lossy_format", "{result}");
+        assert_eq!(std::fs::read(&host).unwrap(), original);
         std::fs::remove_dir_all(root).unwrap();
     }
 
