@@ -177,6 +177,7 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
     let mut destinations = BTreeSet::new();
     let mut unmatched = BTreeSet::new();
     let mut short_rows = Vec::new();
+    let mut diagnostic_bytes = 0usize;
     let mut total_bytes = 0_usize;
     for input in paths {
         let path = Path::new(input.as_str().ok_or_else(|| bad(ID, "input must be path"))?);
@@ -210,6 +211,11 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
             }
             let parsed = fields(body, delimiter)?;
             if column >= parsed.len() {
+                // Repeating a long path for millions of tiny rows can dwarf the input cap.
+                diagnostic_bytes = diagnostic_bytes.saturating_add(path.as_os_str().len()).saturating_add(64);
+                if short_rows.len() >= 1024 || diagnostic_bytes > 1 << 20 {
+                    return Err(bad(ID, "short-row diagnostics exceed the 1024-row or 1 MiB limit"));
+                }
                 short_rows.push(json!({"file":path,"row":index+1}));
                 append(&mut result, line, MAX as usize)?;
                 continue;

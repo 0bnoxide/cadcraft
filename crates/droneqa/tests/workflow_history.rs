@@ -6,6 +6,51 @@ use std::sync::atomic::{AtomicU64, Ordering};
 static NEXT: AtomicU64 = AtomicU64::new(0);
 
 #[test]
+fn checkpoint_evidence_roundtrips_and_binds_individual_points() {
+    let file = History::new();
+    let mut p = inputs();
+    p.as_object_mut().unwrap().remove("report");
+    p.as_object_mut().unwrap().remove("report_text");
+    p["checkpoint_units"] = json!("ft");
+    let header = "gcp_id,expected_x,expected_y,expected_z,measured_x,measured_y,measured_z\n";
+    p["checkpoint_csv"] = json!(format!("{header}A,0,0,0,1,0,0\nB,0,0,0,0,0,0\n"));
+    let event = execute(&file.0, &p).unwrap();
+    assert_eq!(event["draft"]["checkpoint_evidence"]["results"][0]["gcp_id"], "A");
+    let history = execute(&file.0, &json!({"action":"history"})).unwrap();
+    assert_eq!(history[0]["draft"], event["draft"]);
+    execute(&file.0, &review(&event)).unwrap();
+    p["action"] = json!("commit");
+    p["draft_id"] = event["draft_id"].clone();
+    p["expected_draft_hash"] = event["draft_hash"].clone();
+    p["note"] = json!("checkpoint review");
+    // Same RMS, different point errors: aggregate-only hashes miss this edit.
+    p["checkpoint_csv"] = json!(format!("{header}A,0,0,0,0,0,0\nB,0,0,0,1,0,0\n"));
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SOURCE_CHANGED"));
+    p["checkpoint_csv"] = json!(format!("{header}A,10,10,10,11,10,10\nB,10,10,10,10,10,10\n"));
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SOURCE_CHANGED"), "equal residuals must still bind the original source coordinates");
+}
+
+#[test]
+fn checkpoint_evidence_privacy_and_hostile_size_fail_before_persistence() {
+    let file = History::new();
+    let mut p = inputs();
+    let header = "gcp_id,expected_x,expected_y,expected_z,measured_x,measured_y,measured_z\n";
+    p["checkpoint_units"] = json!("ft");
+    p["checkpoint_csv"] = json!(format!("{header}private-checkpoint,0,0,0,0,0,0\n"));
+    p["sensitive_fields"] = json!(["pilot", "gcp_id"]);
+    let event = execute(&file.0, &p).unwrap();
+    assert_eq!(event["draft"]["checkpoint_evidence"]["results"][0]["gcp_id"], "[REDACTED]");
+    assert!(!std::fs::read_to_string(&file.0).unwrap().contains("private-checkpoint"));
+    let before = std::fs::read(&file.0).unwrap();
+    p["checkpoint_csv"] = json!(format!("{header}{}", "x,0,0,0,0,0,0\n".repeat(1001)));
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("CHECKPOINT_EVIDENCE_LIMIT"));
+    assert_eq!(std::fs::read(&file.0).unwrap(), before);
+    p["checkpoint_csv"] = json!(format!("{header}password=SYNTHETIC_VALUE,0,0,0,0,0,0\n"));
+    assert!(execute(&file.0, &p).unwrap_err().starts_with("SENSITIVE_SOURCE"));
+    assert_eq!(std::fs::read(&file.0).unwrap(), before);
+}
+
+#[test]
 fn legacy_record_remains_readable_but_cannot_be_superseded() {
     use sha2::{Digest, Sha256};
     let file = History::new();

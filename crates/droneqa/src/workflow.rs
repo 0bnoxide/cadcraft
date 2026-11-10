@@ -76,6 +76,7 @@ struct Context {
     report: Option<ParseResult>,
     sensitive: Vec<String>,
     source_hash: String,
+    checkpoint_evidence: Option<Value>,
 }
 
 fn context(params: &Value) -> Result<Context, String> {
@@ -91,7 +92,8 @@ fn context(params: &Value) -> Result<Context, String> {
         None | Some(Value::Null) => vec!["pilot".into()],
         Some(value) => serde_json::from_value(value.clone()).map_err(|_| "INVALID_INPUT: invalid sensitive_fields")?,
     };
-    check_field_names("sensitive_fields", &sensitive).map_err(|_| "INVALID_INPUT: unknown sensitive field")?;
+    let mission_sensitive: Vec<_> = sensitive.iter().filter(|s| !CHECKPOINT_FIELDS.contains(&s.as_str())).cloned().collect();
+    check_field_names("sensitive_fields", &mission_sensitive).map_err(|_| "INVALID_INPUT: unknown sensitive field")?;
     let content_type = match params.get("content_type") {
         None | Some(Value::Null) => "text/plain",
         Some(Value::String(value)) => value,
@@ -104,13 +106,29 @@ fn context(params: &Value) -> Result<Context, String> {
         (None, Some(_)) => return Err("INVALID_INPUT: report_text must be a string".into()),
         (None, None) => None,
     };
+    let mut checkpoint_evidence = None;
+    let mut checkpoint_hash = None;
     if let Some(csv) = params.get("checkpoint_csv").filter(|v| !v.is_null()) {
         if report.is_some() {
             return Err("INVALID_CHECKPOINT_CSV: give only one report input".into());
         }
         let text = csv.as_str().ok_or("INVALID_CHECKPOINT_CSV: text required")?;
         let units = params.get("checkpoint_units").and_then(Value::as_str).ok_or("INVALID_CHECKPOINT_CSV: checkpoint_units required")?;
-        let mut parsed = crate::checkpoint::parse(text, units)?;
+        // The JSONL record is bounded too; refuse before constructing per-point evidence.
+        if text.len() > 1_000_000 || text.lines().filter(|l| !l.trim().is_empty()).count() > 1001 {
+            return Err("CHECKPOINT_EVIDENCE_LIMIT: at most 1000 bounded checkpoint rows".into());
+        }
+        let (mut parsed, summary) =
+            crate::checkpoint::evaluate(text, units, ruleset.accuracy.maximum_rmse_horizontal_feet, ruleset.accuracy.maximum_rmse_z_feet)?;
+        if summary.results.iter().any(|p| p.gcp_id.len() > 256) {
+            return Err("CHECKPOINT_EVIDENCE_LIMIT: checkpoint id exceeds 256 bytes".into());
+        }
+        let raw = serde_json::to_value(&summary).map_err(|_| "INVALID_CHECKPOINT_CSV: cannot serialize evidence")?;
+        if serde_json::to_vec(&raw).map_err(|_| "INVALID_CHECKPOINT_CSV: cannot serialize evidence")?.len() > 250_000 {
+            return Err("CHECKPOINT_EVIDENCE_LIMIT: checkpoint evidence exceeds 250000 bytes".into());
+        }
+        checkpoint_hash = Some(hash(&json!({"units":units,"summary":raw,"csv_sha256":format!("{:x}",Sha256::digest(text.as_bytes()))}))?);
+        checkpoint_evidence = Some(redact(&raw, &sensitive));
         parsed.metrics.checkpoints_independent = mission.checkpoints_independent;
         parsed.metrics.checkpoints_bare_ground = mission.checkpoints_bare_ground;
         report = Some(parsed);
@@ -118,13 +136,21 @@ fn context(params: &Value) -> Result<Context, String> {
     if let Some(report) = &report {
         qa::validate_report(report)?;
     }
-    let source_hash = hash(&json!({"mission":mission,"ruleset":ruleset,"report":report,"sensitive_fields":sensitive}))?;
-    Ok(Context { mission, ruleset, report, sensitive, source_hash })
+    let mut source = json!({"mission":mission,"ruleset":ruleset,"report":report,"sensitive_fields":sensitive});
+    if let Some(checkpoints) = checkpoint_hash {
+        source["checkpoint_sha256"] = json!(checkpoints);
+    }
+    let source_hash = hash(&source)?;
+    Ok(Context { mission, ruleset, report, sensitive, source_hash, checkpoint_evidence })
 }
+
+const CHECKPOINT_FIELDS: [&str; 5] = ["gcp_id", "delta_xyz_feet", "horizontal_error_feet", "vertical_error_feet", "point_pass"];
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub struct Draft {
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub checkpoint_evidence: Option<Value>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub mission_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -283,6 +309,7 @@ pub fn execute(path: &Path, params: &Value) -> Result<Value, String> {
             let draft_id = hash(&json!([ctx.source_hash, timestamp, events.len()]))?;
             let mission_id = if ctx.sensitive.iter().any(|field| field == "mission_id") { Some("[REDACTED]".into()) } else { ctx.mission.mission_id };
             let draft = Draft {
+                checkpoint_evidence: ctx.checkpoint_evidence,
                 mission_key: Some(hash(&ctx.mission.global_id)?),
                 supersedes_draft_id: params
                     .get("supersedes_draft_id")

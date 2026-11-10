@@ -45,6 +45,8 @@ mod surface_volume;
 mod survey_level;
 mod survey_points;
 pub(crate) use modify::Erased;
+mod configuredrawing;
+mod intakesource;
 mod modify2;
 mod mtext_opts;
 mod overkill;
@@ -237,6 +239,8 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(subsurface_report::specs());
         v.extend(datawizard::specs());
         v.extend(proposal::specs());
+        v.extend(intakesource::specs());
+        v.extend(configuredrawing::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());

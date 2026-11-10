@@ -9,6 +9,18 @@ use sha2::{Digest, Sha256};
 pub fn sha256(bytes: &[u8]) -> String {
     format!("{:x}", Sha256::digest(bytes))
 }
+pub fn reader_hash(reader: &mut impl std::io::Read) -> std::io::Result<String> {
+    let mut hash = Sha256::new();
+    let mut bytes = [0u8; 65536];
+    loop {
+        let n = reader.read(&mut bytes)?;
+        if n == 0 {
+            break;
+        }
+        hash.update(bytes.get(..n).unwrap_or_default());
+    }
+    Ok(format!("{hash:x}", hash = hash.finalize()))
+}
 pub fn plan_hash(plan: &Plan) -> Result<String, Issue> {
     serde_json::to_vec(plan).map(|bytes| sha256(&bytes)).map_err(|e| Issue::new("invalid_input", e.to_string()))
 }
