@@ -111,7 +111,10 @@ fn a_text_too_long_for_the_editor_is_asked_for_at_the_command_line() {
     assert_eq!(text_of(&s), long);
     s.cmdline("TEXTEDIT").unwrap();
     s.input(Input::Point(at + Vec2::new(1.0, -0.05))).unwrap();
-    assert_eq!(s.log.last().map(String::as_str), Some("This text is too long for the editor; enter the new text at the command line."));
+    assert_eq!(
+        s.log.last().map(String::as_str),
+        Some("This text cannot be fully represented by the editor; enter the new text at the command line.")
+    );
     assert!(s.editing_mtext().is_none(), "the editor doesn't open");
     assert_eq!(s.current_prompt().unwrap().message, "Enter new text");
     // Enter keeps it whole; a typed answer still replaces it, as for any other text.
