@@ -236,7 +236,7 @@ fn run(s: &mut Session, p: &Value) -> Result<Value> {
         if p.get("settings").is_some() || p.get("output").is_some() {
             return Err(bad("datawizard", "refresh uses the table's saved settings"));
         }
-        let e = s.doc()?.model.get(h).ok_or_else(|| bad("datawizard", "refresh table missing"))?;
+        let e = s.doc()?.entity(h).ok_or_else(|| bad("datawizard", "refresh table missing"))?;
         let EntityKind::Table(t) = &e.kind else {
             return Err(bad("datawizard", "refresh target is not a table"));
         };
@@ -398,6 +398,125 @@ mod tests {
         let bytes = cadcraft_io::write(s.doc().unwrap(), "owned.dxf").unwrap();
         let drawing = cadcraft_io::read(&bytes, "owned.dxf").unwrap();
         assert!(drawing.model.iter().any(|e| e.common.xdata.iter().any(|t| t.value == APP)));
+    }
+
+    fn owned_paper_table() -> (Session, Handle, Handle) {
+        let mut s = Session::new();
+        let source = s.add_entity(EntityKind::Circle(cadcraft_doc::Circle { center: cadcraft_geom::Vec3::ZERO, radius: 2.0 })).unwrap();
+        s.execute("layout.set", &json!({"name":"Layout1"})).unwrap();
+        let result = s
+            .execute(
+                "datawizard",
+                &json!({
+                    "settings":{"version":1,"handles":[source.hex()],"columns":[{"property":"area","title":"Area","decimals":2}]},
+                    "at":[12,34]
+                }),
+            )
+            .unwrap();
+        let table = Handle::parse_hex(result["handles"][0].as_str().unwrap()).unwrap();
+        (s, source, table)
+    }
+
+    #[test]
+    fn paper_table_refresh_reloads_sources_from_any_active_space_and_is_undoable() {
+        for active in ["Layout1", "Model", "Layout2"] {
+            let (mut s, source, table) = owned_paper_table();
+            let original = s.doc().unwrap().entity(table).unwrap().clone();
+            s.doc_mut()
+                .unwrap()
+                .modify_entity(source, |e| {
+                    if let EntityKind::Circle(c) = &mut e.kind {
+                        c.radius = 3.0;
+                    }
+                })
+                .unwrap();
+            s.execute("layout.set", &json!({"name":active})).unwrap();
+            let before = s.doc().unwrap().clone();
+            let result = s.execute("datawizard", &json!({"refresh":table.hex()})).unwrap();
+            assert_eq!(result, json!({"handle":table.hex(),"refreshed":true,"rows":1}));
+            assert_eq!(s.layout_space().tab_name(), active);
+            let doc = s.doc().unwrap();
+            assert_eq!(doc.entity_count(), before.entity_count());
+            assert_eq!(doc.model, before.model);
+            assert_eq!(doc.layout("Layout2"), before.layout("Layout2"));
+            assert_eq!(doc.space_of(table), Some(cadcraft_doc::Space::Paper("Layout1".into())));
+            let entity = doc.entity(table).unwrap();
+            assert_eq!(entity.common, original.common);
+            let EntityKind::Table(updated) = &entity.kind else { panic!("not a table") };
+            assert_eq!((updated.insert.x, updated.insert.y), (12.0, 34.0));
+            assert_eq!(updated.cells.last().unwrap()[0].text, "28.27");
+            let after = doc.clone();
+            s.undo().unwrap();
+            assert_eq!(s.doc().unwrap(), &before);
+            s.redo().unwrap();
+            assert_eq!(s.doc().unwrap(), &after);
+        }
+    }
+
+    #[test]
+    fn paper_table_refresh_keeps_ownership_through_dxf_roundtrip() {
+        let (mut s, source, table) = owned_paper_table();
+        let bytes = cadcraft_io::write(s.doc().unwrap(), "paper.dxf").unwrap();
+        *s.doc_mut().unwrap() = cadcraft_io::read(&bytes, "paper.dxf").unwrap();
+        s.execute("layout.set", &json!({"name":"Model"})).unwrap();
+        s.execute("scale", &json!({"handles":[source.hex()],"base":[0,0],"factor":1.5})).unwrap();
+        let original = s.doc().unwrap().entity(table).unwrap().clone();
+        s.execute("datawizard", &json!({"refresh":table.hex()})).unwrap();
+        let doc = s.doc().unwrap();
+        let updated = doc.layout("Layout1").unwrap().entities.get(table).unwrap();
+        assert_eq!(updated.common, original.common);
+        let EntityKind::Table(updated) = &updated.kind else { panic!("not a table") };
+        assert_eq!((updated.insert.x, updated.insert.y), (12.0, 34.0));
+        assert_eq!(updated.cells.last().unwrap()[0].text, "28.27");
+    }
+
+    #[test]
+    fn paper_table_refresh_errors_preserve_drawing_selection_undo_and_redo() {
+        for reason in ["stale source", "not owned", "invalid ownership metadata", "not a table"] {
+            let (mut s, source, table) = owned_paper_table();
+            match reason {
+                "stale source" => {
+                    s.doc_mut().unwrap().remove_entity(source);
+                }
+                "not owned" => {
+                    s.doc_mut().unwrap().modify_entity(table, |e| e.common.xdata.clear()).unwrap();
+                }
+                "invalid ownership metadata" => {
+                    s.doc_mut()
+                        .unwrap()
+                        .modify_entity(table, |e| {
+                            e.common.xdata = vec![RawTag { code: 1001, value: APP.into() }, RawTag { code: 1070, value: "1".into() }];
+                        })
+                        .unwrap();
+                }
+                "not a table" => {
+                    s.doc_mut()
+                        .unwrap()
+                        .modify_entity(table, |e| {
+                            e.kind = EntityKind::Circle(cadcraft_doc::Circle { center: cadcraft_geom::Vec3::ZERO, radius: 1.0 });
+                        })
+                        .unwrap();
+                }
+                _ => panic!("unexpected refresh rejection case: {reason}"),
+            }
+            // Keep a real redo entry, so a rejected refresh cannot silently discard it.
+            s.execute("circle", &json!({"center":[5,5],"radius":1})).unwrap();
+            s.undo().unwrap();
+            s.set_selection(vec![table]);
+            let before = s.state().unwrap().clone();
+            let error = s.execute("datawizard", &json!({"refresh":table.hex()})).unwrap_err();
+            assert!(error.to_string().contains(reason), "{reason}: {error}");
+            let after = s.state().unwrap();
+            assert_eq!(after.doc, before.doc);
+            assert_eq!(after.selection, before.selection);
+            assert_eq!(after.undo.len(), before.undo.len());
+            assert_eq!(after.redo.len(), before.redo.len());
+            for (actual, expected) in after.undo.iter().chain(&after.redo).zip(before.undo.iter().chain(&before.redo)) {
+                assert_eq!(actual.label, expected.label);
+                assert_eq!(actual.doc, expected.doc);
+                assert_eq!(actual.selection, expected.selection);
+            }
+        }
     }
 
     #[test]
