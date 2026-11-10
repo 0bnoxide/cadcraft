@@ -99,6 +99,72 @@ mod tests {
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&files[0]).unwrap()).unwrap()["outcome"], "Failed");
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[cfg(windows)]
+    #[test]
+    fn failed_second_publish_retains_added_named_stream() {
+        check_retained_stream(b"caller-added data").unwrap();
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn failed_second_publish_retains_added_empty_named_stream() {
+        check_retained_stream(b"").unwrap();
+    }
+
+    #[cfg(windows)]
+    fn check_retained_stream(contents: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
+        file::set_io(file::IoHooks {
+            read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
+        });
+        let root = std::env::temp_dir().join(format!("cadcraft-figure-stream-{}", super::super::proposal::files::run_id()));
+        std::fs::create_dir(&root)?;
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf")?)?;
+        std::fs::write(root.join("spec.json"), br#"{"figure_id":"F","source_drawing":"source.dxf","layout":"Figure"}"#)?;
+        let mut p = json!({"action":"plan","spec_paths":[root.join("spec.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
+        let planned = native::run(&p, &super::super::proposal::files::rename_no_replace)?;
+        p["action"] = json!("execute");
+        p["approved_hash"] = planned["hash"].clone();
+        let count = std::cell::Cell::new(0);
+        let original = std::cell::RefCell::new(Vec::new());
+        let failure = |from: &std::path::Path, to: &std::path::Path| {
+            count.set(count.get() + 1);
+            if count.get() == 2 {
+                return Err("forced second publish failure".into());
+            }
+            super::super::proposal::files::rename_no_replace(from, to)?;
+            *original.borrow_mut() = std::fs::read(to).map_err(|e| e.to_string())?;
+            let mut stream = to.as_os_str().to_os_string();
+            stream.push(":additional");
+            std::fs::write(stream, contents).map_err(|e| e.to_string())?;
+            Ok(())
+        };
+        let result = native::run(&p, &failure)?;
+        let first = root.join("out/A_E_F.pdf");
+        let actual = std::fs::read(&first);
+        let mut stream = first.as_os_str().to_os_string();
+        stream.push(":additional");
+        let added = std::fs::read(stream);
+        let files: Vec<_> = std::fs::read_dir(root.join("out"))?.map(|e| e.map(|e| e.path())).collect::<std::io::Result<_>>()?;
+        let receipt = std::fs::read(result["receipt"]["receipt_path"].as_str().ok_or("receipt path missing")?)?;
+        std::fs::remove_dir_all(root)?;
+        assert_eq!(result["receipt"]["outcome"], "Failed", "{result}");
+        assert_eq!(count.get(), 2);
+        assert!(actual.is_ok(), "rollback removed an artifact with a named stream: {result}");
+        assert_eq!(actual?, original.into_inner());
+        assert_eq!(added?, contents);
+        assert_eq!(files.len(), 2, "only the retained PDF and Failed receipt remain");
+        assert_eq!(serde_json::from_slice::<serde_json::Value>(&receipt)?, result["receipt"]);
+        assert!(
+            result["receipt"]["cleanup_failures"]
+                .as_array()
+                .is_some_and(|rows| rows.iter().any(|v| v.as_str().is_some_and(|s| s.contains("A_E_F.pdf"))))
+        );
+        Ok(())
+    }
 }
 fn run(_: &mut Session, p: &Value) -> Result<Value> {
     #[cfg(target_arch = "wasm32")]
@@ -584,9 +650,91 @@ pub(super) mod native {
         }
         let result = execute(&plan, &loaded, &refs, &root, h, mover);
         if created && !result.as_ref().is_ok_and(|v| v["receipt"]["outcome"] == "Succeeded") {
-            let _ = fs::remove_dir(&root);
+            remove_empty_output_root(&root);
         }
         result
+    }
+    fn remove_empty_output_root(root: &Path) {
+        if no_named_streams(root).is_ok() {
+            let _ = fs::remove_dir(root);
+        }
+    }
+    fn no_named_streams(path: &Path) -> Checked<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            // Bound the dependency's UTF-16 allocation and prevent Win32 NUL truncation.
+            if path.as_os_str().encode_wide().take(32_768).count() >= 32_768 || path.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err("stream_inspection_failed: path is invalid or too long".into());
+            }
+            let failed = |e| format!("stream_inspection_failed: cannot inspect {}: {e}", path.display());
+            // Rollback must not delete caller-added streams that primary-byte hashes omit.
+            // The lazy iterator detects even empty named streams and skips only unnamed $DATA.
+            let mut streams = match fsquirrel::list(path) {
+                Ok(streams) => streams,
+                // An ordinary directory has no unnamed $DATA stream. Only its documented
+                // ERROR_HANDLE_EOF result is empty; all other inspection failures retain it.
+                Err(e) if e.raw_os_error() == Some(0x8007_0026_u32.cast_signed()) && path.is_dir() => return Ok(()),
+                Err(e) => return Err(failed(e)),
+            };
+            if streams.next().transpose().map_err(failed)?.is_some() {
+                return Err(format!("named_stream: {} has a named stream not covered by the primary-byte hash", path.display()));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = path;
+        Ok(())
+    }
+    #[cfg(all(test, windows))]
+    mod stream_tests {
+        use super::{files, no_named_streams, remove_empty_output_root};
+        use std::{fs, path::Path};
+
+        #[test]
+        fn empty_output_root_without_streams_is_removed() {
+            let root = std::env::temp_dir().join(format!("cadcraft-figure-root-{}", files::run_id()));
+            fs::create_dir(&root).unwrap();
+            remove_empty_output_root(&root);
+            assert!(!root.exists());
+        }
+
+        #[test]
+        fn empty_output_root_with_named_stream_is_retained() {
+            check_retained_root(b"caller-added data").unwrap();
+        }
+
+        #[test]
+        fn empty_output_root_with_empty_named_stream_is_retained() {
+            check_retained_root(b"").unwrap();
+        }
+
+        fn check_retained_root(contents: &[u8]) -> std::io::Result<()> {
+            let root = std::env::temp_dir().join(format!("cadcraft-figure-root-{}", files::run_id()));
+            fs::create_dir(&root)?;
+            let mut stream = root.as_os_str().to_os_string();
+            stream.push(":additional");
+            fs::write(&stream, contents)?;
+            remove_empty_output_root(&root);
+            let retained = fs::read(&stream);
+            if root.exists() {
+                fs::remove_dir(&root)?;
+            }
+            assert_eq!(retained?, contents);
+            Ok(())
+        }
+
+        #[test]
+        fn unavailable_stream_inspection_is_an_error() {
+            let missing = std::env::temp_dir().join(format!("cadcraft-figure-missing-{}", files::run_id()));
+            assert!(no_named_streams(&missing).unwrap_err().starts_with("stream_inspection_failed:"));
+        }
+
+        #[test]
+        fn stream_inspection_rejects_nul_and_overlong_paths() {
+            for path in ["file\0hidden".to_string(), "x".repeat(32_768)] {
+                assert!(no_named_streams(Path::new(&path)).unwrap_err().starts_with("stream_inspection_failed:"));
+            }
+        }
     }
     fn execute(plan: &Value, loaded: &[Loaded], refs: &References, root: &Path, h: &file::IoHooks, mover: &Mover<'_>) -> Checked<Value> {
         let _lock = files::lock(root)?;
@@ -643,7 +791,7 @@ pub(super) mod native {
         if result.is_err() {
             for (path, digest) in published.iter().rev() {
                 match files::fingerprint(path) {
-                    Ok(actual) if actual == *digest => {
+                    Ok(actual) if actual == *digest && no_named_streams(path).is_ok() => {
                         if let Err(e) = fs::remove_file(path) {
                             cleanup.push(e.to_string());
                         }
