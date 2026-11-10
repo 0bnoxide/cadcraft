@@ -215,6 +215,9 @@ impl Manifest {
     pub fn sheet_index_path(&self) -> &str {
         &self.sheet_index_path
     }
+    pub fn profile(&self, orientation: &str, size: &str) -> Option<&Profile> {
+        self.profiles.iter().find(|p| p.orientation == orientation && p.size == size)
+    }
     fn validate(&mut self) -> Result<(), Issue> {
         if self.version == 1 {
             if self.source_roles.is_some() || self.source_location.is_some() || self.drawing_settings.is_some() {

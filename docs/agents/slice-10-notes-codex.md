@@ -15,11 +15,11 @@ route, crate, manifest version, lab-data behavior or handoff changes.
 - [x] Write engine tests for preparation, QA, deterministic preview, approval,
   four outputs, versioning, unchanged source/session and failed publication;
   implement `figureexport` with shared staging helpers and registration.
-- [ ] Exercise the CLI with synthetic drawings; run `cargo xtask ci`, inspect
+- [x] Exercise the CLI with synthetic drawings; run `cargo xtask ci`, inspect
   the complete diff, publish PR 1 and request exact-head review by message.
-- [ ] On the stacked branch, test/implement closed profile parsing, sheet
+- [x] On the stacked branch, test/implement closed profile parsing, sheet
   selection, reference closure, ZIP/manifest verification and atomic publication.
-- [ ] Reproduce #44/#45 with regressions and make the agreed narrow fixes.
+- [x] Reproduce #44/#45 with regressions and make the agreed narrow fixes.
 - [ ] Run CLI checks and `cargo xtask ci`; publish PR 2, request review and
   address every finding. Record actual hosted checks; leave merging to owner.
 
@@ -56,6 +56,9 @@ The package and ZIP reserve the same version, and unknown naming tokens refuse.
   focused tests and full CI next (`b33475b5`).
 - 2026-11-10 02:53 received: review session reported its usage limit, resetting at
   00:10 Mountain time. No review has been performed or implied.
+- 2026-11-10 03:17 sent: PR #50 exact head fbc4835894934675015feb6dc1a4667180ecfd49,
+  full review requested; local CI and CLI evidence summarized (`3d63568b`).
+- 2026-11-10 03:17 received: review session again reported the usage limit.
 
 Message times above were recorded on receipt during this session, rounded to
 the minute; message ids are the exact Paseo receipts.
@@ -88,3 +91,48 @@ the minute; message ids are the exact Paseo receipts.
   after Cargo reported a missing cached rlib. No dependency or CI source changed.
 - Contributor entry was checked; the existing username-only credit preference
   is retained and no contributor metadata changed.
+
+## Packaging and follow-ups
+
+Stacked branch: `slice10/codex-package`, based on PR #50 head fbc48358.
+Feature claim: [#51](https://github.com/0bnoxide/cadcraft/issues/51).
+
+The profile defaults to all sheets, `{number}_{title}.pdf`, no traveling drawings
+and no extra files. The only naming tokens are number, title and role. Extras
+use figures/ (figure_pdf, figure_png), data/ (data_csv, boring_log), qa/
+(qa_report), or the package root (other). Paths and collisions use the existing
+proposal rules. Both the folder and ZIP reserve the same Package[_vN] stem.
+
+The generated checksums.json contains version 1 and a files array with path,
+role, sheet_role, sha256 and size. It lists every payload. Its own digest is
+recorded in the receipt, and the ZIP contains exactly the payload and manifest.
+ZIP entry names and every decompressed entry hash are verified on reopen.
+Limits are 4,096 entries including the manifest, 512 MiB per entry and 2 GiB
+total; the existing ZIP dependency writes stored entries, with no new version.
+Drawings and references travel as unchanged bytes under drawings/ with their
+proposal-relative hierarchy; references outside the proposal are refused when
+drawings travel. No drawing is repathed, edited or saved by this command.
+
+- Full local `cargo xtask ci`: all seven gates passed; 4,092 tests passed,
+  28 skipped. The local copied-launcher workaround for #49 remains untracked.
+- CLI on a fresh synthetic newproposal project: two selected sheet PDFs;
+  unchanged source drawing hashes; exact ZIP entry set; each payload hash
+  matches checksums.json; ZIP hash matches receipt; _v2 reserves folder and
+  ZIP together; an edited sheet invalidates approval; missing layout refuses
+  preflight and writes no second package.
+- Independent integration checks reopen the actual ZIP and compare entries to
+  the plan and digests to the manifest. Folder-only and ZIP-only name occupancy,
+  colliding extras and reserved checksum destination are covered. Linux CI
+  additionally exercises linked-extra refusal.
+- Forced second publish failure removes the published folder and staging area,
+  leaves no ZIP or success receipt, and persists a Failed receipt.
+- #44: lock owner PID and UTC start are stored and reported; existing/legacy
+  locks remain intact and are never auto-broken.
+- #45: one shared link check; empty retention folders are removed only when
+  created by this run; Failed intake/configuration receipts persist; a
+  register-only intake creates no host stage or retained drawing; XY-derived
+  extents preserve the saved finite Z range. Red/green regressions cover each
+  behavioral fix and preservation of pre-existing retention folders.
+- PR #50 hosted Linux and Windows gates both passed at fbc48358. SonarCloud
+  was skipped by its existing workflow. The requested full review is pending
+  the review session's quota reset; no approval or review is claimed.

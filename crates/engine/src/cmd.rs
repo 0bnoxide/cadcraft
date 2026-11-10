@@ -51,6 +51,7 @@ mod intakesource;
 mod modify2;
 mod mtext_opts;
 mod overkill;
+mod packagedeliverables;
 mod pline_opts;
 pub mod plotters;
 mod proposal;
@@ -243,6 +244,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(intakesource::specs());
         v.extend(configuredrawing::specs());
         v.extend(figureexport::specs());
+        v.extend(packagedeliverables::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());
