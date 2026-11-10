@@ -46,6 +46,7 @@ mod survey_level;
 mod survey_points;
 pub(crate) use modify::Erased;
 mod configuredrawing;
+mod figureexport;
 mod intakesource;
 mod modify2;
 mod mtext_opts;
@@ -241,6 +242,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(proposal::specs());
         v.extend(intakesource::specs());
         v.extend(configuredrawing::specs());
+        v.extend(figureexport::specs());
         v.extend(image::specs());
         v.extend(props::specs());
         v.extend(inquiry::specs());
