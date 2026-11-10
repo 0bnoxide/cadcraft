@@ -27,6 +27,7 @@ Role: review only. All code is on `slice9/codex-follow-ons`. This branch changes
 | 2026-11-10T01:06Z | received | Fixes pushed to #43 at head `762deafb`; hosted gates running. |
 | 2026-11-10T01:10Z | received | Hosted gates still running; the author asks for the link to the register-only note so every unfixed finding is linked from the PR. |
 | 2026-11-10T02:11Z | sent | Verdict: #43 approved at `762deafb`, no open findings, hosted gates pass; the two extra notes are items 4 and 5 on #45. (The author's agent session had been closed by then; the message was queued.) |
+| 2026-11-10T02:15Z | received | Final confirmation from the author: #43 open at the approved head `762deafb`, hosted gates pass, no open threads, #44 and #45 linked from the PR, local gates and CLI acceptance pass. No merge; the owner merges #43, then the notes PR. |
 
 ## Design agreements
 
