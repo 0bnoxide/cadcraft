@@ -122,25 +122,7 @@ mod native {
     static NEXT: AtomicU64 = AtomicU64::new(0);
     const MAX_TEMPLATE: usize = 32 << 20;
 
-    fn reject_link(path: &Path) -> Checked<()> {
-        match fs::symlink_metadata(path) {
-            Ok(meta) => {
-                #[cfg(windows)]
-                {
-                    use std::os::windows::fs::MetadataExt;
-                    if meta.file_attributes() & 0x400 != 0 {
-                        return Err("Reparse paths are not allowed".into());
-                    }
-                }
-                if meta.file_type().is_symlink() {
-                    return Err("Symlink paths are not allowed".into());
-                }
-            }
-            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
-            Err(e) => return Err(e.to_string()),
-        }
-        Ok(())
-    }
+    use super::files::reject_link;
     pub(super) fn child(stage: &Path, relative: &str) -> Checked<PathBuf> {
         let relative = cadcraft_proposal::paths::relative(relative).map_err(|e| e.message)?;
         let path = stage.join(relative);
@@ -748,13 +730,32 @@ pub(super) mod files {
     }
     pub fn lock(root: &Path) -> Checked<Lock> {
         let path = child(root, ".proposal-follow-on.lock")?;
-        let file = fs::OpenOptions::new()
-            .create_new(true)
-            .write(true)
-            .open(&path)
-            .map_err(|_| "project_busy: another follow-on may be running; inspect before removing a stale lock")?;
-        drop(file);
-        Ok(Lock(path))
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).open(&path).map_err(|e| {
+            if e.kind() != std::io::ErrorKind::AlreadyExists {
+                return format!("lock_failed: {e}");
+            }
+            let owner = read(&path, 4096).ok().and_then(|bytes| serde_json::from_slice::<Value>(&bytes).ok());
+            let pid = owner
+                .as_ref()
+                .and_then(|v| v.get("pid"))
+                .and_then(Value::as_u64)
+                .filter(|p| *p <= u32::MAX as u64)
+                .map(|p| p.to_string())
+                .unwrap_or_else(|| "unknown".into());
+            let started = owner
+                .as_ref()
+                .and_then(|v| v.get("started_at_utc"))
+                .and_then(Value::as_str)
+                .and_then(|v| chrono::DateTime::parse_from_rfc3339(v).ok())
+                .map(|v| v.to_rfc3339())
+                .unwrap_or_else(|| "unknown".into());
+            format!("project_busy: lock owner PID {pid}, started_at_utc {started}; inspect the owner before manually removing a stale lock")
+        })?;
+        let held = Lock(path);
+        let owner =
+            json!({"pid":std::process::id(),"started_at_utc":chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).to_rfc3339()});
+        file.write_all(&encoded(&owner)?).and_then(|_| file.sync_all()).map_err(|e| e.to_string())?;
+        Ok(held)
     }
     static NEXT: AtomicU64 = AtomicU64::new(0);
     pub fn run_id() -> String {
@@ -858,8 +859,24 @@ pub(super) mod files {
         pub prior_sha256: String,
         pub new_sha256: String,
         pub retained_path: PathBuf,
+        pub retained_dir_created: bool,
+    }
+    fn remove_empty(path: &Path) -> Checked<()> {
+        reject_link(path)?;
+        match fs::read_dir(path) {
+            Ok(mut entries) => {
+                if entries.next().is_none() {
+                    fs::remove_dir(path).map_err(|e| e.to_string())
+                } else {
+                    Ok(())
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => Ok(()),
+            Err(e) => Err(e.to_string()),
+        }
     }
     pub fn swap(target: &Path, stage: &Path, expected: &str, mover: &Mover<'_>) -> Checked<Swap> {
+        let mut created_retained_dir = None;
         let result = (|| {
             reject_link(target)?;
             reject_link(stage)?;
@@ -872,6 +889,7 @@ pub(super) mod files {
             reject_link(&retained_dir)?;
             if !retained_dir.exists() {
                 fs::create_dir(&retained_dir).map_err(|e| e.to_string())?;
+                created_retained_dir = Some(retained_dir.clone());
             }
             let stem = target.file_stem().and_then(|s| s.to_str()).ok_or("unsafe_path: target stem")?;
             let ext = target.extension().and_then(|s| s.to_str()).ok_or("unsafe_path: target extension")?;
@@ -884,13 +902,23 @@ pub(super) mod files {
                 }
                 return Err(error);
             }
-            Ok(Swap { prior_sha256: expected.into(), new_sha256, retained_path })
+            Ok(Swap { prior_sha256: expected.into(), new_sha256, retained_path, retained_dir_created: created_retained_dir.is_some() })
         })();
-        if result.is_err()
-            && let Err(e) = fs::remove_file(stage)
-            && e.kind() != std::io::ErrorKind::NotFound
-        {
-            return Err(format!("{}; stage cleanup failed: {e}", result.err().unwrap_or_default()));
+        if result.is_err() {
+            let mut cleanup = Vec::new();
+            if let Err(e) = fs::remove_file(stage)
+                && e.kind() != std::io::ErrorKind::NotFound
+            {
+                cleanup.push(e.to_string());
+            }
+            if let Some(dir) = created_retained_dir
+                && let Err(e) = remove_empty(&dir)
+            {
+                cleanup.push(e);
+            }
+            if !cleanup.is_empty() {
+                return Err(format!("{}; cleanup failed: {}", result.err().unwrap_or_default(), cleanup.join("; ")));
+            }
         }
         result
     }
@@ -911,7 +939,19 @@ pub(super) mod files {
             return Err(format!("restoration refused: target changed; prior retained at {}", record.retained_path.display()));
         }
         fs::remove_file(target).map_err(|e| e.to_string())?;
-        mover(&record.retained_path, target).map_err(|e| format!("restoration failed: {e}; prior retained at {}", record.retained_path.display()))
+        mover(&record.retained_path, target).map_err(|e| format!("restoration failed: {e}; prior retained at {}", record.retained_path.display()))?;
+        if record.retained_dir_created {
+            remove_empty(record.retained_path.parent().ok_or("unsafe_path: retained parent missing")?)?;
+        }
+        Ok(())
+    }
+    pub fn failed_receipt(path: &Path, command: &str, hash: &str, error: String, cleanup: Vec<String>) -> Value {
+        let mut receipt = json!({"version":1,"command":command,"outcome":"Failed","plan_sha256":hash,"failed_checks":[{"code":"execution_failed","message":error}],"cleanup_failures":cleanup,"receipt_path":path});
+        if let Err(e) = encoded(&receipt).and_then(|bytes| write_new(path, &bytes)) {
+            receipt["reporting_failure"] = json!(e);
+            receipt["receipt_path"] = Value::Null;
+        }
+        json!({"receipt":receipt})
     }
     pub fn approval_failure(hash: &str, approved: Option<&str>) -> Option<Value> {
         if approved == Some(hash) {
@@ -1167,6 +1207,147 @@ mod tests {
         assert!(files::swap(&target, &stage, &cadcraft_proposal::approval::sha256(b"prior"), &mover).is_err());
         assert_eq!(std::fs::read(&target).unwrap(), b"prior");
         assert!(!stage.exists());
+        assert!(!root.join("_superseded").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn lock_reports_owner_without_breaking_existing_or_legacy_locks() {
+        let (root, _, _) = project();
+        let held = files::lock(&root).unwrap();
+        let path = root.join(".proposal-follow-on.lock");
+        let bytes = std::fs::read(&path).unwrap();
+        let owner: Value = serde_json::from_slice(&bytes).unwrap();
+        assert_eq!(owner["pid"], std::process::id());
+        let started = owner["started_at_utc"].as_str().unwrap();
+        assert!(chrono::DateTime::parse_from_rfc3339(started).is_ok());
+        let busy = files::lock(&root).err().unwrap();
+        assert!(busy.contains(&std::process::id().to_string()) && busy.contains(started), "{busy}");
+        assert_eq!(std::fs::read(&path).unwrap(), bytes);
+        drop(held);
+        assert!(!path.exists());
+        std::fs::write(&path, b"").unwrap();
+        assert!(files::lock(&root).is_err());
+        assert!(path.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn register_only_intake_keeps_base_bytes_and_creates_no_drawing_retained_version() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({});
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let preview = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = preview["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let proposal = root.join("Client - Site");
+        let host = proposal.join("Models/base.dxf");
+        let bytes = std::fs::read(&host).unwrap();
+        let csv = root.join("points.csv");
+        std::fs::write(&csv, b"id,x,y\n1,0,0\n").unwrap();
+        let mut p = json!({"action":"plan","manifest_path":manifest_path,"proposal_root":proposal,"sources":[{"path":csv,"role":"other"}]});
+        let plan = super::super::intakesource::run_with_hooks(&p, &hooks).unwrap();
+        p["action"] = json!("create");
+        p["approved_hash"] = plan["hash"].clone();
+        let done = super::super::intakesource::run_with_hooks(&p, &hooks).unwrap();
+        assert_eq!(done["receipt"]["outcome"], "Succeeded", "{done}");
+        assert!(done["receipt"]["drawing"].is_null(), "{done}");
+        assert_eq!(std::fs::read(&host).unwrap(), bytes);
+        assert!(!proposal.join("Models/_superseded").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn successful_swap_rollback_preserves_preexisting_retention_directory() {
+        for preexisting in [false, true] {
+            let (root, _, _) = project();
+            let dir = root.join("_superseded");
+            if preexisting {
+                std::fs::create_dir(&dir).unwrap();
+            }
+            let target = root.join("target.dxf");
+            let stage = root.join("stage.dxf");
+            std::fs::write(&target, b"old").unwrap();
+            std::fs::write(&stage, b"new").unwrap();
+            let swap = files::swap(&target, &stage, &cadcraft_proposal::approval::sha256(b"old"), &files::rename_no_replace).unwrap();
+            files::restore(&target, &swap, &files::rename_no_replace).unwrap();
+            assert_eq!(std::fs::read(&target).unwrap(), b"old");
+            assert_eq!(dir.exists(), preexisting);
+            std::fs::remove_dir_all(root).unwrap();
+        }
+    }
+
+    fn follow_project(settings: Value) -> (std::path::PathBuf, Value, super::super::file::IoHooks) {
+        let (root, mut params, hooks) = project();
+        let path = root.join("standards.json");
+        let mut m: Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        m["version"] = json!(2);
+        m["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        m["drawing_settings"] = settings;
+        std::fs::write(&path, serde_json::to_vec(&m).unwrap()).unwrap();
+        let plan = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = plan["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let p = json!({"action":"plan","manifest_path":path,"proposal_root":root.join("Client - Site")});
+        (root, p, hooks)
+    }
+
+    #[test]
+    fn configuration_failure_persists_failed_receipt_and_preserves_blocking_file() {
+        let (root, mut p, hooks) = follow_project(json!({"headers":{"LUPREC":7}}));
+        let host = root.join("Client - Site/Models/base.dxf");
+        let mut d = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        d.header.set_i64("LUPREC", 2);
+        let bytes = cadcraft_io::write(&d, &host).unwrap();
+        std::fs::write(&host, &bytes).unwrap();
+        p["target"] = json!("Models/base.dxf");
+        let plan = super::super::configuredrawing::run_with_hooks(&p, &hooks).unwrap();
+        assert!(plan["hash"].is_string(), "{plan}");
+        let blocker = root.join("Client - Site/Models/_superseded");
+        std::fs::write(&blocker, b"preserve").unwrap();
+        p["action"] = json!("create");
+        p["approved_hash"] = plan["hash"].clone();
+        let failed = super::super::configuredrawing::run_with_hooks(&p, &hooks).unwrap();
+        assert_eq!(failed["receipt"]["outcome"], "Failed", "{failed}");
+        let path = failed["receipt"]["receipt_path"].as_str().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["outcome"], "Failed");
+        assert_eq!(std::fs::read(&host).unwrap(), bytes);
+        assert_eq!(std::fs::read(&blocker).unwrap(), b"preserve");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn package_failed_zip_publish_rolls_back_folder_without_success_receipt() {
+        super::super::file::set_io(super::super::file::IoHooks {
+            read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
+        });
+        let (root, mut p, _) = follow_project(json!({}));
+        let profile = root.join("profile.json");
+        std::fs::write(&profile, b"{}").unwrap();
+        p["profile_path"] = json!(profile);
+        let planned = super::super::packagedeliverables::run_with_move(&p, &files::rename_no_replace);
+        assert!(planned["hash"].is_string(), "{planned}");
+        p["action"] = json!("execute");
+        p["approved_hash"] = planned["hash"].clone();
+        let calls = std::cell::Cell::new(0);
+        let failed = super::super::packagedeliverables::run_with_move(&p, &|a, b| {
+            calls.set(calls.get() + 1);
+            if calls.get() == 2 { Err("forced ZIP publish failure".into()) } else { files::rename_no_replace(a, b) }
+        });
+        assert_eq!(calls.get(), 2);
+        assert_eq!(failed["receipt"]["outcome"], "Failed", "{failed}");
+        assert!(!root.join("Client - Site/Deliverables").exists());
+        assert!(!std::fs::read_dir(root.join("Client - Site")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".stage")));
+        let path = failed["receipt"]["receipt_path"].as_str().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(path).unwrap()).unwrap()["outcome"], "Failed");
         std::fs::remove_dir_all(root).unwrap();
     }
 
@@ -1344,6 +1525,9 @@ mod tests {
         };
         let failed = super::super::intakesource::run_with_move(&p, &hooks, &mover).unwrap();
         assert_eq!(failed["receipt"]["outcome"], "Failed", "{failed}");
+        let failed_path = failed["receipt"]["receipt_path"].as_str().expect("Failed receipt persisted");
+        let disk: Value = serde_json::from_slice(&std::fs::read(failed_path).unwrap()).unwrap();
+        assert_eq!(disk["outcome"], "Failed");
         assert!(failed.to_string().contains("forced host swap failure"), "{failed}");
         assert_eq!(std::fs::read(&register).unwrap(), old_register);
         assert_eq!(std::fs::read(&host).unwrap(), before);

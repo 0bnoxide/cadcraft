@@ -250,9 +250,7 @@ mod native {
         }
         Ok(match result {
             Ok(receipt) => json!({"receipt":receipt}),
-            Err(error) => {
-                json!({"receipt":{"outcome":"Failed","plan_sha256":hash,"failed_checks":[{"code":"execution_failed","message":error}],"cleanup_failures":cleanup}})
-            }
+            Err(error) => files::failed_receipt(&receipt_path, "configuredrawing", &hash, error, cleanup),
         })
     }
 }

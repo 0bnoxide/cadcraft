@@ -124,6 +124,9 @@ mod native {
         Ok((image, sizing))
     }
     fn apply(d: &mut Drawing, sources: &[Source]) -> Checked<()> {
+        if sources.iter().all(|s| s.row.action == "copy_only") {
+            return Ok(());
+        }
         for source in sources {
             let row = &source.row;
             match row.action.as_str() {
@@ -150,8 +153,13 @@ mod native {
         }
         let extents = d.extents(&Space::Model);
         if !extents.is_empty() {
-            d.header.set("EXTMIN", cadcraft_doc::HVal::Point(extents.min.to3(0.0)));
-            d.header.set("EXTMAX", cadcraft_doc::HVal::Point(extents.max.to3(0.0)));
+            let min_z = d.header.point("EXTMIN").map_or(0., |p| p.z);
+            let max_z = d.header.point("EXTMAX").map_or(0., |p| p.z);
+            if !min_z.is_finite() || !max_z.is_finite() {
+                return Err("invalid_extent: saved Z extent is not finite".into());
+            }
+            d.header.set("EXTMIN", cadcraft_doc::HVal::Point(extents.min.to3(min_z)));
+            d.header.set("EXTMAX", cadcraft_doc::HVal::Point(extents.max.to3(max_z)));
         }
         Ok(())
     }
@@ -351,6 +359,7 @@ mod native {
         let mut owned_stage = false;
         let mut owned_register_stage = false;
         let mut owned_copies_stage = false;
+        let attaches = plan.sources.iter().any(|s| s.row.action != "copy_only");
         let result = (|| -> Checked<Value> {
             files::reject_link(&copies_stage)?;
             fs::create_dir(&copies_stage).map_err(|e| e.to_string())?;
@@ -372,12 +381,14 @@ mod native {
                     return Err("source_changed: copied bytes differ from approved source".into());
                 }
             }
-            let mut wanted = prior.clone();
-            apply(&mut wanted, &plan.sources)?;
-            files::write_new(&stage, &(h.write)(&wanted, &target.to_string_lossy())?)?;
-            owned_stage = true;
-            let actual = (h.read)(&files::read(&stage, 32 << 20)?, &target.to_string_lossy())?;
-            verify(&actual, &plan.sources, &prior)?;
+            if attaches {
+                let mut wanted = prior.clone();
+                apply(&mut wanted, &plan.sources)?;
+                files::write_new(&stage, &(h.write)(&wanted, &target.to_string_lossy())?)?;
+                owned_stage = true;
+                let actual = (h.read)(&files::read(&stage, 32 << 20)?, &target.to_string_lossy())?;
+                verify(&actual, &plan.sources, &prior)?;
+            }
             register.entries.extend(plan.sources.iter().map(|s| s.row.clone()));
             files::write_new(&register_stage, &files::encoded(&register)?)?;
             owned_register_stage = true;
@@ -397,7 +408,9 @@ mod native {
                 return Err("stale_approval: host changed before publication".into());
             }
             register_swap = Some(files::swap(&register_path, &register_stage, &cadcraft_proposal::approval::sha256(&register_bytes), mover)?);
-            host_swap = Some(files::swap(&target, &stage, &target_hash, mover)?);
+            if attaches {
+                host_swap = Some(files::swap(&target, &stage, &target_hash, mover)?);
+            }
             verify(&(h.read)(&files::read(&target, 32 << 20)?, &target.to_string_lossy())?, &plan.sources, &prior)?;
             verify_copies(&project.root, &target, &plan.sources)?;
             let receipt = json!({"version":1,"command":"intakesource","outcome":"Succeeded","plan_sha256":hash,"drawing":host_swap,"register":register_swap,"sources":plan.sources.iter().map(|s|&s.row).collect::<Vec<_>>(),"receipt_path":receipt_path});
@@ -442,15 +455,23 @@ mod native {
         }
         Ok(match result {
             Ok(receipt) => json!({"receipt":receipt,"cleanup_failures":cleanup}),
-            Err(error) => {
-                json!({"receipt":{"outcome":"Failed","plan_sha256":hash,"failed_checks":[{"code":"execution_failed","message":error}],"cleanup_failures":cleanup}})
-            }
+            Err(error) => files::failed_receipt(&receipt_path, "intakesource", &hash, error, cleanup),
         })
     }
 
     #[cfg(test)]
     mod tests {
         use super::*;
+        #[test]
+        fn derived_xy_extents_preserve_saved_z_range() {
+            let mut d = Drawing::new_metric();
+            d.header.set("EXTMIN", cadcraft_doc::HVal::Point(Vec3::new(0., 0., 3.)));
+            d.header.set("EXTMAX", cadcraft_doc::HVal::Point(Vec3::new(10., 10., 17.)));
+            let row:Row=serde_json::from_value(serde_json::json!({"role":"imagery","filename":"a.png","relative_path":"Sources/a.png","sha256":"x","action":"image","reference_name":null,"relative_reference_path":null,"image":Image{insert:Vec3::new(3.,3.,5.),..Default::default()},"sizing":null,"insertion":[0,0,0],"scale":1,"rotation":0})).unwrap();
+            apply(&mut d, &[Source { source: PathBuf::from("a.png"), row }]).unwrap();
+            assert_eq!(d.header.point("EXTMIN").unwrap().z, 3.);
+            assert_eq!(d.header.point("EXTMAX").unwrap().z, 17.);
+        }
         #[test]
         fn imageattach_sizing_and_decode_fallback_are_planned_without_distortion() {
             super::super::super::file::set_image_decoder(|b| cadcraft_io::raster::decode(b).map_err(|e| e.to_string()));
