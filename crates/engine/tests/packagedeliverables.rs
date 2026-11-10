@@ -156,3 +156,79 @@ fn missing_layout_and_missing_extra_fail_before_plotting_and_changed_sheet_is_st
     assert!(!root.join("Client - Site/Deliverables").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
+
+#[cfg(windows)]
+#[test]
+fn named_stream_extras_are_refused_including_empty_streams() {
+    for payload in [b"additional payload".as_slice(), b"".as_slice()] {
+        let (root, p) = project(false);
+        let stream = root.join("qa.txt:additional");
+        std::fs::write(&stream, payload).unwrap();
+        let result = Session::new().execute("packagedeliverables", &p).unwrap();
+        assert_eq!(result["issues"][0]["code"], "named_stream", "{result}");
+        assert!(result["hash"].is_null());
+        assert_eq!(std::fs::read(&stream).unwrap(), payload);
+        assert!(!root.join("Client - Site/Deliverables").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+}
+
+#[cfg(windows)]
+#[test]
+fn named_stream_added_after_approval_refuses_without_output() {
+    let (root, mut p) = project(false);
+    let mut session = Session::new();
+    let plan = session.execute("packagedeliverables", &p).unwrap();
+    assert!(plan["hash"].is_string(), "{plan}");
+    std::fs::write(root.join("qa.txt:after-approval"), b"not approved").unwrap();
+    p["action"] = json!("execute");
+    p["approved_hash"] = plan["hash"].clone();
+    let result = session.execute("packagedeliverables", &p).unwrap();
+    assert_eq!(result["issues"][0]["code"], "named_stream", "{result}");
+    assert!(!root.join("Client - Site/Deliverables").exists());
+    assert!(!std::fs::read_dir(root.join("Client - Site")).unwrap().any(|entry| entry.unwrap().file_name().to_string_lossy().ends_with(".stage")));
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn named_stream_on_traveling_drawing_is_refused() {
+    let (root, p) = project(true);
+    std::fs::write(root.join("Client - Site/Models/base.dxf:additional"), b"drawing metadata").unwrap();
+    let result = Session::new().execute("packagedeliverables", &p).unwrap();
+    assert_eq!(result["issues"][0]["code"], "named_stream", "{result}");
+    assert!(!root.join("Client - Site/Deliverables").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn locked_extra_refuses_before_output() {
+    use std::os::windows::fs::OpenOptionsExt;
+    let (root, p) = project(false);
+    let held = std::fs::OpenOptions::new().read(true).share_mode(0).open(root.join("qa.txt")).unwrap();
+    let result = Session::new().execute("packagedeliverables", &p).unwrap();
+    // Canonicalization refuses the exclusive lock before stream inspection can run.
+    assert_eq!(result["issues"][0]["code"], "preflight_failed", "{result}");
+    assert!(result["hash"].is_null());
+    assert!(!root.join("Client - Site/Deliverables").exists());
+    drop(held);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[cfg(windows)]
+#[test]
+fn empty_primary_only_extra_with_unicode_name_packages() {
+    let (root, mut p) = project(false);
+    std::fs::write(root.join("empty-文書.txt"), b"").unwrap();
+    std::fs::write(root.join("profile.json"), serde_json::to_vec(&json!({"extra_files":[{"path":"empty-文書.txt","role":"other"}]})).unwrap())
+        .unwrap();
+    let mut session = Session::new();
+    let plan = session.execute("packagedeliverables", &p).unwrap();
+    assert!(plan["hash"].is_string(), "{plan}");
+    p["action"] = json!("execute");
+    p["approved_hash"] = plan["hash"].clone();
+    let result = session.execute("packagedeliverables", &p).unwrap();
+    assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
+    std::fs::remove_dir_all(root).unwrap();
+}

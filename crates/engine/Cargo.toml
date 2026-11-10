@@ -32,6 +32,10 @@ chrono = { workspace = true }
 # R-tree spatial index for picking, window selection and object snaps (MIT OR Apache-2.0).
 rstar = { version = "0.13", default-features = false }
 
+[target.'cfg(windows)'.dependencies]
+# Safe lazy NTFS stream enumeration (MIT OR Apache-2.0).
+fsquirrel = "=0.1.3"
+
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
