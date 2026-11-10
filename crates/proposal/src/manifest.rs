@@ -20,6 +20,7 @@ pub const INPUT_FIELDS: [&str; 10] = [
     "site_address",
     "project_manager",
 ];
+pub const SOURCE_ROLES: [&str; 5] = ["survey", "record_drawing", "gis_export", "imagery", "other"];
 
 #[derive(Clone, Debug, Serialize, Deserialize, PartialEq)]
 #[serde(deny_unknown_fields)]
@@ -122,6 +123,12 @@ pub struct Manifest {
     pub(crate) profiles: Vec<Profile>,
     pub(crate) property_mappings: Vec<PropertyMapping>,
     pub(crate) xrefs: Vec<Xref>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_roles: Option<Vec<String>>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) source_location: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub(crate) drawing_settings: Option<crate::settings::DrawingSettings>,
 }
 
 fn invalid(message: &str) -> Issue {
@@ -170,8 +177,8 @@ impl Manifest {
         let mut m: Self = serde_json::from_slice(bytes).map_err(|e| {
             vec![Issue::new(if e.to_string().contains("duplicate field") { "duplicate_property" } else { "invalid_json" }, e.to_string())]
         })?;
-        if m.version != 1 {
-            return Err(vec![Issue::new("unsupported_version", "Only manifest version 1 is supported")]);
+        if !matches!(m.version, 1 | 2) {
+            return Err(vec![Issue::new("unsupported_version", "Only manifest versions 1 and 2 are supported")]);
         }
         m.validate().map_err(|e| vec![e])?;
         Ok(m)
@@ -180,6 +187,15 @@ impl Manifest {
         let mut values: BTreeSet<_> = self.profiles.iter().map(|p| p.template.as_str()).collect();
         values.insert(&self.model_template);
         values.into_iter().collect()
+    }
+    pub fn version(&self) -> u32 {
+        self.version
+    }
+    pub fn source_location(&self) -> &str {
+        self.source_location.as_deref().unwrap_or("Support/Sources")
+    }
+    pub fn drawing_settings(&self) -> Option<&crate::settings::DrawingSettings> {
+        self.drawing_settings.as_ref()
     }
     pub fn models(&self) -> &[Model] {
         &self.models
@@ -200,6 +216,20 @@ impl Manifest {
         &self.sheet_index_path
     }
     fn validate(&mut self) -> Result<(), Issue> {
+        if self.version == 1 {
+            if self.source_roles.is_some() || self.source_location.is_some() || self.drawing_settings.is_some() {
+                return Err(invalid("Follow-on fields require manifest version 2"));
+            }
+        } else {
+            let source_roles = self.source_roles.as_mut().ok_or_else(|| invalid("Version 2 requires source_roles"))?;
+            if !roles(source_roles.iter().map(String::as_str), &SOURCE_ROLES) {
+                return Err(invalid("Expected the five source roles"));
+            }
+            source_roles.sort();
+            let location = paths::relative(self.source_location())?;
+            self.source_location = Some(location);
+            self.drawing_settings.as_ref().ok_or_else(|| invalid("Version 2 requires drawing_settings"))?.validate()?;
+        }
         if [
             self.base_roots.len(),
             self.folders.len(),
@@ -315,6 +345,15 @@ impl Manifest {
         );
         if let Some(issue) = paths::collisions(&entries).into_iter().next() {
             return Err(issue);
+        }
+        if self.version == 2 {
+            let mut source_entries = entries.clone();
+            // A source folder may already be declared; it must never be inside an output file.
+            source_entries.retain(|(p, file)| *file || paths::case_fold(p) != paths::case_fold(self.source_location()));
+            source_entries.push((self.source_location().to_string(), false));
+            if let Some(issue) = paths::collisions(&source_entries).into_iter().next() {
+                return Err(issue);
+            }
         }
         let folders: BTreeSet<_> = self.folders.iter().map(|p| paths::case_fold(p)).collect();
         if !folders.contains(&paths::case_fold(&self.data_shortcut_path))

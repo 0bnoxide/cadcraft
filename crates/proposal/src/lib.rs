@@ -10,5 +10,6 @@ pub mod issue;
 pub mod manifest;
 pub mod paths;
 pub mod planner;
+pub mod settings;
 
 pub use issue::{Inputs, Issue};

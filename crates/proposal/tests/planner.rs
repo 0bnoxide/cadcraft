@@ -1,4 +1,4 @@
-#[path = "fixture.rs"]
+#[path = "common/mod.rs"]
 mod sample;
 use cadcraft_proposal::{
     Inputs,

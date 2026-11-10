@@ -2,6 +2,20 @@ use cadcraft_engine::Session;
 use serde_json::json;
 
 #[test]
+fn refuses_short_row_diagnostic_growth_before_creating_output() {
+    let root = std::env::temp_dir().join(format!("pointconvert-short-limit-{}", std::process::id()));
+    std::fs::create_dir_all(&root).unwrap();
+    let input = root.join("points.csv");
+    let map = root.join("map.csv");
+    std::fs::write(&map, "from,to\nA,Tree\n").unwrap();
+    std::fs::write(&input, "x\n".repeat(1025)).unwrap();
+    let result = Session::empty().execute("pointconvert", &json!({"inputs":[input],"map_path":map,"code_column":3}));
+    assert!(result.is_err(), "unbounded diagnostics were accepted");
+    assert!(!root.join("points_converted.csv").exists());
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
 fn converts_only_codes_and_refuses_existing_output() {
     let root = std::env::temp_dir().join(format!("pointconvert-{}", std::process::id()));
     std::fs::create_dir_all(&root).unwrap();

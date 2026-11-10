@@ -1,6 +1,34 @@
-mod fixture;
+mod common;
 use cadcraft_proposal::manifest::Manifest;
-use fixture::fixture;
+use common::fixture;
+
+#[test]
+fn version_two_settings_and_source_roles_are_closed_and_version_one_still_works() {
+    let mut m = fixture();
+    assert!(Manifest::parse(&serde_json::to_vec(&m).unwrap()).is_ok());
+    m["version"] = 2.into();
+    m["source_roles"] = serde_json::json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+    m["drawing_settings"] = serde_json::json!({"headers":{"INSUNITS":6,"LUPREC":3},"layers":[{"name":"Survey","color":3}],"text_styles":[{"name":"Notes","height":2.5}],"dimension_styles":[{"name":"Dimensions","decimals":3}],"annotation_scales":[{"name":"1:50","paper_units":1,"drawing_units":50}]});
+    let valid = serde_json::to_vec(&m).unwrap();
+    assert!(Manifest::parse(&valid).is_ok(), "v2 must accept its new fields");
+    for field in ["coordinate_system", "invented"] {
+        let mut bad = m.clone();
+        bad["drawing_settings"][field] = "no".into();
+        assert!(Manifest::parse(&serde_json::to_vec(&bad).unwrap()).is_err());
+    }
+    for change in ["role", "location", "units", "style", "scale"] {
+        let mut bad = m.clone();
+        match change {
+            "role" => bad["source_roles"][0] = "unknown".into(),
+            "location" => bad["source_location"] = "../escape".into(),
+            "units" => bad["drawing_settings"]["headers"]["INSUNITS"] = 25.into(),
+            "style" => bad["drawing_settings"]["text_styles"][0]["invented"] = true.into(),
+            "scale" => bad["drawing_settings"]["annotation_scales"][0]["paper_units"] = 0.into(),
+            _ => unreachable!(),
+        }
+        assert!(Manifest::parse(&serde_json::to_vec(&bad).unwrap()).is_err(), "{change}");
+    }
+}
 
 #[test]
 fn malformed_and_ambiguous_manifests_fail_closed() {

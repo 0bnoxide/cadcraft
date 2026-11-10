@@ -195,6 +195,9 @@ mod native {
         }
     }
     pub(super) fn run(p: &Value, h: &super::super::file::IoHooks) -> Result<Value> {
+        run_with_move(p, h, &super::files::rename_no_replace)
+    }
+    pub(super) fn run_with_move(p: &Value, h: &super::super::file::IoHooks, move_file: &super::files::Mover<'_>) -> Result<Value> {
         let command = str_param(p, "action").unwrap_or("plan");
         if !matches!(command, "plan" | "create") {
             return Err(bad("newproposal", "action must be plan or create"));
@@ -286,8 +289,7 @@ mod native {
             if fs::symlink_metadata(target).is_ok() {
                 return Err("Target appeared before publication".into());
             }
-            // shortcut: Unix rename may replace a concurrently created empty directory; use a no-replace API if that narrow race matters.
-            fs::rename(&stage, target).map_err(|e| e.to_string())?;
+            move_file(&stage, target)?;
             receipt = success;
             Ok(())
         });
@@ -711,7 +713,7 @@ mod native {
         }
         Ok(())
     }
-    fn equivalent(a: &Value, b: &Value) -> bool {
+    pub(super) fn equivalent(a: &Value, b: &Value) -> bool {
         match (a, b) {
             (Value::Number(a), Value::Number(b)) => match (a.as_f64(), b.as_f64()) {
                 (Some(a), Some(b)) => (a - b).abs() <= 1e-8 * a.abs().max(b.abs()).max(1.0),
@@ -724,13 +726,470 @@ mod native {
     }
 }
 
+/// Filesystem operations shared only by the three concrete proposal commands.
+#[cfg(not(target_arch = "wasm32"))]
+pub(super) mod files {
+    use cadcraft_doc::Drawing;
+    use cadcraft_proposal::{approval, manifest::Manifest, paths};
+    use serde_json::{Value, json};
+    use std::{
+        fs,
+        io::{Read, Write},
+        path::{Path, PathBuf},
+        sync::atomic::{AtomicU64, Ordering},
+    };
+    pub type Checked<T> = std::result::Result<T, String>;
+    pub type Mover<'a> = dyn Fn(&Path, &Path) -> Checked<()> + 'a;
+    pub struct Lock(PathBuf);
+    impl Drop for Lock {
+        fn drop(&mut self) {
+            let _ = fs::remove_file(&self.0);
+        }
+    }
+    pub fn lock(root: &Path) -> Checked<Lock> {
+        let path = child(root, ".proposal-follow-on.lock")?;
+        let file = fs::OpenOptions::new()
+            .create_new(true)
+            .write(true)
+            .open(&path)
+            .map_err(|_| "project_busy: another follow-on may be running; inspect before removing a stale lock")?;
+        drop(file);
+        Ok(Lock(path))
+    }
+    static NEXT: AtomicU64 = AtomicU64::new(0);
+    pub fn run_id() -> String {
+        let now = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now());
+        format!("{}-{}-{}", now.format("%Y%m%dT%H%M%S%.6fZ"), std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed))
+    }
+    pub fn reject_link(path: &Path) -> Checked<()> {
+        match fs::symlink_metadata(path) {
+            Ok(meta) => {
+                #[cfg(windows)]
+                {
+                    use std::os::windows::fs::MetadataExt;
+                    if meta.file_attributes() & 0x400 != 0 {
+                        return Err("unsafe_path: reparse path".into());
+                    }
+                }
+                if meta.file_type().is_symlink() {
+                    return Err("unsafe_path: symbolic link".into());
+                }
+            }
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e.to_string()),
+        }
+        Ok(())
+    }
+    pub fn child(root: &Path, relative: &str) -> Checked<PathBuf> {
+        let relative = paths::relative(relative).map_err(|e| format!("{}: {}", e.code, e.message))?;
+        let path = root.join(relative);
+        for ancestor in path.ancestors().take_while(|p| p.starts_with(root)) {
+            reject_link(ancestor)?;
+        }
+        Ok(path)
+    }
+    pub fn read(path: &Path, limit: usize) -> Checked<Vec<u8>> {
+        crate::capped_read::read_capped(path, limit).map_err(|e| e.to_string())
+    }
+    pub fn write_new(path: &Path, bytes: &[u8]) -> Checked<()> {
+        reject_link(path)?;
+        let mut file = fs::OpenOptions::new().create_new(true).write(true).open(path).map_err(|e| e.to_string())?;
+        let result = file.write_all(bytes).and_then(|_| file.sync_all()).map_err(|e| e.to_string());
+        drop(file);
+        if result.is_err() {
+            let _ = fs::remove_file(path);
+        }
+        result
+    }
+    pub fn fingerprint(path: &Path) -> Checked<String> {
+        // Read in bounded chunks; source files can be much larger than drawings.
+        let file = fs::File::open(path).map_err(|e| e.to_string())?;
+        let metadata = file.metadata().map_err(|e| e.to_string())?;
+        if !metadata.is_file() {
+            return Err("unsafe_path: expected regular file".into());
+        }
+        if metadata.len() > 2 << 30 {
+            return Err("source_limit: file exceeds 2 GiB".into());
+        }
+        // Use the already installed digest through the proposal crate's streaming helper.
+        let mut reader = file.take(metadata.len().saturating_add(1));
+        let hash = cadcraft_proposal::approval::reader_hash(&mut reader).map_err(|e| e.to_string())?;
+        if reader.limit() == 0 {
+            return Err("source_changed: file grew while hashing".into());
+        }
+        Ok(hash)
+    }
+    pub fn rename_no_replace(from: &Path, to: &Path) -> Checked<()> {
+        reject_link(from)?;
+        reject_link(to)?;
+        #[cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "redox"))]
+        {
+            use rustix::{
+                fs::{CWD, RenameFlags, renameat_with},
+                io::Errno,
+            };
+            match renameat_with(CWD, from, CWD, to, RenameFlags::NOREPLACE) {
+                Ok(()) => return Ok(()),
+                Err(e) if e == Errno::INVAL || e == Errno::NOSYS || e == Errno::OPNOTSUPP => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        if fs::symlink_metadata(from).map_err(|e| e.to_string())?.is_file() {
+            match fs::hard_link(from, to) {
+                Ok(()) => {
+                    if let Err(e) = fs::remove_file(from) {
+                        let cleanup = fs::remove_file(to);
+                        return Err(format!("unlink source failed: {e}; destination cleanup: {cleanup:?}"));
+                    }
+                    return Ok(());
+                }
+                Err(e) if e.kind() == std::io::ErrorKind::Unsupported || matches!(e.raw_os_error(), Some(1 | 50 | 95)) => {}
+                Err(e) => return Err(e.to_string()),
+            }
+        }
+        if fs::symlink_metadata(to).is_ok() {
+            return Err("output_collision: destination exists".into());
+        }
+        // shortcut: unsupported filesystems have no exclusive rename; the final check narrows but cannot remove the concurrent-creation race.
+        fs::rename(from, to).map_err(|e| e.to_string())
+    }
+    #[derive(Clone, Debug, serde::Serialize)]
+    pub struct Swap {
+        pub prior_sha256: String,
+        pub new_sha256: String,
+        pub retained_path: PathBuf,
+    }
+    pub fn swap(target: &Path, stage: &Path, expected: &str, mover: &Mover<'_>) -> Checked<Swap> {
+        let result = (|| {
+            reject_link(target)?;
+            reject_link(stage)?;
+            if fingerprint(target)? != expected {
+                return Err("stale_approval: target changed before swap".into());
+            }
+            let new_sha256 = fingerprint(stage)?;
+            let parent = target.parent().ok_or("unsafe_path: target has no parent")?;
+            let retained_dir = parent.join("_superseded");
+            reject_link(&retained_dir)?;
+            if !retained_dir.exists() {
+                fs::create_dir(&retained_dir).map_err(|e| e.to_string())?;
+            }
+            let stem = target.file_stem().and_then(|s| s.to_str()).ok_or("unsafe_path: target stem")?;
+            let ext = target.extension().and_then(|s| s.to_str()).ok_or("unsafe_path: target extension")?;
+            let stamp = chrono::DateTime::<chrono::Utc>::from(std::time::SystemTime::now()).format("%Y%m%dT%H%M%S%.6fZ").to_string();
+            let retained_path = retained_dir.join(format!("{stem}.{stamp}.{ext}"));
+            mover(target, &retained_path)?;
+            if let Err(error) = mover(stage, target) {
+                if let Err(restore) = mover(&retained_path, target) {
+                    return Err(format!("swap failed: {error}; restoration failed: {restore}; prior retained at {}", retained_path.display()));
+                }
+                return Err(error);
+            }
+            Ok(Swap { prior_sha256: expected.into(), new_sha256, retained_path })
+        })();
+        if result.is_err()
+            && let Err(e) = fs::remove_file(stage)
+            && e.kind() != std::io::ErrorKind::NotFound
+        {
+            return Err(format!("{}; stage cleanup failed: {e}", result.err().unwrap_or_default()));
+        }
+        result
+    }
+    pub fn encoded(value: &impl serde::Serialize) -> Checked<Vec<u8>> {
+        serde_json::to_vec_pretty(value).map_err(|e| e.to_string())
+    }
+    pub fn hash(value: &impl serde::Serialize) -> Checked<String> {
+        serde_json::to_vec(value).map(|v| approval::sha256(&v)).map_err(|e| e.to_string())
+    }
+    pub fn stage_path(target: &Path, command: &str, id: &str) -> Checked<PathBuf> {
+        let parent = target.parent().ok_or("unsafe_path: no parent")?;
+        let ext = target.extension().and_then(|s| s.to_str()).ok_or("unsafe_path: no extension")?;
+        Ok(parent.join(format!(".{command}-{id}.stage.{ext}")))
+    }
+    pub fn restore(target: &Path, record: &Swap, mover: &Mover<'_>) -> Checked<()> {
+        reject_link(target)?;
+        if fingerprint(target)? != record.new_sha256 {
+            return Err(format!("restoration refused: target changed; prior retained at {}", record.retained_path.display()));
+        }
+        fs::remove_file(target).map_err(|e| e.to_string())?;
+        mover(&record.retained_path, target).map_err(|e| format!("restoration failed: {e}; prior retained at {}", record.retained_path.display()))
+    }
+    pub fn approval_failure(hash: &str, approved: Option<&str>) -> Option<Value> {
+        if approved == Some(hash) {
+            return None;
+        }
+        let (outcome, code) =
+            if approved.is_none_or(|s| s.trim().is_empty()) { ("Cancelled", "approval_required") } else { ("Refused", "stale_approval") };
+        Some(
+            json!({"receipt":{"outcome":outcome,"plan_sha256":hash,"failed_checks":[{"code":code,"message":"Review and approve the current plan hash"}]}}),
+        )
+    }
+    pub fn receipt_path(project: &Project, command: &str, id: &str) -> Checked<PathBuf> {
+        let record =
+            project.manifest.support_records().iter().find(|r| r.role == "CreationReceipt").ok_or("invalid_project: receipt record missing")?;
+        let parent = Path::new(&record.path).parent().ok_or("invalid_project: receipt parent missing")?;
+        child(&project.root, &parent.join(format!("{command}.{id}.receipt.json")).to_string_lossy())
+    }
+    pub fn ensure_parent(root: &Path, path: &Path, created: &mut Vec<PathBuf>) -> Checked<()> {
+        let parent = path.parent().ok_or("unsafe_path: parent missing")?;
+        let relative = parent.strip_prefix(root).map_err(|_| "unsafe_path: outside project")?;
+        let mut at = root.to_path_buf();
+        for part in relative.components() {
+            let name = part.as_os_str();
+            for entry in fs::read_dir(&at).map_err(|e| e.to_string())? {
+                let entry = entry.map_err(|e| e.to_string())?;
+                if entry.file_name() != name && entry.file_name().to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase() {
+                    return Err("output_collision: differently cased directory".into());
+                }
+            }
+            at.push(name);
+            reject_link(&at)?;
+            if !at.exists() {
+                fs::create_dir(&at).map_err(|e| e.to_string())?;
+                created.push(at.clone());
+            }
+            if !at.is_dir() {
+                return Err("unsafe_path: parent is not a directory".into());
+            }
+        }
+        Ok(())
+    }
+    pub fn vacant(root: &Path, relative: &str) -> Checked<PathBuf> {
+        let path = child(root, relative)?;
+        let mut at = root.to_path_buf();
+        for part in Path::new(relative).components() {
+            let name = part.as_os_str();
+            if at.is_dir() {
+                for entry in fs::read_dir(&at).map_err(|e| e.to_string())? {
+                    let entry = entry.map_err(|e| e.to_string())?;
+                    if entry.file_name().to_string_lossy().to_lowercase() == name.to_string_lossy().to_lowercase()
+                        && (entry.file_name() != name || at.join(name) == path)
+                    {
+                        return Err("output_collision: source destination exists".into());
+                    }
+                }
+            }
+            at.push(name);
+        }
+        Ok(path)
+    }
+    pub struct Project {
+        pub root: PathBuf,
+        pub manifest: Manifest,
+        pub fingerprints: std::collections::BTreeMap<String, String>,
+    }
+    impl Project {
+        pub fn check(&self, p: &Value) -> Checked<()> {
+            let current = Self::open(p)?;
+            if current.root != self.root || current.manifest != self.manifest || current.fingerprints != self.fingerprints {
+                return Err("stale_approval: project standards or creation records changed".into());
+            }
+            Ok(())
+        }
+        pub fn open(p: &Value) -> Checked<Self> {
+            let root = PathBuf::from(p.get("proposal_root").and_then(Value::as_str).ok_or("invalid_input: proposal_root required")?);
+            reject_link(&root)?;
+            let root = root.canonicalize().map_err(|e| e.to_string())?;
+            let supplied = read(Path::new(p.get("manifest_path").and_then(Value::as_str).ok_or("invalid_input: manifest_path required")?), 1 << 20)?;
+            let supplied = Manifest::parse(&supplied).map_err(|e| format!("invalid_manifest: {e:?}"))?;
+            if supplied.version() != 2 {
+                return Err("manifest_v2_required: this workflow requires manifest version 2".into());
+            }
+            let record =
+                supplied.support_records().iter().find(|r| r.role == "ProjectConfiguration").ok_or("invalid_manifest: configuration missing")?;
+            let config = read(&child(&root, &record.path)?, 2 << 20)?;
+            let value: Value = serde_json::from_slice(&config).map_err(|e| e.to_string())?;
+            let manifest =
+                Manifest::parse(&serde_json::to_vec(value.get("standards").ok_or("invalid_project: standards missing")?).map_err(|e| e.to_string())?)
+                    .map_err(|e| format!("invalid_manifest: {e:?}"))?;
+            if supplied != manifest {
+                return Err("manifest_mismatch: supplied manifest differs from embedded standards".into());
+            }
+            let planned_root = Path::new(value.get("final_root").and_then(Value::as_str).ok_or("invalid_project: root missing")?)
+                .canonicalize()
+                .map_err(|e| e.to_string())?;
+            if planned_root != root {
+                return Err("invalid_project: project root differs from creation record".into());
+            }
+            let mut fingerprints = std::collections::BTreeMap::from([("configuration".into(), approval::sha256(&config))]);
+            for role in ["CreationPlan", "CreationReceipt"] {
+                let record = manifest.support_records().iter().find(|r| r.role == role).ok_or("invalid_project: creation record missing")?;
+                let bytes = read(&child(&root, &record.path)?, 4 << 20)?;
+                let value: Value = serde_json::from_slice(&bytes).map_err(|e| e.to_string())?;
+                if role == "CreationReceipt" && value.get("outcome").and_then(Value::as_str) != Some("Succeeded") {
+                    return Err("invalid_project: creation did not succeed".into());
+                }
+                fingerprints.insert(role.into(), approval::sha256(&bytes));
+            }
+            Ok(Self { root, manifest, fingerprints })
+        }
+    }
+    #[cfg(test)]
+    pub fn entities(d: &Drawing) -> Checked<Value> {
+        Ok(
+            json!({"model":d.model.iter().collect::<Vec<_>>(),"layouts":d.layouts.iter().map(|l|json!({"name":l.name,"entities":l.entities.iter().collect::<Vec<_>>() })).collect::<Vec<_>>(),"blocks":d.blocks.iter().map(|(n,b)|json!({"name":n,"entities":b.entities.iter().collect::<Vec<_>>() })).collect::<Vec<_>>() }),
+        )
+    }
+    pub fn normalized(d: &Drawing) -> Drawing {
+        let mut d = d.clone();
+        // These are allocation/lookup bookkeeping, not saved drawing content.
+        d.header.vars.remove("HANDSEED");
+        d.handseed = 0;
+        std::sync::Arc::make_mut(&mut d.foreign).targets.clear();
+        d
+    }
+    pub fn same_drawing(a: &Drawing, b: &Drawing) -> bool {
+        normalized(a) == normalized(b)
+    }
+    pub fn roundtrip(h: &super::super::file::IoHooks, d: &Drawing, path: &Path) -> Checked<()> {
+        let reopened = (h.read)(&(h.write)(d, &path.to_string_lossy())?, &path.to_string_lossy())?;
+        if !same_drawing(d, &reopened) {
+            return Err("lossy_format: this drawing cannot round-trip in its own format".into());
+        }
+        Ok(())
+    }
+    pub fn same(a: &Value, b: &Value) -> bool {
+        super::native::equivalent(a, b)
+    }
+    pub fn drawing(h: &super::super::file::IoHooks, path: &Path) -> Checked<(Drawing, String)> {
+        let original = read(path, 32 << 20)?;
+        let original_hash = approval::sha256(&original);
+        let drawing = (h.read)(&original, &path.to_string_lossy())?;
+        if !drawing.read_notes.is_empty() || !drawing.skipped_records.is_empty() {
+            return Err("lossy_format: drawing contains unreadable content".into());
+        }
+        roundtrip(h, &drawing, path)?;
+        Ok((drawing, original_hash))
+    }
+    pub fn issue(error: String) -> Value {
+        let (code, message) = error.split_once(": ").unwrap_or(("preflight_failed", &error));
+        json!({"plan":null,"hash":null,"issues":[{"code":code,"message":message}]})
+    }
+}
+
+pub(super) fn follow_prompt(command: &'static str) -> Box<dyn Interactive> {
+    Box::new(FollowPrompt { command, index: 0, params: json!({"action":"plan"}), hash: None })
+}
+struct FollowPrompt {
+    command: &'static str,
+    index: usize,
+    params: Value,
+    hash: Option<String>,
+}
+impl Interactive for FollowPrompt {
+    fn name(&self) -> &'static str {
+        self.command
+    }
+    fn prompt(&self, _: &Session) -> Prompt {
+        let label = match self.index {
+            0 => "Standards manifest path",
+            1 => "Proposal root",
+            2 if self.command == "intakesource" => "Sources JSON array [{path,role}]",
+            2 => "Target drawing relative path",
+            _ => "Approve this exact plan? Type Yes to create",
+        };
+        Prompt::new(label, Accept::TEXT)
+    }
+    fn input(&mut self, s: &mut Session, input: Input) -> Result<Step> {
+        if input == Input::Cancel {
+            return Ok(Step::Cancel);
+        }
+        let text = match input {
+            Input::Text(s) | Input::Keyword(s) => s,
+            Input::Enter => String::new(),
+            _ => return Ok(Step::Continue),
+        };
+        let field = match self.index {
+            0 => "manifest_path",
+            1 => "proposal_root",
+            2 if self.command == "intakesource" => "sources",
+            _ => "target",
+        };
+        if self.index < 3 {
+            self.params[field] =
+                if field == "sources" { serde_json::from_str(&text).map_err(|e| bad(self.command, e.to_string()))? } else { json!(text) };
+            self.index += 1;
+            if self.index == 3 {
+                let result = s.execute(self.command, &self.params)?;
+                self.hash = result.get("hash").and_then(Value::as_str).map(str::to_string);
+                s.echo(serde_json::to_string_pretty(&result).map_err(|e| bad(self.command, e.to_string()))?);
+                if self.hash.is_none() {
+                    return Ok(Step::Done);
+                }
+            }
+            return Ok(Step::Continue);
+        }
+        if !text.eq_ignore_ascii_case("yes") {
+            s.echo("Proposal workflow cancelled");
+            return Ok(Step::Done);
+        }
+        self.params["action"] = json!("create");
+        self.params["approved_hash"] = json!(self.hash);
+        let result = s.execute(self.command, &self.params)?;
+        s.echo(serde_json::to_string(&result).map_err(|e| bad(self.command, e.to_string()))?);
+        Ok(Step::Done)
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use serde_json::json;
     use std::sync::atomic::{AtomicU64, Ordering};
+
+    #[test]
+    fn forced_publish_failure_removes_stage_and_success_receipt() {
+        let (root, mut params, hooks) = project();
+        let preview = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = preview["hash"].clone();
+        let failed = native::run_with_move(&params, &hooks, &|_, _| Err("forced final move failure".into())).unwrap();
+        assert_eq!(failed["receipt"]["outcome"], "Failed");
+        assert!(!root.join("Client - Site").exists());
+        assert!(!std::fs::read_dir(&root).unwrap().any(|e| e.unwrap().path().extension().is_some_and(|e| e == "stage")));
+        let receipt: Value = serde_json::from_slice(&std::fs::read(failed["receipt"]["receipt_path"].as_str().unwrap()).unwrap()).unwrap();
+        assert_eq!(receipt["outcome"], "Failed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn no_replace_move_and_failed_swap_preserve_prior_bytes() {
+        let (root, _, _) = project();
+        let target = root.join("target.dxf");
+        let stage = root.join("stage.dxf");
+        std::fs::write(&target, b"prior").unwrap();
+        std::fs::write(&stage, b"new").unwrap();
+        assert!(files::rename_no_replace(&stage, &target).is_err());
+        assert_eq!(std::fs::read(&stage).unwrap(), b"new");
+        assert_eq!(std::fs::read(&target).unwrap(), b"prior");
+        let mover = |from: &std::path::Path, to: &std::path::Path| {
+            if from == stage { Err("forced swap failure".into()) } else { files::rename_no_replace(from, to) }
+        };
+        assert!(files::swap(&target, &stage, &cadcraft_proposal::approval::sha256(b"prior"), &mover).is_err());
+        assert_eq!(std::fs::read(&target).unwrap(), b"prior");
+        assert!(!stage.exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn failed_restoration_reports_retained_prior_and_removes_stage() {
+        let (root, _, _) = project();
+        let target = root.join("target.dxf");
+        let stage = root.join("stage.dxf");
+        std::fs::write(&target, b"prior").unwrap();
+        std::fs::write(&stage, b"new").unwrap();
+        let mover = |from: &std::path::Path, to: &std::path::Path| {
+            if to == target { Err("forced restoration failure".into()) } else { files::rename_no_replace(from, to) }
+        };
+        let error = files::swap(&target, &stage, &cadcraft_proposal::approval::sha256(b"prior"), &mover).unwrap_err();
+        assert!(error.contains("prior retained at"));
+        assert!(!stage.exists());
+        assert!(!target.exists());
+        let retained = std::fs::read_dir(root.join("_superseded")).unwrap().next().unwrap().unwrap().path();
+        assert_eq!(std::fs::read(retained).unwrap(), b"prior");
+        std::fs::remove_dir_all(root).unwrap();
+    }
     mod sample {
-        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../proposal/tests/fixture.rs"));
+        include!(concat!(env!("CARGO_MANIFEST_DIR"), "/../proposal/tests/common/mod.rs"));
     }
 
     fn project() -> (std::path::PathBuf, serde_json::Value, super::super::file::IoHooks) {
@@ -779,6 +1238,226 @@ mod tests {
         };
         let params = json!({"action":"plan","manifest_path":path,"inputs":{"client_name":"Client","site_name":"Site","proposal_year":2026,"orientation":"Landscape","sheet_size":"A3","client_number":"C123"}});
         (root, params, hooks)
+    }
+
+    fn reference_name_refusals(p: &Value, root: &std::path::Path, dxf: &std::path::Path, hooks: &super::super::file::IoHooks) {
+        let mut collision = p.clone();
+        let self_source = root.join("base.dxf");
+        std::fs::copy(dxf, &self_source).unwrap();
+        collision["sources"] = json!([{"path":self_source,"role":"survey"}]);
+        assert_eq!(super::super::intakesource::run_with_hooks(&collision, hooks).unwrap()["issues"][0]["code"], "reference_name_collision");
+        let other_dir = root.join("other");
+        std::fs::create_dir(&other_dir).unwrap();
+        let other = other_dir.join("survey.dxf");
+        std::fs::copy(dxf, &other).unwrap();
+        collision["sources"] = json!([{"path":dxf,"role":"survey"},{"path":other,"role":"other"}]);
+        assert_eq!(super::super::intakesource::run_with_hooks(&collision, hooks).unwrap()["issues"][0]["code"], "reference_name_collision");
+        #[cfg(unix)]
+        {
+            let linked = root.join("linked.dxf");
+            std::os::unix::fs::symlink(dxf, &linked).unwrap();
+            collision["sources"] = json!([{"path":linked,"role":"survey"}]);
+            assert_eq!(super::super::intakesource::run_with_hooks(&collision, hooks).unwrap()["issues"][0]["code"], "unsafe_path");
+            let redirected = root.join("redirected-source-parent");
+            std::os::unix::fs::symlink(root, &redirected).unwrap();
+            collision["sources"] = json!([{"path":redirected.join("model.dxf"),"role":"survey"}]);
+            let redirected = super::super::intakesource::run_with_hooks(&collision, hooks).unwrap();
+            assert!(redirected["hash"].is_string(), "{redirected}");
+        }
+    }
+
+    #[test]
+    fn intake_host_names_use_portable_unicode_casefold() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({});
+        manifest["models"][0]["path"] = json!("Models/Öbase.dxf");
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let plan = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = plan["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let source = root.join("öbase.DXF");
+        std::fs::copy(root.join("model.dxf"), &source).unwrap();
+        let result = super::super::intakesource::run_with_hooks(
+            &json!({"proposal_root":root.join("Client - Site"),"manifest_path":manifest_path,"sources":[{"path":source,"role":"survey"}]}),
+            &hooks,
+        )
+        .unwrap();
+        assert_eq!(result["issues"][0]["code"], "reference_name_collision", "{result}");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn intake_and_configuration_preserve_project_and_refuse_stale_plans() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let v1 = json!({"proposal_root":root,"manifest_path":manifest_path,"target":"Models/base.dxf","sources":[]});
+        assert_eq!(super::super::intakesource::run_with_hooks(&v1, &hooks).unwrap()["issues"][0]["code"], "manifest_v2_required");
+        assert_eq!(super::super::configuredrawing::run_with_hooks(&v1, &hooks).unwrap()["issues"][0]["code"], "manifest_v2_required");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({"headers":{"INSUNITS":2},"layers":[{"name":"Survey","color":3}]});
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let preview = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = preview["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let proposal = root.join("Client - Site");
+        let host = proposal.join("Models/base.dxf");
+        let before = std::fs::read(&host).unwrap();
+        let dxf = root.join("survey.dxf");
+        std::fs::write(&dxf, cadcraft_io::write(&cadcraft_doc::Drawing::new_metric(), "survey.dxf").unwrap()).unwrap();
+        let png = root.join("photo.PNG");
+        std::fs::write(&png, b"unsupported synthetic raster").unwrap();
+        let csv = root.join("points.csv");
+        std::fs::write(&csv, b"id,x,y,z\n1,0,0,0\n").unwrap();
+        let mut p = json!({"action":"plan","proposal_root":proposal,"manifest_path":manifest_path,"sources":[{"path":dxf,"role":"survey"},{"path":png,"role":"imagery"},{"path":csv,"role":"other"}]});
+        let plan = super::super::intakesource::run_with_hooks(&p, &hooks).unwrap();
+        assert!(plan["hash"].is_string(), "{plan}");
+        let original_manifest = std::fs::read(&manifest_path).unwrap();
+        let mut different = manifest.clone();
+        different["drawing_settings"]["headers"]["LUPREC"] = json!(2);
+        std::fs::write(&manifest_path, serde_json::to_vec(&different).unwrap()).unwrap();
+        assert_eq!(super::super::intakesource::run_with_hooks(&p, &hooks).unwrap()["issues"][0]["code"], "manifest_mismatch");
+        std::fs::write(&manifest_path, &original_manifest).unwrap();
+        reference_name_refusals(&p, &root, &dxf, &hooks);
+        p["action"] = json!("create");
+        p["approved_hash"] = plan["hash"].clone();
+        let mut edited = cadcraft_io::read(&before, &host).unwrap();
+        edited.header.set_i64("LUPREC", 7);
+        std::fs::write(&host, cadcraft_io::write(&edited, &host).unwrap()).unwrap();
+        assert_eq!(super::super::intakesource::run_with_hooks(&p, &hooks).unwrap()["receipt"]["failed_checks"][0]["code"], "stale_approval");
+        std::fs::write(&host, &before).unwrap();
+        let register = proposal.join("Support/SourceRegister.json");
+        let old_register = std::fs::read(&register).unwrap();
+        let mover = |from: &std::path::Path, to: &std::path::Path| {
+            if to.file_name() == host.file_name() && from.to_string_lossy().contains(".stage.") {
+                Err("forced host swap failure".into())
+            } else {
+                files::rename_no_replace(from, to)
+            }
+        };
+        let failed = super::super::intakesource::run_with_move(&p, &hooks, &mover).unwrap();
+        assert_eq!(failed["receipt"]["outcome"], "Failed", "{failed}");
+        assert!(failed.to_string().contains("forced host swap failure"), "{failed}");
+        assert_eq!(std::fs::read(&register).unwrap(), old_register);
+        assert_eq!(std::fs::read(&host).unwrap(), before);
+        assert!(!proposal.join("Support/Sources/survey/survey.dxf").exists());
+        let missing_copy = |from: &std::path::Path, to: &std::path::Path| {
+            files::rename_no_replace(from, to)?;
+            if to.file_name().is_some_and(|name| name == "survey.dxf") {
+                std::fs::remove_file(to).map_err(|e| e.to_string())?;
+            }
+            Ok(())
+        };
+        let missing = super::super::intakesource::run_with_move(&p, &hooks, &missing_copy).unwrap();
+        assert_eq!(missing["receipt"]["outcome"], "Failed", "{missing}");
+        assert_eq!(std::fs::read(&register).unwrap(), old_register);
+        assert_eq!(std::fs::read(&host).unwrap(), before);
+        let result = super::super::intakesource::run_with_hooks(&p, &hooks).unwrap();
+        assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
+        let reopened = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        assert_eq!(reopened.block("survey").unwrap().xref_path.as_deref(), Some("../Support/Sources/survey/survey.dxf"));
+        assert!(reopened.block("survey").unwrap().xref_overlay);
+        assert!(
+            reopened.model.iter().any(|e| matches!(&e.kind,cadcraft_doc::EntityKind::Image(i) if i.path=="../Support/Sources/imagery/photo.PNG"))
+        );
+        let rows: Value = serde_json::from_slice(&std::fs::read(&register).unwrap()).unwrap();
+        assert_eq!(rows["entries"].as_array().unwrap().len(), 3);
+        assert!(host.parent().unwrap().join("_superseded").is_dir());
+        let retained = std::fs::read_dir(host.parent().unwrap().join("_superseded")).unwrap().next().unwrap().unwrap().path();
+        for protected in
+            ["Support/Sources/survey/survey.dxf".to_string(), retained.strip_prefix(&proposal).unwrap().to_string_lossy().replace('\\', "/")]
+        {
+            let refused = super::super::configuredrawing::run_with_hooks(
+                &json!({"proposal_root":proposal,"manifest_path":manifest_path,"target":protected}),
+                &hooks,
+            )
+            .unwrap();
+            assert_eq!(refused["issues"][0]["code"], "protected_target", "{refused}");
+        }
+        configuration_and_noop(&proposal, &manifest_path, &hooks);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    fn configuration_and_noop(proposal: &std::path::Path, manifest_path: &std::path::Path, hooks: &super::super::file::IoHooks) {
+        let host = proposal.join("Models/base.dxf");
+        let mut c = json!({"action":"plan","proposal_root":proposal,"manifest_path":manifest_path,"target":"Models/base.dxf"});
+        let config = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
+        assert_eq!(config["plan"]["actions"].as_array().unwrap().len(), 2, "{config}");
+        c["action"] = json!("create");
+        c["approved_hash"] = config["hash"].clone();
+        let mut changed = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        changed.header.set_i64("LUPREC", 7);
+        std::fs::write(&host, cadcraft_io::write(&changed, &host).unwrap()).unwrap();
+        let stale = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
+        assert_eq!(stale["receipt"]["failed_checks"][0]["code"], "stale_approval");
+        c["action"] = json!("plan");
+        let plan = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
+        c["action"] = json!("create");
+        c["approved_hash"] = plan["hash"].clone();
+        let result = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
+        assert_eq!(result["receipt"]["outcome"], "Succeeded", "{result}");
+        let d = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        assert_eq!(d.header.i64("INSUNITS", 0), 2);
+        assert_eq!(d.header.i64("LUPREC", 0), 7);
+        assert!(d.layer("Survey").is_some());
+        assert_eq!(files::entities(&changed).unwrap(), files::entities(&d).unwrap());
+        let bytes = std::fs::read(&host).unwrap();
+        let listing = std::fs::read_dir(host.parent().unwrap()).unwrap().count();
+        c["action"] = json!("plan");
+        let noop = super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap();
+        assert_eq!(noop["plan"]["actions"], json!([]));
+        c["action"] = json!("create");
+        c.as_object_mut().unwrap().remove("approved_hash");
+        assert_eq!(super::super::configuredrawing::run_with_hooks(&c, hooks).unwrap()["receipt"]["outcome"], "NoChanges");
+        assert_eq!(std::fs::read(&host).unwrap(), bytes);
+        assert_eq!(std::fs::read_dir(host.parent().unwrap()).unwrap().count(), listing);
+    }
+
+    #[test]
+    fn configuration_refuses_lost_block_metadata_before_approval() {
+        let (root, mut params, hooks) = project();
+        let manifest_path = root.join("standards.json");
+        let mut manifest: Value = serde_json::from_slice(&std::fs::read(&manifest_path).unwrap()).unwrap();
+        manifest["version"] = json!(2);
+        manifest["source_roles"] = json!(["survey", "record_drawing", "gis_export", "imagery", "other"]);
+        manifest["drawing_settings"] = json!({"headers":{"INSUNITS":2}});
+        std::fs::write(&manifest_path, serde_json::to_vec(&manifest).unwrap()).unwrap();
+        let plan = native::run(&params, &hooks).unwrap();
+        params["action"] = json!("create");
+        params["approved_hash"] = plan["hash"].clone();
+        assert_eq!(native::run(&params, &hooks).unwrap()["receipt"]["outcome"], "Succeeded");
+        let proposal = root.join("Client - Site");
+        let host = proposal.join("Models/base.dxf");
+        let mut d = cadcraft_io::read(&std::fs::read(&host).unwrap(), &host).unwrap();
+        std::sync::Arc::make_mut(d.blocks.get_mut("Title").unwrap()).description = "must survive".into();
+        std::fs::write(&host, cadcraft_io::write(&d, &host).unwrap()).unwrap();
+        let original = std::fs::read(&host).unwrap();
+        let corrupt = super::super::file::IoHooks {
+            read: hooks.read,
+            write: |d, n| {
+                let mut d = d.clone();
+                for block in d.blocks.values_mut() {
+                    std::sync::Arc::make_mut(block).description.clear();
+                }
+                cadcraft_io::write(&d, n).map_err(|e| e.to_string())
+            },
+            plot: None,
+        };
+        let result = super::super::configuredrawing::run_with_hooks(
+            &json!({"proposal_root":proposal,"manifest_path":manifest_path,"target":"Models/base.dxf"}),
+            &corrupt,
+        )
+        .unwrap();
+        assert_eq!(result["issues"][0]["code"], "lossy_format", "{result}");
+        assert_eq!(std::fs::read(&host).unwrap(), original);
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]

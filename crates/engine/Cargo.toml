@@ -35,6 +35,10 @@ rstar = { version = "0.13", default-features = false }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+[target.'cfg(any(target_os = "linux", target_os = "android", target_os = "macos", target_os = "ios", target_os = "redox"))'.dependencies]
+# Existing lockfile version; safe exclusive rename, MIT OR Apache-2.0.
+rustix = { version = "1.1.5", features = ["fs"] }
+
 [dev-dependencies]
 # Real DXF files for the external reference tests (io is a lower layer).
 cadcraft-io = { workspace = true }
