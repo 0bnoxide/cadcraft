@@ -108,11 +108,11 @@ impl Interactive for TextEditM {
                     EntityKind::MLeader(m) => m.text,
                     _ => None,
                 };
-                // The editor would drop part of a text this long, and saving would lose it: the
+                // The editor cannot represent all text or formatting here; saving would lose it: the
                 // command line asks for it instead.
                 if self.mtext.as_ref().is_some_and(|m| !crate::mtext_edit::Formatted::fits(&m.contents)) {
                     self.mtext = None;
-                    s.echo("This text is too long for the editor; enter the new text at the command line.");
+                    s.echo("This text cannot be fully represented by the editor; enter the new text at the command line.");
                 }
                 self.h = Some((h, old));
                 Ok(Step::Continue)

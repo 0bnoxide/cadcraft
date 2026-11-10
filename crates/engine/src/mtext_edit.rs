@@ -113,6 +113,8 @@ impl Formatted {
 
     /// Whether the editor holds all of `contents`: past [`MAX_CHARS`] characters, [`MAX_PARAS`]
     /// paragraphs or [`MAX_ATOMS`] kept codes the rest would be dropped, and saving would lose it.
+    /// Scoped opaque codes also do not fit: their state is not represented by [`CharFmt`].
+    /// Unicode escapes do not fit until the editor can consume them without hiding adjacent text.
     pub fn fits(contents: &str) -> bool {
         Self::parse(contents, None).1
     }
@@ -209,6 +211,11 @@ impl Formatted {
                             }
                         }
                         Some(k) => {
+                            // Opaque formatting is not in CharFmt, so closing its group cannot
+                            // restore it. Leave scoped codes to the lossless command-line editor.
+                            // Unicode escapes have no semicolon; treating them as an opaque
+                            // argument would also hide and potentially delete the following text.
+                            whole &= stack.is_empty() && k != 'U';
                             // Any other code is kept verbatim: the ones with an argument up to
                             // their `;`, the others alone.
                             let mut code = format!("\\{k}");
@@ -643,6 +650,30 @@ mod tests {
         let _ = Formatted::from_contents(&"{".repeat(100_000));
     }
 
+    #[test]
+    fn scoped_opaque_codes_use_the_lossless_command_line_editor() {
+        for contents in
+            [r"{\W2;wide}normal", r"{\T2;tracked}normal", r"{\Q15;slanted}normal", r"{\A1;raised}normal", r"{\Lunder{\W2;wide}under}normal"]
+        {
+            assert!(!Formatted::fits(contents), "unsupported scoped code: {contents}");
+        }
+    }
+
+    #[test]
+    fn unicode_escapes_do_not_hide_following_text_in_an_atom() {
+        for contents in [r"A\U+00B0 B C;D", r"\U+00E9tail", r"\U+00E9{\W2;wide}normal", r"\U+D83D\U+DE00tail", r"\U+12 trailing", r"\U+ZZZZ trailing"]
+        {
+            assert!(!Formatted::fits(contents), "character escape needs lossless editing: {contents}");
+        }
+        assert!(Formatted::fits(r"literal \\U+00B0 text"), "an escaped backslash is literal text");
+        assert!(Formatted::fits("Caf\u{e9} \u{6c34} \u{1f642}"), "literal Unicode stays editable");
+    }
+    #[test]
+    fn modeled_scopes_and_unscoped_atoms_still_fit() {
+        for contents in [r"{\Lunder}normal", r"{\H2;large}normal", r"{\C1;red}normal", r"\W2;wide", r"x \S1/2; y"] {
+            assert!(Formatted::fits(contents), "supported contents: {contents}");
+        }
+    }
     /// A text with more paragraphs or kept codes than the editor holds doesn't fit, so TEXTEDIT
     /// leaves it to the command line instead of dropping the rest on save.
     #[test]
