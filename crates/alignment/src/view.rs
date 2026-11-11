@@ -21,8 +21,9 @@ fn step(range: f64) -> f64 {
     multiple * power
 }
 pub fn draw(a: &Alignment, profiles: &Profiles, at: [f64; 2], exaggeration: f64) -> Result<Vec<Mark>> {
-    profiles.validate(a)?;
-    let length = a.length()?;
+    let view = a.validated()?;
+    profiles.validate_on(&view)?;
+    let length = view.length();
     if at.iter().any(|v| !v.is_finite()) || !exaggeration.is_finite() || exaggeration <= 0. {
         return Err(error("INVALID_PROFILE_VIEW", "finite origin and positive finite exaggeration required"));
     }

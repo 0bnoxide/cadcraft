@@ -215,3 +215,41 @@ fn inclusive_endpoint_uses_final_element_after_long_route() {
     assert_eq!(projected.offset, 0.);
     assert_eq!(projected.beyond, None);
 }
+
+#[test]
+fn off_curve_spiral_projection_refines_the_stationary_point() {
+    for kind in [
+        Kind::Spiral { radius_start: None, radius_end: Some(300.), turn: Turn::Left },
+        Kind::Spiral { radius_start: Some(300.), radius_end: None, turn: Turn::Left },
+        Kind::Spiral { radius_start: Some(300.), radius_end: Some(100.), turn: Turn::Left },
+    ] {
+        let a = route(vec![element([0., 0.], 0., 60., kind)]);
+        for station in [10., 30.] {
+            for offset in [1., 50., -1000.] {
+                // A normal offset on these convex spirals has its unique minimum at station.
+                let point = a.at(station, offset).unwrap().point;
+                let projected = a.project(point).unwrap();
+                assert!((projected.station - station).abs() <= 1e-7, "{kind:?}, {station}, {offset}: {projected:?}");
+                close(projected.offset, offset);
+            }
+        }
+    }
+}
+
+#[test]
+fn carrier_preserves_major_arcs_and_chords_only_the_spiral() {
+    for turn in [Turn::Left, Turn::Right] {
+        let a = route(vec![element([0., 0.], 0., 15. * PI, Kind::Arc { radius: 10., turn })]);
+        let vertices = a.validated().unwrap().carrier_vertices(0.001).unwrap();
+        assert_eq!(vertices.len(), 2);
+        let sign = if turn == Turn::Left { 1. } else { -1. };
+        // A 270-degree arc has bulge tan(270/4 degrees) = 1+sqrt(2).
+        assert!((vertices[0].bulge - sign * (1. + 2f64.sqrt())).abs() < 1e-12);
+        assert_eq!(vertices[1].bulge, 0.);
+        assert!(a.polyline(0.001).unwrap().len() > 2);
+    }
+    let a = route(vec![element([0., 0.], 0., 60., Kind::Spiral { radius_start: None, radius_end: Some(300.), turn: Turn::Left })]);
+    let vertices = a.validated().unwrap().carrier_vertices(0.001).unwrap();
+    assert!(vertices.len() > 2);
+    assert!(vertices.iter().all(|v| v.bulge == 0.));
+}

@@ -160,7 +160,7 @@ fn line_crossings(e: &Element, a: [f64; 2], b: [f64; 2]) -> Vec<f64> {
     }
 }
 pub fn sample(a: &Alignment, vertices: &[[f64; 3]], triangles: &[[u32; 3]], tolerance: f64) -> Result<GroundProfile> {
-    a.checked()?;
+    let view = a.validated()?;
     if !tolerance.is_finite() || tolerance <= 0. {
         return Err(error("INVALID_TOLERANCE", "positive finite elevation tolerance required"));
     }
@@ -262,7 +262,7 @@ pub fn sample(a: &Alignment, vertices: &[[f64; 3]], triangles: &[[u32; 3]], tole
         merged.push(segment);
     }
     profile.segments = merged;
-    profile.validate(a)?;
+    profile.validate_on(&view)?;
     Ok(profile)
 }
 fn append_interval(
@@ -326,5 +326,18 @@ mod tests {
         let found = index.locate(&triangles, [0.5, 0.5], &mut budget).unwrap().unwrap();
         assert!(std::ptr::eq(found, &triangles[0]));
         assert_eq!(index.locate(&triangles, [0.5, 0.5], &mut 0).err().unwrap().code, "NUMERICAL_LIMIT");
+    }
+
+    #[test]
+    fn sampling_checks_the_alignment_once_including_the_result_profile() {
+        let a = Alignment {
+            name: "sampling".into(),
+            start_station: 0.,
+            format: crate::StationFormat::Thousands,
+            elements: vec![Element { start: [0., 0.], direction: 0., length: 10., kind: Kind::Line }],
+        };
+        crate::geometry::VALIDATION_CALLS.with(|n| n.set(0));
+        sample(&a, &[[-1., -1., 0.], [20., -1., 0.], [-1., 20., 0.]], &[[0, 1, 2]], 0.01).unwrap();
+        assert_eq!(crate::geometry::VALIDATION_CALLS.with(|n| n.get()), 1);
     }
 }

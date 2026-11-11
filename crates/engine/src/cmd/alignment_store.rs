@@ -1,6 +1,6 @@
 //! Standard entity extension dictionaries keep exact route definitions with their carrier.
 use crate::Result;
-use cadcraft_alignment::{Alignment, MAX_ELEMENTS};
+use cadcraft_alignment::{Alignment, MAX_ELEMENTS, ValidatedAlignment};
 use cadcraft_doc::foreign::ForeignObject;
 use cadcraft_doc::{Drawing, Handle, RawTag};
 use cadcraft_doc::{EntityKind, LwPolyline};
@@ -18,16 +18,24 @@ pub(super) struct Stored {
     pub profiles: cadcraft_alignment::profile::Profiles,
 }
 pub(super) fn carrier(data: &Stored) -> Result<LwPolyline> {
-    let vertices = data
-        .definition
-        .polyline(data.chord_tolerance)
+    let view = data.definition.validated().map_err(|e| super::bad("alignment", e.to_string()))?;
+    carrier_from_view(&view, data.chord_tolerance)
+}
+fn carrier_from_view(view: &ValidatedAlignment<'_>, tolerance: f64) -> Result<LwPolyline> {
+    let vertices = view
+        .carrier_vertices(tolerance)
         .map_err(|e| super::bad("alignment", e.to_string()))?
         .into_iter()
-        .map(|p| PolyVertex::new(Vec2::new(p[0], p[1])))
+        .map(|v| PolyVertex::with_bulge(Vec2::new(v.point[0], v.point[1]), v.bulge))
         .collect();
     Ok(LwPolyline { vertices, closed: false, const_width: 0., elevation: 0., plinegen: false })
 }
 pub(super) fn load(d: &Drawing, handle: Handle) -> Result<Stored> {
+    let data = load_data(d, handle)?;
+    validated(d, handle, &data)?;
+    Ok(data)
+}
+pub(super) fn load_data(d: &Drawing, handle: Handle) -> Result<Stored> {
     let raw = read_data(d, handle)?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| invalid("malformed JSON"))?;
     if value.get("definition").and_then(|v| v.get("elements")).and_then(|v| v.as_array()).is_none_or(|v| v.len() > MAX_ELEMENTS) {
@@ -48,8 +56,12 @@ pub(super) fn load(d: &Drawing, handle: Handle) -> Result<Stored> {
     if data.version != 1 {
         return Err(invalid("unsupported storage version"));
     }
-    data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;
-    let expected = carrier(&data)?;
+    Ok(data)
+}
+pub(super) fn validated<'a>(d: &Drawing, handle: Handle, data: &'a Stored) -> Result<ValidatedAlignment<'a>> {
+    let view = data.definition.validated().map_err(|e| invalid(&e.to_string()))?;
+    data.profiles.validate_on(&view).map_err(|e| invalid(&e.to_string()))?;
+    let expected = carrier_from_view(&view, data.chord_tolerance)?;
     let e = d.entity(handle).ok_or_else(|| invalid("carrier missing"))?;
     let EntityKind::LwPolyline(actual) = &e.kind else { return Err(invalid("carrier is not a lightweight polyline")) };
     let equal = actual.vertices.len() == expected.vertices.len()
@@ -58,12 +70,16 @@ pub(super) fn load(d: &Drawing, handle: Handle) -> Result<Stored> {
         && actual.const_width == 0.
         && e.common.extrusion == Vec3::Z
         && actual.vertices.iter().zip(&expected.vertices).all(|(a, b)| {
-            a.bulge == 0. && a.start_width == 0. && a.end_width == 0. && (a.p.x - b.p.x).abs() <= 1e-7 && (a.p.y - b.p.y).abs() <= 1e-7
+            (a.bulge - b.bulge).abs() <= 1e-9
+                && a.start_width == 0.
+                && a.end_width == 0.
+                && (a.p.x - b.p.x).abs() <= 1e-7
+                && (a.p.y - b.p.y).abs() <= 1e-7
         });
     if !equal {
         return Err(super::bad("alignment", "STALE_ALIGNMENT: carrier geometry differs from its exact definition"));
     }
-    Ok(data)
+    Ok(view)
 }
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
     data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;

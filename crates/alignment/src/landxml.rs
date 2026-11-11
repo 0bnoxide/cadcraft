@@ -418,8 +418,8 @@ fn alignment(n: &Node, scale: f64) -> Result<Alignment> {
         })?;
         out.elements.push(e);
     }
-    out.checked()?;
-    check_attr(n, "length", out.length()?, scale)?;
+    let view = out.validated()?;
+    check_attr(n, "length", view.length(), scale)?;
     Ok(out)
 }
 
@@ -511,8 +511,8 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
     let mut total = 0usize;
     for route in alignments {
         let a = &route.definition;
-        a.checked()?;
-        route.profiles.validate(a)?;
+        let view = a.validated()?;
+        route.profiles.validate_on(&view)?;
         total += a.elements.len();
         if total > MAX_ELEMENTS {
             return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
@@ -522,7 +522,7 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
         }
         append(
             &mut out,
-            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, a.length()?),
+            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
         for e in &a.elements {
             export_element(&mut out, e)?;

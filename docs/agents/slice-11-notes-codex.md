@@ -222,3 +222,76 @@ epsilons of the finite recovered length. Evaluated endpoints, length attributes,
 directions and strict profile bounds are still checked. The 100-case regression covers
 both turns, rotated/major/shallow arcs and exact terminal design/ground samples; a PVI
 one representable station past the endpoint remains invalid.
+
+## Full horizontal review and repair
+
+- The separately claimed numerical/portable-notes corrections were published as `42a55c7f`.
+  Both hosted Linux and Windows gates passed for that head. The designated full review at
+  that head requested three further corrections; its independent geometry hand checks matched.
+  [Review](https://github.com/0bnoxide/cadcraft/pull/74#pullrequestreview-5856481019),
+  [review notes PR #84](https://github.com/0bnoxide/cadcraft/pull/84).
+- 2026-11-11 America/Denver message log:
+  - 02:15 sent: retry full reviews at live heads, `7249c113-c504-4d71-96bd-760a4521b1e5`.
+  - 02:16 sent: preserve the separate vertical-integration claim and hold its final review,
+    `319b07cf-6287-472c-83e9-3f8d62eea82a`.
+  - 02:21 received: full horizontal review requested changes, `bddbbf28-f9b0-4063-b1c8-fe85cbfe606f`.
+  - 02:25 sent: proposed stationary-point refinement, an immutable borrowed validated view,
+    and true arc carrier bulges, `aaa95ec4-d205-4fd7-8a03-11c74bf95eb0`.
+  - 02:26 received: all three repairs agreed, `8e87fe6d-c699-4d13-b07e-74c274ea26b2`;
+    1e-7 station checks at offsets 1/50/-1000, test-only validation counter, bulge tolerance
+    1e-9, both-format major-arc reopen, and unchanged storage version 1.
+  - 02:42 sent: implementation progress and pending full gate,
+    `36e3a177-bd1b-4f16-8026-9c61b6ee1633`.
+- The new repair branch starts at `42a55c7f` and will fast-forward the horizontal PR without
+  a force push. It does not modify the separately claimed vertical integration.
+- Spiral search keeps its global distance bounds, then brackets and bisects `(C-P).T = 0`.
+  Only roots and element ends compete until the terminal 1e-8 station intervals; refinement
+  uses the same 200000-step budget and stops within 1e-9 station units. Off-curve entry,
+  exit and compound regressions fail before the correction and pass at 1e-7 station error.
+- `ValidatedAlignment` borrows immutable data and caches cumulative lengths. One-shot methods
+  retain their signatures; batch queries use the borrowed view. Report input, carrier checking
+  and LandXML export reuse it. A cfg(test)-only thread-local counter confirms one full
+  validation for 4096 station queries, length queries and projection on 4096 tight spirals.
+- Carrier vertices retain one bulged segment for each arc, including clockwise/counterclockwise
+  270-degree arcs; only spirals use chords. The generic chord approximation API remains available.
+  Staleness compares bulges at 1e-9 and coordinates at 1e-7. Both-format engine tests verify
+  major-arc persistence, tolerated rounding and refusal of a real bulge edit.
+- Focused checks: 22 alignment tests and five engine command tests passed. Corrected-binary CLI
+  checks pass for drawn line/arc geometry, report/exchange, DXF/DWG reopen, off-curve entry/exit/
+  compound queries at offsets 1/50/-1000, and public LandXML XSD validation. Full CI passed
+  all seven steps: 4157 tests passed, 28 skipped, plus doc tests, i18n, assets, layers and WASM.
+  The vertical sampling path
+  will adopt the validated view after its integration includes these new horizontal repairs.
+- Other full-review observations are tracked in [#83](https://github.com/0bnoxide/cadcraft/issues/83);
+  angle points/MOVE remain tracked in [#70](https://github.com/0bnoxide/cadcraft/issues/70).
+
+## Validated profile integration
+
+- Horizontal repairs were published without a force push at `74917b9cff13e29e6c2b8007331d07496a290067`.
+  The designated updated review approved that head subject to its hosted Linux/Windows gates;
+  both gates subsequently passed. The review notes PR is [#84](https://github.com/0bnoxide/cadcraft/pull/84).
+- The separately claimed profile-base integration was published at `ee590a4d`, preserving the
+  original profile changes and the exact terminal-profile station roundoff regression. That
+  completed head is the base for the current update. The repair patch is carried by a cherry-pick
+  without a merge or published-history rewrite; the profile export, storage and notes conflicts
+  retain both sets of changes.
+- New message log, 2026-11-11 America/Denver:
+  - 03:08 sent: frozen horizontal repair head/local gate evidence and proposed validated-profile
+    adapter, `020dbe62-6fc8-4add-95c7-1ce999731868`.
+  - 03:09 received: profile API adaptation and cherry-pick plan agreed,
+    `f65d224e-9fb8-4355-adea-904fc7ba2592`.
+  - 03:11 received: horizontal approval conditional on hosted checks,
+    `7c971383-49ce-4750-a39c-9fce060caad3`.
+  - 03:26 sent: confirmed both horizontal gates green and combined validation progress,
+    `86ecdf14-14fd-450a-a0bb-6b37023e1817`.
+- `Profiles::validate_on(&ValidatedAlignment)` reuses checked horizontal bounds; existing
+  `validate(&Alignment)` entry points remain wrappers. Storage checking, profile export and
+  view layout reuse their checked view. Sampling builds one view and checks its completed
+  ground result against it. Its deterministic test failed with two full validations before
+  the change and now reports one. Profile tests also retain strict rejection one representable
+  station beyond the end. All counters are compiled only for tests.
+- The combined 40 focused alignment/profile tests and clippy pass. All seven combined CI
+  stages passed: 4176 tests passed, 28 skipped, plus doc tests, i18n, assets, layers and WASM.
+  Final CLI runs pass for profile sample/create/view, the endpoint regressions, DXF/DWG reopen,
+  horizontal and profile LandXML exchange/XSD validation, off-curve projections and undo.
+  The new hosted head and designated full profile review remain pending. No PR is merged.

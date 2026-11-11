@@ -1,4 +1,4 @@
-use crate::{Alignment, Result, error};
+use crate::{Alignment, Result, ValidatedAlignment, error};
 use serde::{Deserialize, Serialize};
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -41,8 +41,12 @@ pub struct Vertical {
 }
 impl DesignProfile {
     pub fn validate(&self, a: &Alignment) -> Result<()> {
+        self.validate_on(&a.validated()?)
+    }
+    fn validate_on(&self, view: &ValidatedAlignment<'_>) -> Result<()> {
         self.curves()?;
-        let end = a.start_station + a.length()?;
+        let a = view.alignment;
+        let end = a.start_station + view.length();
         if self.pvis.first().is_none_or(|p| p.station < a.start_station) || self.pvis.last().is_none_or(|p| p.station > end) {
             return Err(error("INVALID_PROFILE", "PVIs outside horizontal alignment"));
         }
@@ -198,7 +202,11 @@ impl Curve {
 }
 impl GroundProfile {
     pub fn validate(&self, a: &Alignment) -> Result<()> {
-        let end = a.start_station + a.length()?;
+        self.validate_on(&a.validated()?)
+    }
+    pub(crate) fn validate_on(&self, view: &ValidatedAlignment<'_>) -> Result<()> {
+        let a = view.alignment;
+        let end = a.start_station + view.length();
         let mut previous = f64::NEG_INFINITY;
         let mut count = 0usize;
         if !valid_name(&self.name) || self.segments.is_empty() || self.segments.len() > crate::MAX_POINTS {
@@ -227,12 +235,47 @@ impl GroundProfile {
 }
 impl Profiles {
     pub fn validate(&self, a: &Alignment) -> Result<()> {
+        self.validate_on(&a.validated()?)
+    }
+    pub fn validate_on(&self, a: &ValidatedAlignment<'_>) -> Result<()> {
         if let Some(d) = &self.design {
-            d.validate(a)?;
+            d.validate_on(a)?;
         }
         if let Some(g) = &self.ground {
-            g.validate(a)?;
+            g.validate_on(a)?;
         }
         Ok(())
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::{Element, Kind, StationFormat, geometry::VALIDATION_CALLS};
+    #[test]
+    fn profile_checks_reuse_the_validated_alignment() {
+        let a = Alignment {
+            name: "profile batch".into(),
+            start_station: 0.,
+            format: StationFormat::Thousands,
+            elements: vec![Element { start: [0., 0.], direction: 0., length: 10., kind: Kind::Line }],
+        };
+        let mut profiles = Profiles {
+            design: Some(DesignProfile {
+                name: "Design".into(),
+                pvis: vec![Pvi { station: 0., elevation: 0., curve_length: None }, Pvi { station: 10., elevation: 1., curve_length: None }],
+            }),
+            ground: Some(GroundProfile {
+                name: "Ground".into(),
+                segments: vec![vec![Sample { station: 0., elevation: 0. }, Sample { station: 10., elevation: 0. }]],
+            }),
+        };
+        VALIDATION_CALLS.with(|n| n.set(0));
+        let view = a.validated().unwrap();
+        profiles.validate_on(&view).unwrap();
+        profiles.validate_on(&view).unwrap();
+        assert_eq!(VALIDATION_CALLS.with(|n| n.get()), 1);
+        profiles.design.as_mut().unwrap().pvis[1].station = 10f64.next_up();
+        assert_eq!(profiles.validate_on(&view).unwrap_err().code, "INVALID_PROFILE");
     }
 }
