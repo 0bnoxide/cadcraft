@@ -82,6 +82,7 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let data = Stored {
         version: 1,
+        profiles: Default::default(),
         definition: Alignment { name: name.into(), start_station: scalar(p, "start_station", 0., CMD)?, format: format(p)?, elements },
         chord_tolerance: scalar(p, "chord_tolerance", 0.01, CMD)?,
     };
@@ -179,7 +180,7 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let mut d = s.doc()?.clone();
     let mut handles = Vec::new();
     for a in result.alignments {
-        let data = Stored { version: 1, definition: a, chord_tolerance: tolerance };
+        let data = Stored { version: 1, definition: a.definition, profiles: a.profiles, chord_tolerance: tolerance };
         handles.push(add(&mut d, &s.space(), s.current_common(), &data)?);
     }
     if !handles.is_empty() {
@@ -214,8 +215,11 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     if handles.is_empty() || handles.len() > 128 {
         return Err(bad(CMD, "select 1..128 alignments"));
     }
-    let definitions = handles.into_iter().map(|h| alignment_store::load(s.doc()?, h).map(|d| d.definition)).collect::<Result<Vec<_>>>()?;
-    let xml = landxml::export(&definitions, unit(p, CMD)?).map_err(|e| bad(CMD, e.to_string()))?;
+    let definitions = handles
+        .into_iter()
+        .map(|h| alignment_store::load(s.doc()?, h).map(|d| landxml::Route { definition: d.definition, profiles: d.profiles }))
+        .collect::<Result<Vec<_>>>()?;
+    let xml = landxml::export_routes(&definitions, unit(p, CMD)?).map_err(|e| bad(CMD, e.to_string()))?;
     match p.get("path") {
         None => Ok(json!({"xml":xml})),
         Some(Value::String(path)) => {

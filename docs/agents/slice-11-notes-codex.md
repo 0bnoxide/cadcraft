@@ -55,28 +55,29 @@ LandXML 1.2 schema and standard route geometry only. `crates/handoff` remains un
 
 Messages use `[slice11]` only; own id `c2f6c537-b8b1-4a44-a5d3-039989a37c27`, reviewer
 `c247b28f-eab2-4645-85eb-cf13e141f31d`. All five agreements were received before the first
-implementation commit. Receipt identifiers below preserve ordering; exact transport timestamps
-are to be reconciled from Paseo's tool log before completion (CLI not currently on PATH).
+implementation commit. Times below were reconciled from the provider records behind Paseo's
+`logs <id> --filter tools` output; sent times identify the tool call, received times its record.
 
 | Recorded 2026-11-10 America/Denver | Direction | Message / receipt |
 |---|---|---|
-| 21:49 | received | Reviewer hello/id, `fe4dc566` |
-| 21:49 | sent | Setup acknowledgement, `7fe0a83d` |
-| 21:50 | sent | API proposal, `0ccaf0db` |
-| 21:50 | received | API agreement with nine pins, `0efaade8` |
-| 21:51 | sent | Accepted API pins, clothoid proposal, `5c5d9f7f` |
-| 21:51 | received | Clothoid agreement with four pins, `6621485a` |
-| 21:52 | sent | Accepted clothoid pins, storage proposal, `88139b1a` |
-| 21:52 | received | Storage agreement with five pins and integration file permission, `da249b04` |
-| 21:53 | sent | Accepted storage pins, LandXML proposal, `6b25a552` |
-| 21:54 | sent | Profile sampling/view proposal, `52be26d2` |
-| 21:54 | received | LandXML agreement with eight changes, `486cbf67` |
-| 21:55 | sent | Accepted mapping pins, existing unit parameter evidence, `adaa8113` |
-| 21:56 | received | Sampling/view agreement with seven changes, `a7757343` |
-| 21:57 | sent | All pins accepted, implementation plan and tracking issue, `0d0f37b7` |
-| 21:57 | received | Unit parameter/default agreed, `70a8e68c` |
-| 21:58 | received | Reviewer's provider quota exhausted; reset reported as 02:10 America/Denver |
-| 22:33 | sent | Public XSD retrieved/validated, ProfSurf gap mapping, CI/follow-ups, `e4928f8a` |
+| 21:48:02 | received | Reviewer hello/id, `fe4dc566` |
+| 21:48:25 | sent | Setup acknowledgement, `7fe0a83d` |
+| 21:49:36 | sent | API proposal, `0ccaf0db` |
+| 21:50:11 | received | API agreement with nine pins, `0efaade8` |
+| 21:50:59 | sent | Accepted API pins, clothoid proposal, `5c5d9f7f` |
+| 21:51:22 | received | Clothoid agreement with four pins, `6621485a` |
+| 21:51:54 | sent | Accepted clothoid pins, storage proposal, `88139b1a` |
+| 21:52:27 | received | Storage agreement with five pins and integration file permission, `da249b04` |
+| 21:53:15 | sent | Accepted storage pins, LandXML proposal, `6b25a552` |
+| 21:53:53 | sent | Profile sampling/view proposal, `52be26d2` |
+| 21:53:59 | received | LandXML agreement with eight changes, `486cbf67` |
+| 21:54:33 | received | Sampling/view agreement with seven changes, `a7757343` |
+| 21:54:52 | sent | Accepted mapping pins, existing unit parameter evidence, `adaa8113` |
+| 21:57:01 | received | Unit parameter/default agreed, `70a8e68c` |
+| 21:57:38 | sent, receipt time | All pins accepted, implementation plan and tracking issue, `0d0f37b7` |
+| after 21:57 | received | Reviewer's provider quota exhausted; reset reported as 02:10 America/Denver |
+| 22:33:24 | sent | Public XSD retrieved/validated, ProfSurf gap mapping, CI/follow-ups, `e4928f8a` |
+| 22:39:53 | sent | Full horizontal PR review requested, `07a3fb8d` |
 
 ## Evidence and open checks
 
@@ -109,8 +110,51 @@ are to be reconciled from Paseo's tool log before completion (CLI not currently 
   definitions. The installed lxml validator accepts the CLI line/arc and clothoid exports against that XSD.
   ProfSurf defines gaps as multiple PntList2D children; PR2 uses this exact standard mapping.
   No third-party implementation source was opened or used.
-- Hosted Linux/Windows CI, native UI and independent PR review have not yet run. Nothing is
-  represented as ready or merged; the reviewer reported a provider quota limit until 02:10 Denver.
+- Hosted Linux/Windows CI passed at the published horizontal head. Native UI and independent full
+  PR review remain open; the reviewer reported a provider quota limit until 02:10 Denver.
 - Follow-ups outside this PR: [rounded input coordinates #69](https://github.com/0bnoxide/cadcraft/issues/69),
   [COPY exact definitions #72](https://github.com/0bnoxide/cadcraft/issues/72), and
   [unusual clothoids without a usable LandXML PI #73](https://github.com/0bnoxide/cadcraft/issues/73).
+
+## Horizontal publication and vertical implementation
+
+- Horizontal PR: [#74](https://github.com/0bnoxide/cadcraft/pull/74), head
+  `000afb94b93f81e7626b0e34a7a302db61c95481`, base `cf49a049`. Hosted Linux and Windows gates
+  passed. Review request sent by Paseo at 22:39:53 Denver, receipt
+  `07a3fb8d-45b9-4476-bd90-a71966dc4ff8`; the provider again reported quota exhaustion.
+- Vertical branch: `slice11/codex-vertical`, created from the exact horizontal head in the same
+  assigned worktree; the build directories remain private to this worker. No merge or rebase.
+- `profile.rs` supplies PVI validation, symmetric parabolas, grade ratios, extrema and bounded
+  profile tessellation. `sampling.rs` intersects the true elements with triangle edges after
+  bounding-box rejection; station intervals identify a triangle and use its plane-gradient /
+  curvature bound. Isolated contacts are point segments. Crossing deduplication is exact so it
+  cannot bridge a narrow uncovered gap.
+- The new profile commands use the shared TIN conversion, stage updates, persist profiles on the
+  carrier and draw a new figure without deletion. Ground/design/grid/text have separate layers;
+  ground is green, design red and grid gray. Ground gaps remain separate entities.
+- `landxml::import` now returns `Route { definition, profiles }` bundles. The geometry-only
+  `export` remains available; `export_routes` includes profiles. The engine stores optional
+  profiles in version-1 data, accepting horizontal-only files with the field absent. Ground
+  gaps are separate PntList2D children of one ProfSurf, as the XSD specifies.
+- This first model stores one ground and one design profile. Multiple named profiles are refused
+  explicitly rather than discarded; [#75](https://github.com/0bnoxide/cadcraft/issues/75) tracks collections.
+- Eleven new host-free tests cover crest/sag values at five stations and extrema, overlap/abutment,
+  later-tangent grade, nonfinite/range refusals, standard profile exchange/refusal, exact line/arc/
+  spiral crossings, the radius-1 z=x arc example, gaps including a 5e-10 gap, isolated contacts,
+  view placement/exaggeration and 200000 triangles with 50 elements (about 0.04s for the test group
+  in the local optimized test build). The command test covers sample/create/view, undo, both-format
+  storage and profile exchange. View and command tests were observed failing before implementation.
+- A final crossing regression proved an edge-end tolerance could admit a root outside the finite
+  edge. The segment parameter now stays strictly in [0,1]; the test failed before the change.
+- Automated horizontal review found inclusive endpoint subtraction roundoff and nonportable notes.
+  The owner has a separate claim on both corrections; the vertical branch leaves that work untouched.
+  Follow-ups: [endpoint #76](https://github.com/0bnoxide/cadcraft/issues/76),
+  [portable notes #77](https://github.com/0bnoxide/cadcraft/issues/77). Recheck the horizontal head
+  before integration; this branch remains based on its original published head.
+- CLI profile smoke: TIN -> sample -> design -> view, DWG reopen, LandXML reimport/view and public
+  XSD validation pass on the final code. Profile PNG inspected with the headless renderer: the
+  red design crest, green ground line, grid and all station/elevation labels are visible.
+- Final vertical `cargo xtask ci`: all seven gates passed with the same private outer driver,
+  two build/test workers and host access. Nextest `3b6a2a36-0dcf-4d2f-9c84-fb9e50ef2d72`:
+  4157 passed, 28 skipped, followed by passing doc tests, i18n, assets, layers and WASM.
+  Hosted vertical checks and independent full reviews remain pending at this note revision.

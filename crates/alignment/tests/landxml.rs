@@ -25,7 +25,7 @@ fn exact_spiral_arc_export_reimports_and_units_scale() {
     assert!(xml.contains("radiusStart=\"INF\""));
     let imported = landxml::import(xml.as_bytes(), Unit::Foot).unwrap();
     assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
-    let b = &imported.alignments[0];
+    let b = &imported.alignments[0].definition;
     assert_eq!(b.name, a.name);
     assert_eq!(b.start_station, a.start_station);
     for s in [-123.5, -100., -63.5, 0., 36.5] {
@@ -34,7 +34,7 @@ fn exact_spiral_arc_export_reimports_and_units_scale() {
         assert!((p.point[0] - q.point[0]).hypot(p.point[1] - q.point[1]) < 1e-6);
     }
     let metric = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
-    assert!((metric.alignments[0].length().unwrap() - a.length().unwrap() * 0.3048).abs() < 1e-6);
+    assert!((metric.alignments[0].definition.length().unwrap() - a.length().unwrap() * 0.3048).abs() < 1e-6);
 }
 fn file(body: &str) -> String {
     format!(
@@ -48,7 +48,7 @@ fn unsupported_alignment_is_refused_without_losing_other_alignment() {
     assert_eq!(r.alignments.len(), 1);
     assert_eq!(r.refusals[0].code, "UNSUPPORTED_SPIRAL");
     assert!(r.warnings.iter().any(|w| w.code == "STATION_EQUATIONS_IGNORED"));
-    assert!(r.warnings.iter().any(|w| w.code == "PROFILES_NOT_SUPPORTED"));
+    assert!(!r.warnings.iter().any(|w| w.code == "PROFILES_NOT_SUPPORTED"));
 }
 #[test]
 fn hostile_xml_limits_and_nonfinite_values_are_refused() {
