@@ -755,6 +755,7 @@ dependencies = [
  "cadcraft-survey",
  "chrono",
  "craft-docpath",
+ "craft-pdf",
  "crc32fast",
  "fsquirrel",
  "libc",

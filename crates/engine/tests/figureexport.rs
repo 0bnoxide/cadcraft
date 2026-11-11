@@ -5,6 +5,10 @@ use cadcraft_engine::{
     cmd::file::{IoHooks, set_io},
 };
 use serde_json::{Value, json};
+#[path = "support/pdf_font.rs"]
+mod pdf_font;
+#[path = "../../io/tests/support/pdf_read.rs"]
+mod pdf_read;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -70,6 +74,65 @@ fn plans_four_jobs_exports_versions_and_preserves_source_and_current_session() {
     assert_eq!(s.doc().unwrap(), &before);
     assert_eq!(format!("{:?}", s.docs[s.active].undo), undo);
     assert_eq!(s.doc_epoch, epoch);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exports_png_with_decodable_pixels() {
+    let (root, mut p) = fixture();
+    let mut s = Session::new();
+    p["format"] = json!("png");
+    let planned = s.execute("figureexport", &p).unwrap();
+    assert_eq!(planned["plan"]["jobs"].as_array().unwrap().len(), 4);
+    p["action"] = json!("execute");
+    p["approved_hash"] = planned["hash"].clone();
+    let done = s.execute("figureexport", &p).unwrap();
+    assert_eq!(done["receipt"]["outcome"], "Succeeded", "{done}");
+    for name in ["A_2025_F.png", "A_2026_F.png", "B_2025_F.png", "B_2026_F.png"] {
+        let bytes = std::fs::read(root.join("out").join(name)).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let image = cadcraft_io::raster::decode(&bytes).unwrap();
+        assert!(image.width() > 0 && image.height() > 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exported_pdfs_contain_substituted_text() {
+    pdf_font::register();
+    let (root, mut p) = fixture();
+    let mut d = Drawing::new_metric();
+    d.text_styles.push(cadcraft_doc::TextStyle { name: "Synthetic".into(), font: "cadcraft-figure-test.ttf".into(), ..Default::default() });
+    d.layouts.push(Layout::new("Figure", 1));
+    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"style":"Synthetic","value":"{{Site}}{{Event}}{{FigureId}} {{Unknown}}"}))
+        .unwrap();
+    d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::Text(text)).unwrap();
+    std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+    std::fs::write(root.join("figure.json"), br#"{"figure_id":"A","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
+    p["sites"] = json!(["A", "B"]);
+    p["events"] = json!(["A", "B"]);
+    let mut s = Session::new();
+    let planned = s.execute("figureexport", &p).unwrap();
+    for job in planned["plan"]["jobs"].as_array().unwrap() {
+        assert!(job["qa"].as_array().unwrap().iter().any(|q| q["code"] == "unresolved_placeholder"), "{job}");
+    }
+    p["action"] = json!("execute");
+    p["approved_hash"] = planned["hash"].clone();
+    let done = s.execute("figureexport", &p).unwrap();
+    assert_eq!(done["receipt"]["outcome"], "Succeeded", "{done}");
+    for (name, expected) in [("A_A_A.pdf", "AAA"), ("A_B_A.pdf", "ABA"), ("B_A_A.pdf", "BAA"), ("B_B_A.pdf", "BBA")] {
+        let pdf = pdf_read::read(&std::fs::read(root.join("out").join(name)).unwrap());
+        let page = &pdf.pages[0];
+        let map: std::collections::BTreeMap<u32, String> =
+            page.fonts.iter().flat_map(|f| pdf_read::to_unicode_map(f.to_unicode.as_deref().unwrap_or(""))).collect();
+        let extracted: String = pdf_read::shown(&page.content_bytes)
+            .iter()
+            .flat_map(|codes| codes.as_chunks::<2>().0.iter())
+            .filter_map(|code| map.get(&(u32::from(code[0]) << 8 | u32::from(code[1]))))
+            .map(String::as_str)
+            .collect();
+        assert_eq!(extracted, expected, "{name}");
+    }
     std::fs::remove_dir_all(root).unwrap();
 }
 
