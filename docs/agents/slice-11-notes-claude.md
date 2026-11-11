@@ -45,7 +45,7 @@ Times are America/Denver, taken from the author's provider log of receipts (sent
 | 11-11 03:37:17 | out | 051992fd: reviewer's reading of "no merges"; decision left to the owner. |
 | 11-11 03:4x | in | 6d0208ea: receipt times above. A second permission prompt (branch-only merge) was left for the owner. |
 
-Counts from the author's provider log at that point: 13 messages from the reviewer received, 19 sent by the author. All five design agreements (21:50 to 21:55 on 11-10) precede PR 1 (22:40).
+Counts checked by the reviewer with `paseo logs <id> --filter tools --no-color`, counting `[Send message]` events, on 11-11 after the last row: 14 from the reviewer and 23 from the author (the criteria ask for at least 4 and 6). All five design agreements (21:50 to 21:55 on 11-10) precede PR 1 (22:40).
 
 ## Design agreements
 
@@ -182,4 +182,3 @@ Non-blocking notes: #85.
 
 - `cargo xtask ci` was never run locally for either PR; the hosted gates were relied on for #74, and none had run for #78 at 57334e6c.
 - The CLI and control-channel pass criteria and the native UI were not exercised by the reviewer.
-- The Paseo log counts in the pass criteria were not checked.
