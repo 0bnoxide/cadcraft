@@ -21,6 +21,11 @@ Times are local (UTC-7), 2026-11-10 unless a date is given.
 | ~22:20 | out | Proposal 4 agreed with eight changes. Filed #69 and #70. Asked for proposal 5. |
 | ~22:30 | in | Proposal 5 (ground sampling, vertical design, profile view). |
 | ~22:30 | out | Proposal 5 agreed with seven changes. All five agreed; PR 1 may start. |
+| 22:3x | in | Unit question answered: reuse `tinexport`'s `unit` parameter (default meter). |
+| 22:3x | out | Agreed the `unit` parameter. |
+| 22:33 on | in | Proposal 5 pins accepted; schema reached over HTTP; issues #68, #72, #73 filed by the author. |
+| 11-11 | in | PR 1 up (#74, head 000afb94); PR 2 up (#78); later heads 42a55c7f (#74) and 455bfd0f (#78); #78 to be re-based by the owner, review held until the head is frozen. |
+| 11-11 | out | Review of #74 at 42a55c7f posted: changes requested, three must-fix findings. |
 
 ## Design agreements
 
@@ -98,8 +103,33 @@ Changes asked for:
 ## Issues filed
 
 - [#69](https://github.com/0bnoxide/cadcraft/issues/69): LandXML files with rounded coordinates are refused on import.
+- [#83](https://github.com/0bnoxide/cadcraft/issues/83): non-blocking review notes from #74.
 - [#70](https://github.com/0bnoxide/cadcraft/issues/70): MOVE or an angle point makes an alignment unusable.
 
 ## Reviews
 
-(filled per PR: what ran, hand calculations, verdict)
+### #74 Horizontal alignments, head 42a55c7f: changes requested
+
+Review: https://github.com/0bnoxide/cadcraft/pull/74 (posted as a comment review).
+
+What ran: `cargo test -p cadcraft-alignment`, 19 passed. Not run locally: `cargo xtask ci`, the engine tests, the CLI flow and the native UI; the hosted Linux and Windows gates were green for this head.
+
+Hand calculations, independent of the code:
+
+- Entry spiral L=60, R=300, t=L/(2R)=0.1: x = 60(1 − t²/10 + t⁴/216 − t⁶/9360) = 59.94002777, y = 60(t/3 − t³/42 + t⁵/1320 − t⁷/75600) = 1.99857188.
+- With the alignment's spiral starting at (10, 0): arc centre = (69.94002777 − 300·sin 0.1, 1.99857188 + 300·cos 0.1) = (39.99000278, 300.49982147).
+- Arc end = centre + 300·(sin 0.3, −cos 0.3) = (128.64606478, 13.89887473).
+- Exit spiral displacement = e^{0.4i}·conj(59.94002777 + 1.99857188i) = (55.98670211, 21.50093965), so the end is (184.63276689, 35.39981438).
+- Line, arc, line: arc midpoint (10 + 10/√2, 10 − 10/√2), total 20 + 5π.
+
+All match the tests' expected values.
+
+Findings (must fix):
+
+1. `project()` beside a spiral returns a station wrong by up to about 7e-4 (measured with a scratch program outside the repository: offset 1 gives 2e-5, offset 50 gives 2.7e-4, offset −1000 gives 6.8e-4 on the L=60, R=300 spiral). Distance and offset are right. The agreed refinement of the stationary point is missing.
+2. Every query revalidates the whole alignment. One `at()` on a valid alignment of 4096 tight spirals took 1.96 s in a release build, and `alignmentreport` accepts 4096 stations.
+3. Arcs are drawn as chords, where the brief asks for chords on spirals only. Storage version 1 pins the rule.
+
+### #78 Profiles
+
+Held until the author sends the frozen head after the owner's re-base onto the updated #74.
