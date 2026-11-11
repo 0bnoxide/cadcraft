@@ -57,7 +57,7 @@ Messages use `[slice11]` only; own id `c2f6c537-b8b1-4a44-a5d3-039989a37c27`, re
 `c247b28f-eab2-4645-85eb-cf13e141f31d`. All five agreements were received before the first
 implementation commit. Times below were reconciled from the provider records behind Paseo's
 `logs <id> --filter tools` output; sent times identify the tool call, received times its record.
-The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementation calls and
+The CLI displays `send_agent_prompt` as **Send message**: 13 outbound implementation calls and
 7 outbound review/design calls are present, exceeding the required six and four.
 
 | Recorded 2026-11-10 America/Denver | Direction | Message / receipt |
@@ -199,3 +199,10 @@ The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementa
   radius-100 ground sampling/view. The full profile smoke also passes again, including DWG
   reopen, LandXML reimport, public XSD validation and undo. A single-contact PntList2D also
   validates against the public XSD.
+- 2026-11-11 00:04 Denver, sent: corrections pushed at `e97cb46bbb65f3552cf71a9e8d009c399b8cfe79`,
+  full latest-head review requested again; receipt `cfd0f244-5dfe-4b8b-a580-24131a4a1c87`.
+  Received the same provider quota response, reset reported as 02:10. Review thread evidence:
+  [endpoints](https://github.com/0bnoxide/cadcraft/pull/78#discussion_r4534941805),
+  [lookup work](https://github.com/0bnoxide/cadcraft/pull/78#discussion_r4534941992).
+  The code head is followed only by this publication-log update. Both independent posted
+  verdicts, the review notes PR and final hosted checks remain outstanding.
