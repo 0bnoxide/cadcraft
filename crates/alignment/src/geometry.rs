@@ -67,6 +67,20 @@ pub struct Alignment {
     pub format: StationFormat,
     pub elements: Vec<Element>,
 }
+/// Immutable borrowed geometry, checked once for a batch of queries.
+pub struct ValidatedAlignment<'a> {
+    pub(crate) alignment: &'a Alignment,
+    pub(crate) cumulative: Vec<f64>,
+}
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct CarrierVertex {
+    pub point: [f64; 2],
+    pub bulge: f64,
+}
+#[cfg(test)]
+std::thread_local! {
+    static VALIDATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+}
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Pose {
     pub point: [f64; 2],
@@ -234,6 +248,8 @@ fn spiral_integral(k: f64, rate: f64, length: f64, max_k: f64) -> [f64; 2] {
 impl Alignment {
     /// Invalid scalar/size data is an error; all geometric joint defects are returned together.
     pub fn validate(&self) -> Result<Vec<JointIssue>> {
+        #[cfg(test)]
+        VALIDATION_CALLS.with(|n| n.set(n.get() + 1));
         if self.name.is_empty()
             || self.name.len() > 256
             || self.name.chars().any(char::is_control)
@@ -274,60 +290,118 @@ impl Alignment {
         Ok(())
     }
     pub fn length(&self) -> Result<f64> {
-        self.checked()?;
-        Ok(self.elements.iter().map(|e| e.length).sum())
+        Ok(self.validated()?.length())
     }
     pub fn at(&self, station: f64, offset: f64) -> Result<Pose> {
+        self.validated()?.at(station, offset)
+    }
+    pub fn polyline(&self, tolerance: f64) -> Result<Vec<[f64; 2]>> {
+        self.validated()?.polyline(tolerance)
+    }
+    pub fn validated(&self) -> Result<ValidatedAlignment<'_>> {
         self.checked()?;
+        let mut cumulative = Vec::with_capacity(self.elements.len() + 1);
+        cumulative.push(0.);
+        let mut length = 0.;
+        for e in &self.elements {
+            length += e.length;
+            cumulative.push(length);
+        }
+        Ok(ValidatedAlignment { alignment: self, cumulative })
+    }
+}
+impl ValidatedAlignment<'_> {
+    pub fn length(&self) -> f64 {
+        self.cumulative.last().copied().unwrap_or(0.)
+    }
+    pub fn at(&self, station: f64, offset: f64) -> Result<Pose> {
+        let a = self.alignment;
         if !station.is_finite() || !offset.is_finite() {
             return Err(error("OUT_OF_RANGE", "station and offset must be finite"));
         }
-        let total: f64 = self.elements.iter().map(|e| e.length).sum();
-        let end = self.start_station + total;
-        if station < self.start_station || station > end {
+        let end = a.start_station + self.length();
+        if station < a.start_station || station > end {
             return Err(error("OUT_OF_RANGE", "station outside alignment"));
         }
-        // Compare absolute bounds before subtraction: a rounded end station can
-        // subtract to either side of total, but must still reach the exact endpoint.
-        let mut distance = if station == end { total } else { (station - self.start_station).clamp(0., total) };
-        for (i, e) in self.elements.iter().enumerate() {
-            // Do not deplete the final short element by repeatedly subtracting
-            // large element lengths from the accumulated total.
-            if station == end && i + 1 != self.elements.len() {
-                continue;
-            }
-            if distance < e.length || i + 1 == self.elements.len() {
-                let mut p = e.at(if station == end { e.length } else { distance.min(e.length) })?;
-                p.point[0] -= offset * p.direction.sin();
-                p.point[1] += offset * p.direction.cos();
-                if p.point.iter().any(|x| !x.is_finite() || x.abs() > 1e9) {
-                    return Err(error("NUMERICAL_LIMIT", "offset coordinate overflow"));
-                }
-                return Ok(p);
-            }
-            distance -= e.length;
+        // Absolute prefix bounds retain inclusive endpoints and let the later element answer joints.
+        let index = self.cumulative.partition_point(|d| a.start_station + d <= station).saturating_sub(1).min(a.elements.len() - 1);
+        let e = a.elements.get(index).ok_or_else(|| error("INVALID_ALIGNMENT", "element missing"))?;
+        let base = self.cumulative.get(index).copied().ok_or_else(|| error("INVALID_ALIGNMENT", "element prefix missing"))?;
+        let distance = if station == end {
+            e.length
+        } else if station == a.start_station + base {
+            0.
+        } else {
+            (station - a.start_station - base).clamp(0., e.length)
+        };
+        let mut p = e.at(distance)?;
+        p.point[0] -= offset * p.direction.sin();
+        p.point[1] += offset * p.direction.cos();
+        if p.point.iter().any(|x| !x.is_finite() || x.abs() > 1e9) {
+            return Err(error("NUMERICAL_LIMIT", "offset coordinate overflow"));
         }
-        Err(error("OUT_OF_RANGE", "station outside alignment"))
+        Ok(p)
     }
     pub fn polyline(&self, tolerance: f64) -> Result<Vec<[f64; 2]>> {
-        self.checked()?;
+        Ok(self.vertices(tolerance, false)?.into_iter().map(|v| v.point).collect())
+    }
+    pub fn carrier_vertices(&self, tolerance: f64) -> Result<Vec<CarrierVertex>> {
+        self.vertices(tolerance, true)
+    }
+    fn vertices(&self, tolerance: f64, arc_bulges: bool) -> Result<Vec<CarrierVertex>> {
         if !tolerance.is_finite() || tolerance <= 0. {
             return Err(error("INVALID_TOLERANCE", "positive finite chord tolerance required"));
         }
         let mut out = Vec::new();
-        for e in &self.elements {
+        for e in &self.alignment.elements {
             let k = e.max_curvature();
-            let n = if k == 0. { 1. } else { (e.length / (8. * tolerance / k).sqrt()).ceil().max(1.) };
+            let bulge = match e.kind {
+                Kind::Arc { radius, turn } if arc_bulges => turn.sign() * (e.length / radius / 4.).tan(),
+                _ => 0.,
+            };
+            let n = if k == 0. || bulge != 0. { 1. } else { (e.length / (8. * tolerance / k).sqrt()).ceil().max(1.) };
             if !n.is_finite() || n > MAX_POINTS as f64 || out.len().saturating_add(n as usize).saturating_add(1) > MAX_POINTS {
                 return Err(error("POINT_LIMIT", "polyline exceeds 100000 vertices"));
             }
             for i in 0..(n as usize) {
-                out.push(e.pose(e.length * (i as f64) / n).point);
+                out.push(CarrierVertex { point: e.pose(e.length * (i as f64) / n).point, bulge });
             }
         }
-        if let Some(e) = self.elements.last() {
-            out.push(e.pose(e.length).point);
+        if let Some(e) = self.alignment.elements.last() {
+            out.push(CarrierVertex { point: e.pose(e.length).point, bulge: 0. });
         }
         Ok(out)
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn a_validated_batch_does_not_repeat_whole_alignment_validation() {
+        let mut elements = Vec::new();
+        let mut point = [0., 0.];
+        let mut direction = 0.;
+        for _ in 0..4096 {
+            let e = Element {
+                start: point,
+                direction,
+                length: 1.,
+                kind: Kind::Spiral { radius_start: Some(0.02), radius_end: Some(0.03), turn: Turn::Left },
+            };
+            let end = e.at(1.).unwrap();
+            point = end.point;
+            direction = end.direction;
+            elements.push(e);
+        }
+        let a = Alignment { name: "batch".into(), start_station: 0., format: StationFormat::Thousands, elements };
+        VALIDATION_CALLS.with(|n| n.set(0));
+        let view = a.validated().unwrap();
+        for _ in 0..4096 {
+            assert_eq!(view.at(0., 0.).unwrap().point, [0., 0.]);
+            assert_eq!(view.length(), 4096.);
+        }
+        assert_eq!(view.project([0., 0.]).unwrap().distance, 0.);
+        assert_eq!(VALIDATION_CALLS.with(|n| n.get()), 1);
     }
 }
