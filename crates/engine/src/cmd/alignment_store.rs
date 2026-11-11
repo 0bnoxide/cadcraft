@@ -67,6 +67,21 @@ pub(super) fn validated<'a>(d: &Drawing, handle: Handle, data: &'a Stored) -> Re
     }
     Ok(view)
 }
+/// Validate an alignment carrier before COPY, then translate its authoritative geometry.
+/// A plain entity (including one with another application's dictionary) has no definition.
+pub(super) fn translated_if_present(d: &Drawing, handle: Handle, delta: Vec2) -> Result<Option<Stored>> {
+    if record_handle(d, handle)?.is_none() {
+        return Ok(None);
+    }
+    let mut data = load(d, handle)?;
+    for element in &mut data.definition.elements {
+        element.start[0] += delta.x;
+        element.start[1] += delta.y;
+    }
+    // Reject non-finite or out-of-range positions before changing the staged drawing.
+    carrier(&data)?;
+    Ok(Some(data))
+}
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
     // Serialization is capped while writing, before an input-sized string can be allocated.
     struct Capped(Vec<u8>);
@@ -116,11 +131,9 @@ fn record_handle(d: &Drawing, handle: Handle) -> Result<Option<Handle>> {
     let dict =
         d.foreign.objects.iter().find(|o| o.handle == dict && o.kind == "DICTIONARY").ok_or_else(|| invalid("missing extension dictionary"))?;
     let mut out = None;
-    for pair in dict.tags.windows(2) {
-        if let [key, value] = pair
-            && key.code == 3
-            && key.value == KEY
-        {
+    for (index, key) in dict.tags.iter().enumerate() {
+        if key.code == 3 && key.value == KEY {
+            let value = dict.tags.get(index + 1).ok_or_else(|| invalid("duplicate or malformed alignment entry"))?;
             if out.is_some() || !matches!(value.code, 350 | 360) {
                 return Err(invalid("duplicate or malformed alignment entry"));
             }
