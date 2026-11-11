@@ -267,18 +267,32 @@ impl Foreign {
             let mut c = (*o).clone();
             let Some(&new) = fresh.get(n) else { continue };
             c.handle = new;
+            let mut grouped = false;
+            let mut owner_seen = false;
+            let mut xdata = false;
             for t in &mut c.tags {
+                if !xdata {
+                    if t.code >= 1000 {
+                        xdata = true;
+                    } else if t.code == 102 {
+                        grouped = t.value.trim().starts_with('{');
+                    }
+                }
+                // The DXF reader treats only the first ungrouped 330 before xdata as this
+                // object's owner. A 330 inside a 102 reactor group is a reference, not ownership.
+                let root_owner = n == 0 && !xdata && !grouped && t.code == 330 && !owner_seen;
+                owner_seen |= root_owner;
                 if t.code == 5 {
                     t.value = new.hex();
                 } else if matches!(t.code, 320..=369 | 390..=399) {
-                    if same_drawing {
-                        if n == 0 && t.code == 330 {
-                            t.value = owner.hex();
-                        } else if let Some(to) = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()) {
+                    if root_owner {
+                        t.value = owner.hex();
+                    } else if same_drawing {
+                        if let Some(to) = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()) {
                             t.value = to.hex();
                         }
                     } else {
-                        let to = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()).or((n == 0 && t.code == 330).then_some(owner));
+                        let to = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied());
                         t.value = to.map_or_else(|| "0".to_string(), Handle::hex);
                     }
                 }
@@ -349,13 +363,62 @@ mod tree_copy_tests {
     }
 
     #[test]
+    fn same_drawing_copy_rewrites_only_the_ungrouped_root_owner() {
+        let src = Foreign {
+            objects: vec![
+                ForeignObject {
+                    handle: Handle(1),
+                    kind: "DICTIONARY".into(),
+                    tags: vec![
+                        tag(5, "1"),
+                        tag(102, "{ACAD_REACTORS"),
+                        tag(330, "2"),
+                        tag(330, "B"),
+                        tag(102, "}"),
+                        tag(330, "A"),
+                        tag(102, "{ACAD_REACTORS"),
+                        tag(330, "B"),
+                        tag(102, "}"),
+                        tag(330, "B"),
+                        tag(3, "ENTRY"),
+                        tag(360, "2"),
+                    ],
+                },
+                ForeignObject { handle: Handle(2), kind: "XRECORD".into(), tags: vec![tag(5, "2"), tag(330, "1")] },
+            ],
+            ..Default::default()
+        };
+        let tree = src.complete_tree(Handle(1)).unwrap();
+        let mut dst = src.clone();
+        dst.duplicate_tree(&src, &tree, &[Handle(3), Handle(4), Handle(5), Handle(6)], Handle(7));
+        assert_eq!(dst.objects[0].tags[2].value, "2");
+        assert_eq!(dst.objects[0].tags[3].value, "B");
+        assert_eq!(dst.objects[0].tags[5].value, "A");
+        assert_eq!(dst.objects[2].tags[2].value, "4");
+        assert_eq!(dst.objects[2].tags[3].value, "B");
+        assert_eq!(dst.objects[2].tags[5].value, "7");
+        assert_eq!(dst.objects[2].tags[7].value, "B");
+        assert_eq!(dst.objects[2].tags[9].value, "B");
+        assert_eq!(dst.objects[3].tags[1].value, "3");
+    }
+
+    #[test]
     fn cross_drawing_adoption_still_nulls_external_references() {
         let src = Foreign {
             objects: vec![
                 ForeignObject {
                     handle: Handle(1),
                     kind: "DICTIONARY".into(),
-                    tags: vec![tag(5, "1"), tag(330, "A"), tag(3, "ENTRY"), tag(360, "2")],
+                    tags: vec![
+                        tag(5, "1"),
+                        tag(102, "{ACAD_REACTORS"),
+                        tag(330, "2"),
+                        tag(330, "B"),
+                        tag(102, "}"),
+                        tag(330, "A"),
+                        tag(3, "ENTRY"),
+                        tag(360, "2"),
+                    ],
                 },
                 ForeignObject { handle: Handle(2), kind: "XRECORD".into(), tags: vec![tag(5, "2"), tag(330, "1"), tag(340, "B")] },
             ],
@@ -364,7 +427,9 @@ mod tree_copy_tests {
         let tree = src.complete_tree(Handle(1)).unwrap();
         let mut dst = Foreign::default();
         dst.adopt_tree(&src, &tree, &[Handle(3), Handle(4), Handle(5), Handle(6)], Handle(7));
-        assert_eq!(dst.objects[0].tags.iter().find(|t| t.code == 330).unwrap().value, "7");
+        assert_eq!(dst.objects[0].tags[2].value, "4");
+        assert_eq!(dst.objects[0].tags[3].value, "0");
+        assert_eq!(dst.objects[0].tags[5].value, "7");
         assert_eq!(dst.objects[1].tags.iter().find(|t| t.code == 330).unwrap().value, "3");
         assert_eq!(dst.objects[1].tags.iter().find(|t| t.code == 340).unwrap().value, "0");
     }

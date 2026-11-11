@@ -315,6 +315,74 @@ mod tests {
     }
 
     #[test]
+    fn copy_keeps_reactors_distinct_from_the_extension_dictionary_owner() {
+        fn owner_and_reactors(tags: &[RawTag]) -> (Option<Handle>, Vec<Handle>) {
+            let mut group = None;
+            let mut owner = None;
+            let mut reactors = Vec::new();
+            for tag in tags.iter().take_while(|tag| tag.code < 1000) {
+                if tag.code == 102 {
+                    group = tag.value.trim().strip_prefix('{');
+                } else if tag.code == 330 {
+                    let handle = Handle::parse_hex(tag.value.trim());
+                    if group == Some("ACAD_REACTORS") {
+                        reactors.extend(handle);
+                    } else if group.is_none() && owner.is_none() {
+                        owner = handle;
+                    }
+                }
+            }
+            (owner, reactors)
+        }
+
+        let mut s = Session::new();
+        let source = line(&mut s, "reactors");
+        let external = s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3::ZERO, angle: 0. })).unwrap();
+        let dict = s.doc().unwrap().foreign.entities.get(&source).unwrap().xdict.unwrap();
+        let record = {
+            let root = s.doc().unwrap().foreign.objects.iter().find(|o| o.handle == dict).unwrap();
+            let entry = root.tags.windows(2).find(|pair| pair[0].code == 3 && pair[0].value == "CADCRAFT_ALIGNMENT").unwrap();
+            Handle::parse_hex(&entry[1].value).unwrap()
+        };
+        let root = Arc::make_mut(&mut s.doc_mut().unwrap().foreign).objects.iter_mut().find(|o| o.handle == dict).unwrap();
+        root.tags.splice(
+            1..1,
+            [
+                RawTag { code: 102, value: "{ACAD_REACTORS".into() },
+                RawTag { code: 330, value: external.hex() },
+                RawTag { code: 330, value: record.hex() },
+                RawTag { code: 102, value: "}".into() },
+            ],
+        );
+        let before = s.doc().unwrap().clone();
+        let result = s.execute("copy", &json!({"handles":[source.hex()],"delta":[3,4]})).unwrap();
+        let copy = Handle::parse_hex(result["handles"][0].as_str().unwrap()).unwrap();
+        for (label, drawing) in std::iter::once(("memory", s.doc().unwrap().clone())).chain(["reactors.dxf", "reactors.dwg"].map(|file| {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+            (file, cadcraft_io::read(&bytes, file).unwrap())
+        })) {
+            let source_dict = drawing.foreign.entities.get(&source).unwrap().xdict.unwrap();
+            let copy_dict = drawing.foreign.entities.get(&copy).unwrap().xdict.unwrap();
+            assert_ne!(source_dict, copy_dict, "{label}");
+            for (carrier, dict) in [(source, source_dict), (copy, copy_dict)] {
+                let root = drawing.foreign.objects.iter().find(|o| o.handle == dict).unwrap();
+                let entry = root.tags.windows(2).find(|pair| pair[0].code == 3 && pair[0].value == "CADCRAFT_ALIGNMENT").unwrap();
+                let expected_record = Handle::parse_hex(&entry[1].value).unwrap();
+                let (owner, reactors) = owner_and_reactors(&root.tags);
+                assert_eq!(owner, Some(carrier), "{label}");
+                assert!(reactors.contains(&external), "{label}: external reactor missing");
+                assert!(reactors.contains(&expected_record), "{label}: owned reactor missing");
+                assert_eq!(reactors.len(), 2, "{label}");
+                super::super::alignment_store::load(&drawing, carrier).unwrap();
+            }
+        }
+        assert_eq!(
+            *before.foreign.objects.iter().find(|o| o.handle == dict).unwrap(),
+            *s.doc().unwrap().foreign.objects.iter().find(|o| o.handle == dict).unwrap()
+        );
+    }
+
+    #[test]
     fn copy_refuses_capped_owned_tree_without_partial_batch() {
         let mut s = Session::new();
         let h = line(&mut s, "large");
