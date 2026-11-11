@@ -57,6 +57,8 @@ Messages use `[slice11]` only; own id `c2f6c537-b8b1-4a44-a5d3-039989a37c27`, re
 `c247b28f-eab2-4645-85eb-cf13e141f31d`. All five agreements were received before the first
 implementation commit. Times below were reconciled from the provider records behind Paseo's
 `logs <id> --filter tools` output; sent times identify the tool call, received times its record.
+The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementation calls and
+7 outbound review/design calls are present, exceeding the required six and four.
 
 | Recorded 2026-11-10 America/Denver | Direction | Message / receipt |
 |---|---|---|
@@ -78,6 +80,10 @@ implementation commit. Times below were reconciled from the provider records beh
 | after 21:57 | received | Reviewer's provider quota exhausted; reset reported as 02:10 America/Denver |
 | 22:33:24 | sent | Public XSD retrieved/validated, ProfSurf gap mapping, CI/follow-ups, `e4928f8a` |
 | 22:39:53 | sent | Full horizontal PR review requested, `07a3fb8d` |
+| 23:29 | sent | Full vertical PR review requested, `5443c715-9016-4380-bb7c-c4e7ab920113` |
+| 23:29 | received | Provider quota response again; full reviews remain pending |
+| 23:30 | sent | Notes-only follow-up and latest-head review handoff, `134dc57a-b25f-4fdf-98a0-9d31d43a5e7b` |
+| 23:30 | received | Provider quota response again; reset still reported as 02:10 Denver |
 
 ## Evidence and open checks
 
@@ -158,3 +164,9 @@ implementation commit. Times below were reconciled from the provider records beh
   two build/test workers and host access. Nextest `3b6a2a36-0dcf-4d2f-9c84-fb9e50ef2d72`:
   4157 passed, 28 skipped, followed by passing doc tests, i18n, assets, layers and WASM.
   Hosted vertical checks and independent full reviews remain pending at this note revision.
+- Vertical PR: [#78](https://github.com/0bnoxide/cadcraft/pull/78), code head
+  `104107a0959a57c421a4161fe9280a407b598bd5`, base `slice11/codex-horizontal` at `000afb94`.
+  Linux and Windows hosted gates started. Full review requested with code head and evidence;
+  the reviewer was told to resolve the latest PR heads after this notes-only follow-up. Both
+  posted verdicts, the review notes PR, any resulting corrections and final hosted gates remain
+  required. The worktree is retained for those corrections. Nothing has merged.
