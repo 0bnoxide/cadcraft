@@ -26,6 +26,12 @@ Times are local (UTC-7), 2026-11-10 unless a date is given.
 | 22:33 on | in | Proposal 5 pins accepted; schema reached over HTTP; issues #68, #72, #73 filed by the author. |
 | 11-11 | in | PR 1 up (#74, head 000afb94); PR 2 up (#78); later heads 42a55c7f (#74) and 455bfd0f (#78); #78 to be re-based by the owner, review held until the head is frozen. |
 | 11-11 | out | Review of #74 at 42a55c7f posted: changes requested, three must-fix findings. |
+| 11-11 | in | Author confirmed the three findings and proposed repairs: stationary-point refinement, a validated view, bulge vertices for arcs. |
+| 11-11 | out | Repair plan agreed with pins (1e-7 station tests, test-only counter, bulge tolerance 1e-9). |
+| 11-11 | in | The author asked for another worker's Paseo id through a permission prompt. Answered that the reviewer does not know it; passed the question to the owner. |
+| 11-11 | in | #74 repairs published at 74917b9c; proposed `Profiles::validate_on(&ValidatedAlignment)` for #78. |
+| 11-11 | out | Agreed the profile API adaptation. Updated verdict on #74 posted: approved once hosted gates are green. |
+| 11-11 | in | Hosted Linux and Windows gates green for #74 at 74917b9c. |
 
 ## Design agreements
 
@@ -129,6 +135,14 @@ Findings (must fix):
 1. `project()` beside a spiral returns a station wrong by up to about 7e-4 (measured with a scratch program outside the repository: offset 1 gives 2e-5, offset 50 gives 2.7e-4, offset −1000 gives 6.8e-4 on the L=60, R=300 spiral). Distance and offset are right. The agreed refinement of the stationary point is missing.
 2. Every query revalidates the whole alignment. One `at()` on a valid alignment of 4096 tight spirals took 1.96 s in a release build, and `alignmentreport` accepts 4096 stations.
 3. Arcs are drawn as chords, where the brief asks for chords on spirals only. Storage version 1 pins the rule.
+
+### #74 re-review, head 74917b9c: approved
+
+Full delta from 42a55c7f read. Ran `cargo test -p cadcraft-alignment` (22 passed) and `cargo test -p cadcraft-engine --lib alignment` (7 passed). Hosted Linux and Windows gates are green for this head. Not run locally: `cargo xtask ci`, the CLI flow, the native UI.
+
+1. Spiral projection fixed: the same scratch measurement gives a station error of about 1.5e-10 at offsets 1, 50, 100, −200, −1000 and 250.
+2. One validation per command through `ValidatedAlignment`. The raw one-shot methods still validate each call (0.68 s for one `at()` on the 4096 tight spiral case), so loops must use the view.
+3. One bulge vertex per arc. Hand check: 270° gives tan 67.5° = 1 + √2.
 
 ### #78 Profiles
 
