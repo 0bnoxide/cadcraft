@@ -70,6 +70,112 @@ mod tests {
     }
 
     #[test]
+    fn preparation_replaces_escaped_mtext_and_warns_for_unknown_keys() {
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        let source = format!("{{\\C1;{}}}", cadcraft_doc::mtext_literal("α {{Site}} {{Custom}} {{Missing}}"));
+        let t = serde_json::from_value(json!({"insert":[0,0,0],"height":3,"contents":source})).unwrap();
+        let handle = d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::MText(t)).unwrap();
+        let spec = FigureSpec::parse(br#"{"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","text":{"Custom":"C:\\notes {raw}"}}"#).unwrap();
+        let original = d.clone();
+        let mut qa = Vec::new();
+        native::prepare(&mut d, &spec, "Site {A}", "E", &mut qa).unwrap();
+        let expected = format!("{{\\C1;{}}}", cadcraft_doc::mtext_literal("α Site {A} C:\\notes {raw} {{Missing}}"));
+        assert!(matches!(&d.layout("Figure").unwrap().entities.get(handle).unwrap().kind, EntityKind::MText(t) if t.contents == expected));
+        assert_eq!(qa.len(), 1, "{qa:?}");
+        assert_eq!(qa[0].code, "unresolved_placeholder");
+        assert!(qa[0].subject.ends_with(": Missing"));
+        assert!(matches!(&original.layout("Figure").unwrap().entities.get(handle).unwrap().kind, EntityKind::MText(t) if t.contents == source));
+    }
+
+    #[test]
+    fn preparation_preserves_mtext_escape_boundaries_and_format_arguments() {
+        let site = "α {value} \\path\n{{Event}}";
+        let replacement = cadcraft_doc::mtext_literal(site);
+        let cases = [
+            (r"\{\{Missing\fArial\}\}\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\{{\{{Missing\fArial\}}\}}\{{\{{Site\}}\}};{replacement}"), 1),
+            (r"\f{{Missing;}}\{\{Site\}\}".to_string(), format!(r"\f{{{{Missing;}}}}{replacement}"), 1),
+            (r"\{\{unfinished {{Event}}".to_string(), r"\{\{unfinished E".to_string(), 0),
+            (r"\{\{Site\}\}/{{Event}}".to_string(), format!("{replacement}/E"), 0),
+            (r"{\C1;\{\{Site\}\}}".to_string(), format!("{{\\C1;{replacement}}}"), 0),
+            (r"\\{\{Site\}\}".to_string(), r"\\{\{Site\}\}".to_string(), 0),
+            (r"\\\{\{Site\}\}".to_string(), format!(r"\\{replacement}"), 0),
+            (r"\{\{Site\\}\}".to_string(), r"\{\{Site\\}\}".to_string(), 0),
+            (r"\{\{Missing\}\}".to_string(), r"\{\{Missing\}\}".to_string(), 1),
+            (r"\{\{Site".to_string(), r"\{\{Site".to_string(), 0),
+            (r"\fName\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\fName\{{\{{Site\}}\}};{replacement}"), 0),
+            (r"\S1\;\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\S1\;\{{\{{Site\}}\}};{replacement}"), 0),
+            (r"\f{{Event}};\{\{Site\}\}".to_string(), format!(r"\fE;{replacement}"), 0),
+            (cadcraft_doc::mtext_literal("{{K\\Key}} {{é}} {{New\nLine}}"), "backslash unicode newline".to_string(), 0),
+        ];
+        for (source, expected, warnings) in cases {
+            let mut d = Drawing::new_metric();
+            d.layouts.push(Layout::new("Figure", 1));
+            let t = serde_json::from_value(json!({"insert":[0,0,0],"height":3,"contents":source})).unwrap();
+            let handle = d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::MText(t)).unwrap();
+            let spec = FigureSpec::parse(&serde_json::to_vec(&json!({"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","text":{"K\\Key":"backslash","é":"unicode","New\nLine":"newline"}})).unwrap()).unwrap();
+            let mut qa = Vec::new();
+            native::prepare(&mut d, &spec, site, "E", &mut qa).unwrap();
+            let EntityKind::MText(actual) = &d.layout("Figure").unwrap().entities.get(handle).unwrap().kind else {
+                panic!("expected MTEXT");
+            };
+            assert_eq!(actual.contents, expected, "source: {source:?}");
+            assert_eq!(qa.len(), warnings, "source: {source:?}; QA: {qa:?}");
+        }
+    }
+
+    #[test]
+    fn preparation_thaws_visible_layers_in_each_requested_layout_viewport() {
+        let mut d = Drawing::new_metric();
+        let mut visible = Layer::new("Visible");
+        visible.on = false;
+        visible.frozen = true;
+        d.layers.push(visible);
+        d.layers.push(Layer::new("KeepFrozen"));
+        d.layouts.push(Layout::new("Figure", 1));
+        d.layouts.push(Layout::new("Other", 2));
+        for (layout, id, width) in [("Figure", 1, 1000.), ("Figure", 2, 10.), ("Figure", 3, 100.), ("Other", 2, 40.)] {
+            d.add(
+                &Space::Paper(layout.into()),
+                Default::default(),
+                EntityKind::Viewport(Viewport {
+                    id,
+                    width,
+                    height: 10.,
+                    frozen_layers: vec!["vIsIbLe".into(), "KeepFrozen".into()],
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+        let original = d.clone();
+        let spec = FigureSpec::parse(br#"{"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","visible_layers":["VISIBLE"]}"#).unwrap();
+        native::prepare(&mut d, &spec, "S", "E", &mut Vec::new()).unwrap();
+        assert!(d.layer("Visible").unwrap().on);
+        assert!(!d.layer("Visible").unwrap().frozen);
+        for e in d.layout("Figure").unwrap().entities.iter() {
+            let EntityKind::Viewport(v) = &e.kind else {
+                panic!("expected viewport");
+            };
+            if v.id == 1 {
+                assert_eq!(original.layout("Figure").unwrap().entities.get(e.handle), Some(e));
+                continue;
+            }
+            assert_eq!(v.frozen_layers, ["KeepFrozen"]);
+            let EntityKind::Viewport(before) = &original.layout("Figure").unwrap().entities.get(e.handle).unwrap().kind else {
+                panic!("expected viewport");
+            };
+            let mut expected = before.clone();
+            expected.frozen_layers = vec!["KeepFrozen".into()];
+            assert_eq!(v, &expected);
+        }
+        assert_eq!(d.layout("Other"), original.layout("Other"));
+        for e in original.layout("Figure").unwrap().entities.iter() {
+            assert!(matches!(&e.kind, EntityKind::Viewport(v) if v.frozen_layers.len() == 2));
+        }
+    }
+
+    #[test]
     fn failed_second_publish_removes_first_output_and_success_receipt() {
         file::set_io(file::IoHooks {
             read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
@@ -394,32 +500,120 @@ pub(super) mod native {
         }
         Err("output_limit: no available versioned name".into())
     }
+    // Escaped braces are literal MTEXT characters, not formatting groups. Scan escape
+    // pairs at both delimiters so a literal backslash cannot masquerade as a brace.
+    fn escaped_placeholder_end(value: &str) -> Option<usize> {
+        let mut at = 0;
+        while let Some(rest) = value.get(at..).filter(|s| !s.is_empty()) {
+            if rest.starts_with(r"\}\}") {
+                return Some(at);
+            }
+            let mut chars = rest.chars();
+            let first = chars.next()?;
+            at += first.len_utf8();
+            if first == '\\' {
+                at += chars.next().map_or(0, char::len_utf8);
+            }
+        }
+        None
+    }
+    fn literal_placeholder_key(value: &str) -> String {
+        let mut key = String::new();
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                key.push(c);
+            } else {
+                match chars.next() {
+                    Some('\\') => key.push('\\'),
+                    Some('P') => key.push('\n'),
+                    Some(c) => {
+                        key.push('\\');
+                        key.push(c);
+                    }
+                    None => key.push('\\'),
+                }
+            }
+        }
+        key
+    }
+    // Advance one source token, preserving whether we are inside an opaque formatting
+    // argument. Stacks escape semicolons; ordinary formatting arguments do not.
+    fn mtext_source_step(value: &str, argument: &mut Option<bool>) -> usize {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return 0;
+        };
+        let mut count = first.len_utf8();
+        if first == ';' && argument.is_some() {
+            *argument = None;
+        } else if first == '\\'
+            && *argument != Some(false)
+            && let Some(code) = chars.next()
+        {
+            count += code.len_utf8();
+            if argument.is_none() && matches!(code, 'f' | 'F' | 'H' | 'W' | 'Q' | 'T' | 'A' | 'C' | 'c' | 'p' | 'S') {
+                *argument = Some(code == 'S');
+            }
+        }
+        count
+    }
     fn substitute(value: &str, values: &BTreeMap<String, String>, qa: &mut Vec<Qa>, subject: &str, mtext: bool) -> Checked<String> {
         let mut out = String::new();
-        let mut rest = value;
-        while let Some(at) = rest.find("{{") {
-            let (head, tail) = rest.split_at(at);
-            out.push_str(head);
-            let Some(end) = tail.find("}}") else {
-                rest = tail;
-                break;
-            };
-            let key = tail.get(2..end).unwrap_or_default();
-            if let Some(v) = values.get(key) {
-                let replaced = if mtext { cadcraft_doc::mtext_literal(v) } else { v.clone() };
-                if out.len().saturating_add(replaced.len()) > 1 << 20 {
+        let mut at = 0;
+        let mut copied = 0;
+        // Formatting arguments are not literal text. Keep legacy raw placeholders there,
+        // but do not interpret escaped markers inside font/format/stack arguments.
+        let mut argument = None;
+        let mut escaped_possible = true;
+        while let Some(rest) = value.get(at..).filter(|s| !s.is_empty()) {
+            let escaped = mtext && escaped_possible && argument.is_none() && rest.starts_with(r"\{\{");
+            let raw = rest.starts_with("{{");
+            if raw || escaped {
+                let width = if escaped { 4 } else { 2 };
+                let body = rest.get(width..).unwrap_or_default();
+                let end = if escaped { escaped_placeholder_end(body) } else { body.find("}}") };
+                let Some(end) = end else {
+                    if raw {
+                        break;
+                    }
+                    // No escaped closer remains. Continue raw markers without repeatedly
+                    // scanning the same unterminated escaped suffix.
+                    escaped_possible = false;
+                    continue;
+                };
+                let key_source = body.get(..end).unwrap_or_default();
+                let key = if escaped { literal_placeholder_key(key_source) } else { key_source.to_owned() };
+                let consumed = width + end + width;
+                let prefix = value.get(copied..at).unwrap_or_default();
+                let replacement = values.get(&key).map(|v| if mtext { cadcraft_doc::mtext_literal(v) } else { v.clone() });
+                let original = rest.get(..consumed).unwrap_or_default();
+                let replaced = replacement.as_deref().unwrap_or(original);
+                if out.len().saturating_add(prefix.len()).saturating_add(replaced.len()) > 1 << 20 {
                     return Err("text_limit: expanded text exceeds 1 MiB".into());
                 }
-                out.push_str(&replaced);
-            } else {
-                if qa.len() >= 10_000 {
-                    return Err("qa_limit: too many QA records".into());
+                out.push_str(prefix);
+                out.push_str(replaced);
+                if replacement.is_none() {
+                    if qa.len() >= 10_000 {
+                        return Err("qa_limit: too many QA records".into());
+                    }
+                    qa.push(Qa::new(Severity::Warning, "unresolved_placeholder", format!("{subject}: {key}"), "Placeholder has no value"));
                 }
-                qa.push(Qa::new(Severity::Warning, "unresolved_placeholder", format!("{subject}: {key}"), "Placeholder has no value"));
-                out.push_str(tail.get(..end + 2).unwrap_or_default());
+                if mtext {
+                    let mut source = original;
+                    while !source.is_empty() {
+                        let count = mtext_source_step(source, &mut argument);
+                        source = source.get(count..).unwrap_or_default();
+                    }
+                }
+                at += consumed;
+                copied = at;
+                continue;
             }
-            rest = tail.get(end + 2..).unwrap_or_default();
+            at += if mtext { mtext_source_step(rest, &mut argument) } else { rest.chars().next().map_or(0, char::len_utf8) };
         }
+        let rest = value.get(copied..).unwrap_or_default();
         if out.len().saturating_add(rest.len()) > 1 << 20 {
             return Err("text_limit: expanded text exceeds 1 MiB".into());
         }
@@ -499,8 +693,9 @@ pub(super) mod native {
                         a.text.value = substitute(&a.text.value, &values, qa, &subject, false)?;
                     }
                 }
-                EntityKind::Viewport(v) if Some(handle) == selected => {
-                    if let Some(b) = bounds.filter(|b| !b.is_empty()) {
+                EntityKind::Viewport(v) if v.id != 1 => {
+                    v.frozen_layers.retain(|name| !spec.visible_layers.iter().any(|visible| visible.eq_ignore_ascii_case(name)));
+                    if let Some(b) = bounds.filter(|b| Some(handle) == selected && !b.is_empty()) {
                         let pad = 1. + 2. * spec.extent_buffer_pct / 100.;
                         let (_, w, h) = crate::View::twisted_box(b, v.view_twist());
                         let height = (h.max(w * v.height / v.width) * pad).max(1e-9);
