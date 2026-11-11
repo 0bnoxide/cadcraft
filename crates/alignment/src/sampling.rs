@@ -1,9 +1,11 @@
 use crate::geometry::{cross, dot, sub};
 use crate::{
     Alignment, Element, Kind, MAX_POINTS, Result, error,
-    profile::{GroundProfile, Sample},
+    profile::{GroundProfile, Sample, subdivision_station},
 };
 use std::{collections::BTreeSet, f64::consts::PI};
+mod index;
+use index::TriangleIndex;
 type Bounds = [f64; 4];
 struct Triangle {
     xy: [[f64; 2]; 3],
@@ -72,7 +74,7 @@ fn element_bounds(e: &Element) -> Bounds {
 }
 fn spend(budget: &mut usize) -> Result<()> {
     if *budget == 0 {
-        return Err(error("NUMERICAL_LIMIT", "TIN crossing work exceeds 5000000 evaluations"));
+        return Err(error("NUMERICAL_LIMIT", "TIN crossing/location work exceeds 5000000 evaluations"));
     }
     *budget -= 1;
     Ok(())
@@ -170,9 +172,10 @@ pub fn sample(a: &Alignment, vertices: &[[f64; 3]], triangles: &[[u32; 3]], tole
         return Err(error("INVALID_TIN", "finite vertices and 1..1000000 triangles required"));
     }
     let triangles = triangles.iter().map(|t| Triangle::new(vertices, *t)).collect::<Result<Vec<_>>>()?;
+    let index = TriangleIndex::new(&triangles)?;
     let mut profile = GroundProfile { name: "Ground".into(), segments: Vec::new() };
     let mut segment = Vec::new();
-    let mut station = a.start_station;
+    let mut distance = 0.;
     let mut budget = 5_000_000;
     let mut count = 0usize;
     for e in &a.elements {
@@ -209,10 +212,10 @@ pub fn sample(a: &Alignment, vertices: &[[f64; 3]], triangles: &[[u32; 3]], tole
         for pair in cuts.windows(2) {
             let [lo, hi] = pair else { continue };
             let mid = e.pose((lo + hi) / 2.).point;
-            let triangle = candidates.iter().find(|t| t.contains(mid));
+            let triangle = index.locate(&triangles, mid, &mut budget)?;
             covered.push(triangle.is_some());
             if let Some(t) = triangle {
-                append_interval(&mut segment, &mut count, e, t, (*lo, *hi), station, tolerance)?;
+                append_interval(&mut segment, &mut count, e, t, (*lo, *hi), (a.start_station, distance), tolerance)?;
             } else if !segment.is_empty() {
                 profile.segments.push(std::mem::take(&mut segment));
             }
@@ -227,15 +230,15 @@ pub fn sample(a: &Alignment, vertices: &[[f64; 3]], triangles: &[[u32; 3]], tole
                 continue;
             }
             let point = e.pose(cut).point;
-            if let Some(t) = candidates.iter().find(|t| t.contains(point)) {
+            if let Some(t) = index.locate(&triangles, point, &mut budget)? {
                 if count >= MAX_POINTS {
                     return Err(error("POINT_LIMIT", "too many contact samples"));
                 }
                 count += 1;
-                profile.segments.push(vec![Sample { station: station + cut, elevation: t.z(point) }]);
+                profile.segments.push(vec![Sample { station: a.start_station + (distance + cut), elevation: t.z(point) }]);
             }
         }
-        station += e.length;
+        distance += e.length;
     }
     if !segment.is_empty() {
         profile.segments.push(segment);
@@ -268,18 +271,20 @@ fn append_interval(
     e: &Element,
     t: &Triangle,
     span: (f64, f64),
-    station: f64,
+    station: (f64, f64),
     tolerance: f64,
 ) -> Result<()> {
     let (lo, hi) = span;
+    let (start_station, distance_base) = station;
     let bound = t.gradient[0].hypot(t.gradient[1]) * e.max_curvature();
     let n = if bound == 0. { 1. } else { ((hi - lo) / (8. * tolerance / bound).sqrt()).ceil().max(1.) };
     if !n.is_finite() || n > MAX_POINTS as f64 || count.saturating_add(n as usize + 1) > MAX_POINTS {
         return Err(error("POINT_LIMIT", "ground profile exceeds 100000 samples"));
     }
     for i in 0..=(n as usize) {
-        let distance = lo + (hi - lo) * (i as f64) / n;
-        let s = station + distance;
+        let distance = subdivision_station(lo, hi, i, n as usize);
+        // Add the station origin once, matching the alignment's cumulative-distance bounds.
+        let s = start_station + (distance_base + distance);
         let elevation = t.z(e.pose(distance).point);
         if !elevation.is_finite() {
             return Err(error("INVALID_TIN", "sample elevation overflow"));
@@ -302,5 +307,24 @@ mod tests {
         // Unit-circle x=1/2 crosses at y=sqrt(3)/2, just beyond this edge.
         let end = 3f64.sqrt() / 2. - 1e-11;
         assert!(crossings(&e, [0.5, -0.2], [0.5, end], &mut 10000).unwrap().is_empty());
+    }
+
+    #[test]
+    fn triangle_location_work_is_bounded_on_a_long_strip() {
+        let vertices: Vec<_> = (0..=8000).flat_map(|x| [[f64::from(x), 0., 0.], [f64::from(x), 1., 0.]]).collect();
+        let triangles: Vec<_> = (0..8000u32)
+            .flat_map(|x| [[2 * x, 2 * x + 2, 2 * x + 3], [2 * x, 2 * x + 3, 2 * x + 1]])
+            .map(|ids| Triangle::new(&vertices, ids).unwrap())
+            .collect();
+        let index = TriangleIndex::new(&triangles).unwrap();
+        let mut budget = 1_000_000;
+        for x in 0..8000 {
+            let found = index.locate(&triangles, [f64::from(x) + 0.75, 0.25], &mut budget).unwrap().unwrap();
+            assert!(std::ptr::eq(found, &triangles[2 * x as usize]));
+        }
+        // Shared edges keep the original lowest-triangle-index rule, and exhaustion refuses.
+        let found = index.locate(&triangles, [0.5, 0.5], &mut budget).unwrap().unwrap();
+        assert!(std::ptr::eq(found, &triangles[0]));
+        assert_eq!(index.locate(&triangles, [0.5, 0.5], &mut 0).err().unwrap().code, "NUMERICAL_LIMIT");
     }
 }

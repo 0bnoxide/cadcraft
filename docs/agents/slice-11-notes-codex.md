@@ -119,6 +119,7 @@ The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementa
 - Hosted Linux/Windows CI passed at the published horizontal head. Native UI and independent full
   PR review remain open; the reviewer reported a provider quota limit until 02:10 Denver.
 - Follow-ups outside this PR: [rounded input coordinates #69](https://github.com/0bnoxide/cadcraft/issues/69),
+  [angle points and MOVE #70](https://github.com/0bnoxide/cadcraft/issues/70),
   [COPY exact definitions #72](https://github.com/0bnoxide/cadcraft/issues/72), and
   [unusual clothoids without a usable LandXML PI #73](https://github.com/0bnoxide/cadcraft/issues/73).
 
@@ -160,7 +161,7 @@ The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementa
 - CLI profile smoke: TIN -> sample -> design -> view, DWG reopen, LandXML reimport/view and public
   XSD validation pass on the final code. Profile PNG inspected with the headless renderer: the
   red design crest, green ground line, grid and all station/elevation labels are visible.
-- Final vertical `cargo xtask ci`: all seven gates passed with the same private outer driver,
+- Initial vertical `cargo xtask ci`: all seven gates passed with the same private outer driver,
   two build/test workers and host access. Nextest `3b6a2a36-0dcf-4d2f-9c84-fb9e50ef2d72`:
   4157 passed, 28 skipped, followed by passing doc tests, i18n, assets, layers and WASM.
   Hosted vertical checks and independent full reviews remain pending at this note revision.
@@ -170,3 +171,31 @@ The CLI displays `send_agent_prompt` as **Send message**: 12 outbound implementa
   the reviewer was told to resolve the latest PR heads after this notes-only follow-up. Both
   posted verdicts, the review notes PR, any resulting corrections and final hosted gates remain
   required. The worktree is retained for those corrections. Nothing has merged.
+
+## Vertical review corrections
+
+- [Exact tessellation endpoints](https://github.com/0bnoxide/cadcraft/pull/78#discussion_r4534731387):
+  reproduced the valid 102.51-unit design failing with OUT_OF_RANGE. The same arithmetic also
+  failed ground sampling on a radius-100 arc with five subdivisions. Both regressions failed
+  before the correction. A shared helper now retains each exact interval endpoint.
+  A nonzero-origin two-element ground regression also failed because `(start + L1) + L2`
+  differed from `start + (L1 + L2)`; cumulative distance is now formed before adding the origin,
+  matching the horizontal station bounds and keeping shared endpoints identical.
+- [Triangle-location work](https://github.com/0bnoxide/cadcraft/pull/78#discussion_r4534731389):
+  replaced the repeated full triangle scan with a median-split bounding-box index, built once.
+  Construction depth is capped at 20. Every visited lookup node and tested triangle spends
+  from the same 5000000 crossing/location budget; exhaustion returns NUMERICAL_LIMIT.
+  Lowest original triangle index still wins shared-edge ties. A 16000-triangle strip regression
+  performs 8000 lookups within 1000000 work units; the instrumented old linear scan exhausted
+  that allowance. Zero-budget refusal and shared-edge tie behavior are tested. The existing
+  200000-triangle/50-element sample still passes (focused test group about 0.07s locally).
+- Focused alignment tests and clippy pass after both corrections. Superseded full CI runs were
+  stopped as the ground regressions exposed related occurrences. The replacement gate passed
+  all seven steps on the complete correction: nextest `8188e458-8177-496f-aa26-334bcc2f3e08`,
+  4160 passed / 28 skipped, followed by doc tests, i18n, assets, layers and WASM.
+- One Paseo continuation (`52c56f37`, maximum one run) is scheduled for 2026-11-11 02:15
+  America/Denver to retry the required full reviews after the reported 02:10 quota reset.
+- CLI checks on the corrected binary pass for the 102.51-unit design creation/view and the
+  radius-100 ground sampling/view. The full profile smoke also passes again, including DWG
+  reopen, LandXML reimport, public XSD validation and undo. A single-contact PntList2D also
+  validates against the public XSD.

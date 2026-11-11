@@ -243,3 +243,36 @@ fn curves_may_abut_but_never_overlap_and_flat_curves_have_no_extremum() {
         assert!(p.validate(&route(500.)).is_err());
     }
 }
+
+#[test]
+fn design_tessellation_keeps_exact_interval_endpoints() {
+    let p = DesignProfile {
+        name: "roundoff".into(),
+        pvis: vec![
+            Pvi { station: 0., elevation: 0., curve_length: None },
+            Pvi { station: 51.255, elevation: 2., curve_length: Some(102.51) },
+            Pvi { station: 102.51, elevation: 0., curve_length: None },
+        ],
+    };
+    p.validate(&route(102.51)).unwrap();
+    let points = p.polyline(0.01).unwrap();
+    assert_eq!(points.first().unwrap().station, 0.);
+    assert_eq!(points.last().unwrap().station, 102.51);
+}
+
+#[test]
+fn ground_tessellation_keeps_exact_interval_endpoints() {
+    let mut a = route(102.51);
+    a.elements[0].kind = Kind::Arc { radius: 100., turn: Turn::Left };
+    // z=x gives |gradient|*k=.01; tolerance .6 needs five intervals. L*5/5 > L.
+    let ground = sampling::sample(&a, &[[-1000., -1000., -1000.], [3000., -1000., 3000.], [-1000., 3000., -1000.]], &[[0, 1, 2]], 0.6).unwrap();
+    assert_eq!(ground.segments[0].first().unwrap().station, 0.);
+    assert_eq!(ground.segments[0].last().unwrap().station, 102.51);
+    let mut a = route(0.2);
+    a.start_station = 1.;
+    a.elements[0].length = 0.1;
+    a.elements.push(Element { start: [0.1, 0.], direction: 0., length: 0.1, kind: Kind::Line });
+    let ground = sampling::sample(&a, &[[-1., -1., 0.], [3., -1., 0.], [-1., 3., 0.]], &[[0, 1, 2]], 0.01).unwrap();
+    assert_eq!(ground.segments.len(), 1);
+    assert_eq!(ground.segments[0].last().unwrap().station, a.start_station + a.length().unwrap());
+}

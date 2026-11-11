@@ -137,7 +137,7 @@ impl DesignProfile {
                 return Err(error("POINT_LIMIT", "design profile exceeds 100000 vertices"));
             }
             for i in 0..=(n as usize) {
-                let station = lo + (hi - lo) * (i as f64) / n;
+                let station = subdivision_station(*lo, *hi, i, n as usize);
                 if out.last().is_some_and(|p: &Sample| p.station == station) {
                     continue;
                 }
@@ -165,6 +165,16 @@ fn valid_name(name: &str) -> bool {
 }
 fn grade(a: &Pvi, b: &Pvi) -> f64 {
     (b.elevation - a.elevation) / (b.station - a.station)
+}
+pub(crate) fn subdivision_station(lo: f64, hi: f64, i: usize, count: usize) -> f64 {
+    // Multiplication/division can round an inclusive endpoint outside its interval.
+    if i == 0 {
+        lo
+    } else if i == count {
+        hi
+    } else {
+        lo + (hi - lo) * (i as f64) / (count as f64)
+    }
 }
 fn finite_vertical(elevation: f64, grade: f64) -> Result<Vertical> {
     if !elevation.is_finite() || !grade.is_finite() {
