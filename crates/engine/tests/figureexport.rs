@@ -104,8 +104,7 @@ fn exported_pdfs_contain_substituted_text() {
     let mut d = Drawing::new_metric();
     d.text_styles.push(cadcraft_doc::TextStyle { name: "Synthetic".into(), font: "cadcraft-figure-test.ttf".into(), ..Default::default() });
     d.layouts.push(Layout::new("Figure", 1));
-    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"style":"Synthetic","value":"{{Site}}{{Event}}{{FigureId}} {{Unknown}}"}))
-        .unwrap();
+    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"style":"Synthetic","value":"{{Site}}{{Event}}{{FigureId}}"})).unwrap();
     d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::Text(text)).unwrap();
     std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
     std::fs::write(root.join("figure.json"), br#"{"figure_id":"A","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
@@ -113,9 +112,6 @@ fn exported_pdfs_contain_substituted_text() {
     p["events"] = json!(["A", "B"]);
     let mut s = Session::new();
     let planned = s.execute("figureexport", &p).unwrap();
-    for job in planned["plan"]["jobs"].as_array().unwrap() {
-        assert!(job["qa"].as_array().unwrap().iter().any(|q| q["code"] == "unresolved_placeholder"), "{job}");
-    }
     p["action"] = json!("execute");
     p["approved_hash"] = planned["hash"].clone();
     let done = s.execute("figureexport", &p).unwrap();
@@ -123,16 +119,48 @@ fn exported_pdfs_contain_substituted_text() {
     for (name, expected) in [("A_A_A.pdf", "AAA"), ("A_B_A.pdf", "ABA"), ("B_A_A.pdf", "BAA"), ("B_B_A.pdf", "BBA")] {
         let pdf = pdf_read::read(&std::fs::read(root.join("out").join(name)).unwrap());
         let page = &pdf.pages[0];
+        // Only the fixture's A/B font may contribute text. PDF character codes are
+        // font-local, so combining ToUnicode maps from multiple fonts is invalid.
+        assert_eq!(page.fonts.len(), 1, "{name}: unexpected fallback font");
+        let font = &page.fonts[0];
+        assert_eq!(font.encoding.as_deref(), Some("Identity-H"), "{name}");
         let map: std::collections::BTreeMap<u32, String> =
-            page.fonts.iter().flat_map(|f| pdf_read::to_unicode_map(f.to_unicode.as_deref().unwrap_or(""))).collect();
-        let extracted: String = pdf_read::shown(&page.content_bytes)
-            .iter()
-            .flat_map(|codes| codes.as_chunks::<2>().0.iter())
-            .filter_map(|code| map.get(&(u32::from(code[0]) << 8 | u32::from(code[1]))))
-            .map(String::as_str)
-            .collect();
+            pdf_read::to_unicode_map(font.to_unicode.as_deref().expect("fixture font needs ToUnicode")).into_iter().collect();
+        let mut extracted = String::new();
+        let shown = pdf_read::shown(&page.content_bytes);
+        assert!(!shown.is_empty(), "{name}: no actual PDF text");
+        for codes in shown {
+            assert_eq!(codes.len() % 2, 0, "{name}: odd Identity-H text bytes");
+            for code in codes.as_chunks::<2>().0 {
+                let cid = u32::from(u16::from_be_bytes([code[0], code[1]]));
+                extracted.push_str(map.get(&cid).unwrap_or_else(|| panic!("{name}: unmapped CID {cid}")));
+            }
+        }
         assert_eq!(extracted, expected, "{name}");
     }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn planning_warns_for_unresolved_placeholder() {
+    let (root, p) = fixture();
+    let mut d = Drawing::new_metric();
+    d.layouts.push(Layout::new("Figure", 1));
+    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"value":"{{Site}}{{Unknown}}"})).unwrap();
+    d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::Text(text)).unwrap();
+    std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+    let planned = Session::new().execute("figureexport", &p).unwrap();
+    for job in planned["plan"]["jobs"].as_array().unwrap() {
+        assert!(
+            job["qa"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|q| q["code"] == "unresolved_placeholder" && q["subject"].as_str().is_some_and(|s| s.ends_with(": Unknown"))),
+            "{job}"
+        );
+    }
+    assert!(!root.join("out").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 
