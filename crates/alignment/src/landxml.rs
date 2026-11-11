@@ -471,15 +471,64 @@ fn export_element(out: &mut String, e: &Element) -> Result<()> {
                 return Err(error("UNREPRESENTABLE_SPIRAL", "parallel endpoint tangents have no finite LandXML PI"));
             }
             let t = cross(sub(end.point, e.start), b) / det;
-            if t <= 0. {
-                return Err(error("UNREPRESENTABLE_SPIRAL", "LandXML PI is behind the start tangent"));
+            let u = cross(sub(end.point, e.start), a) / det;
+            let pi = [e.start[0] + t * a[0], e.start[1] + t * a[1]];
+            if t <= 0. || u >= 0. || pi.iter().any(|v| !v.is_finite() || v.abs() > 1e9) || cross(b, sub(pi, end.point)).abs() > POSITION_TOLERANCE {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "no reliable finite forward LandXML PI"));
             }
-            xml_point(out, "PI", [e.start[0] + t * a[0], e.start[1] + t * a[1]])?;
+            xml_point(out, "PI", pi)?;
         }
         _ => {}
     }
     xml_point(out, "End", end.point)?;
     append(out, &format!("</{close}>"))
+}
+/// A full-turn clothoid has coincident endpoint bearings, so its endpoint
+/// tangents cannot supply the finite PI required by LandXML 1.2. Splitting
+/// the same linear-curvature law keeps the physical route and stations exact,
+/// though an importer will see a different element partition.
+fn export_spiral_parts(e: &Element) -> Result<(String, usize)> {
+    let Kind::Spiral { turn, radius_start, radius_end } = e.kind else {
+        return Err(error("UNREPRESENTABLE_SPIRAL", "only clothoids can be subdivided"));
+    };
+    let (k0, k1) = e.curvatures();
+    // Each piece turns by at most pi/2; for a monotone-turning clothoid this
+    // puts the intersection ahead of Start and behind End, never at infinity.
+    let count = (e.length * e.max_curvature() / FRAC_PI_2).ceil().max(2.) as usize;
+    if count > MAX_ELEMENTS {
+        return Err(error("ELEMENT_LIMIT", "spiral subdivision exceeds 4096 elements"));
+    }
+    let radius_at = |i: usize| -> Option<f64> {
+        if i == 0 {
+            radius_start
+        } else if i == count {
+            radius_end
+        } else {
+            let k = k0 + (k1 - k0) * (i as f64 / count as f64);
+            if k == 0. { None } else { Some(1. / k.abs()) }
+        }
+    };
+    let mut out = String::new();
+    for i in 0..count {
+        let start_distance = e.length * (i as f64 / count as f64);
+        let end_distance = if i + 1 == count { e.length } else { e.length * ((i + 1) as f64 / count as f64) };
+        let start = e.at(start_distance)?;
+        let piece = Element {
+            start: start.point,
+            direction: start.direction,
+            length: end_distance - start_distance,
+            kind: Kind::Spiral { radius_start: radius_at(i), radius_end: radius_at(i + 1), turn },
+        };
+        let expected_end = e.at(end_distance)?;
+        let actual_end = piece.at(piece.length)?;
+        if distance(expected_end.point, actual_end.point) > POSITION_TOLERANCE
+            || angle_delta(expected_end.direction, actual_end.direction) > DIRECTION_TOLERANCE
+        {
+            return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision exceeds geometric precision"));
+        }
+        export_element(&mut out, &piece)?;
+    }
+    Ok((out, count))
 }
 pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
     if alignments.is_empty() || alignments.len() > 128 {
@@ -487,16 +536,13 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
     }
     let mut names = BTreeSet::new();
     let mut out = String::new();
+    let mut has_spiral = false;
     let family = if unit == Unit::Meter { "Metric" } else { "Imperial" };
     // Fixed epoch is deterministic; no hand-written calendar conversion or clock is needed.
     write!(&mut out,"<?xml version=\"1.0\" encoding=\"UTF-8\"?><LandXML xmlns=\"{NS}\" version=\"1.2\" date=\"1970-01-01\" time=\"00:00:00\"><Units><{family} linearUnit=\"{}\" areaUnit=\"{}\" volumeUnit=\"{}\" temperatureUnit=\"{}\" pressureUnit=\"{}\" angularUnit=\"decimal degrees\" directionUnit=\"decimal degrees\"/></Units><Alignments name=\"Alignments\">",unit.name(),if unit==Unit::Meter{"squareMeter"}else{"squareFoot"},if unit==Unit::Meter{"cubicMeter"}else{"cubicFeet"},if unit==Unit::Meter{"celsius"}else{"fahrenheit"},if unit==Unit::Meter{"milliBars"}else{"inHG"}).map_err(|_|error("XML_LIMIT","formatting failed"))?;
     let mut total = 0usize;
     for a in alignments {
         a.checked()?;
-        total += a.elements.len();
-        if total > MAX_ELEMENTS {
-            return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
-        }
         if !names.insert(&a.name) {
             return Err(error("DUPLICATE_NAME", "LandXML alignment names must be unique"));
         }
@@ -505,10 +551,34 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
             &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, a.length()?),
         )?;
         for e in &a.elements {
-            export_element(&mut out, e)?;
+            has_spiral |= matches!(e.kind, Kind::Spiral { .. });
+            let mut encoded = String::new();
+            let count = match export_element(&mut encoded, e) {
+                Ok(()) => 1,
+                Err(err) if err.code == "UNREPRESENTABLE_SPIRAL" => {
+                    let (parts, count) = export_spiral_parts(e)?;
+                    encoded = parts;
+                    count
+                }
+                Err(err) => return Err(err),
+            };
+            total = total.checked_add(count).ok_or_else(|| error("ELEMENT_LIMIT", "file exceeds 4096 elements"))?;
+            if total > MAX_ELEMENTS {
+                return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
+            }
+            append(&mut out, &encoded)?;
         }
         append(&mut out, "</CoordGeom></Alignment>")?;
     }
     append(&mut out, "</Alignments></LandXML>")?;
+    // PI coordinates lose angular precision at large map coordinates. A
+    // schema-valid file is not an exchange if its PI-derived bearings or
+    // joints fail our import contract, so refuse rather than return it.
+    if has_spiral {
+        let checked = import(out.as_bytes(), unit)?;
+        if let Some(f) = checked.refusals.first() {
+            return Err(error("UNREPRESENTABLE_SPIRAL", format!("exported spiral cannot be reimported: {}: {}", f.code, f.reason)));
+        }
+    }
     Ok(out)
 }

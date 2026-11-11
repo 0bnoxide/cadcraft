@@ -181,3 +181,185 @@ fn arc_radius_roundoff_keeps_geometry_and_radius_checks_strict() {
         }
     }
 }
+
+#[test]
+fn full_turn_bounded_clothoid_exports_as_exact_forward_pi_spirals() {
+    let length = 4. * std::f64::consts::PI / (1. / 100. + 1. / 200.);
+    let original = Alignment {
+        name: "full turn".into(),
+        start_station: 17.,
+        format: StationFormat::Thousands,
+        elements: vec![Element {
+            start: [1000., -2000.],
+            direction: 0.3,
+            length,
+            kind: Kind::Spiral { radius_start: Some(100.), radius_end: Some(200.), turn: Turn::Left },
+        }],
+    };
+    let xml = landxml::export(std::slice::from_ref(&original), Unit::Meter).unwrap();
+    let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+    assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+    let restored = &imported.alignments[0];
+    assert!(restored.elements.len() > 1);
+    assert!(restored.elements.iter().all(|e| matches!(e.kind, Kind::Spiral { .. })));
+    for fraction in [0., 0.01, 0.1, 0.25, 0.5, 0.8, 0.99, 1.] {
+        let station = 17. + fraction * length;
+        let expected = original.at(station, 0.).unwrap();
+        let actual = restored.at(station, 0.).unwrap();
+        assert!((expected.point[0] - actual.point[0]).hypot(expected.point[1] - actual.point[1]) < 1e-6, "{station}");
+        assert!((expected.direction - actual.direction).sin().abs() < 1e-8, "{station}");
+    }
+    // Independent high-precision quadrature of cos/sin(0.3 + k0*s +
+    // (k1-k0)*s²/(2*length)), not the implementation's series integrator.
+    for (fraction, north, east) in [
+        (0.25, -1828.8508430972907, 1046.5732763594276),
+        (0.5, -1828.0548440677378, 861.514779309197),
+        (0.8, -2048.2956827670844, 891.2199714791577),
+        (1., -2071.91392660059, 1051.1680521684968),
+    ] {
+        let actual = restored.at(17. + fraction * length, 0.).unwrap();
+        assert!((actual.point[0] - east).hypot(actual.point[1] - north) < 1e-6, "{fraction}");
+    }
+}
+
+#[test]
+fn divided_spirals_preserve_entrance_exit_turn_and_endpoint_curvature() {
+    for (radius_start, radius_end, turn) in [(None, Some(100.), Turn::Left), (Some(100.), None, Turn::Right), (Some(100.), Some(200.), Turn::Right)] {
+        let k0 = radius_start.map_or(0., |r| 1. / r);
+        let k1 = radius_end.map_or(0., |r| 1. / r);
+        let length = 4. * std::f64::consts::PI / (k0 + k1);
+        let e = Element { start: [25., -40.], direction: 1.2, length, kind: Kind::Spiral { radius_start, radius_end, turn } };
+        let a = Alignment {
+            name: format!("{radius_start:?}-{radius_end:?}-{turn:?}"),
+            start_station: 13.,
+            format: StationFormat::Thousands,
+            elements: vec![e],
+        };
+        let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
+        let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        assert!(result.refusals.is_empty(), "{:?}", result.refusals);
+        let b = &result.alignments[0];
+        assert!(b.elements.len() > 1);
+        assert!(matches!(b.elements.first().unwrap().kind, Kind::Spiral { radius_start: r, turn: t, .. } if r == radius_start && t == turn));
+        assert!(matches!(b.elements.last().unwrap().kind, Kind::Spiral { radius_end: r, turn: t, .. } if r == radius_end && t == turn));
+        for fraction in [0., 0.03, 0.5, 0.97, 1.] {
+            let station = 13. + length * fraction;
+            let expected = a.at(station, 0.).unwrap();
+            let actual = b.at(station, 0.).unwrap();
+            assert!((expected.point[0] - actual.point[0]).hypot(expected.point[1] - actual.point[1]) < 1e-6);
+            assert!((expected.direction - actual.direction).sin().abs() < 1e-8);
+        }
+    }
+}
+
+#[test]
+fn subdivision_respects_whole_file_element_limit() {
+    let length = 4. * std::f64::consts::PI / (1. / 100. + 1. / 200.);
+    let spiral =
+        Element { start: [0., 0.], direction: 0., length, kind: Kind::Spiral { radius_start: Some(100.), radius_end: Some(200.), turn: Turn::Left } };
+    let end = spiral.at(length).unwrap();
+    let mut elements = vec![spiral];
+    for i in 0..4095 {
+        elements.push(Element { start: [end.point[0] + i as f64, end.point[1]], direction: 0., length: 1., kind: Kind::Line });
+    }
+    // The first line must connect to the full-turn spiral and all lines to each other.
+    let a = Alignment { name: "too many after subdivision".into(), start_station: 0., format: StationFormat::Thousands, elements };
+    assert_eq!(a.validate().unwrap().len(), 0);
+    assert_eq!(landxml::export(&[a], Unit::Meter).unwrap_err().code, "ELEMENT_LIMIT");
+}
+
+#[test]
+fn nearly_parallel_tangents_without_reliable_pi_are_refused() {
+    let a = Alignment {
+        name: "tiny sweep".into(),
+        start_station: 0.,
+        format: StationFormat::Thousands,
+        elements: vec![Element {
+            start: [0., 0.],
+            direction: 0.,
+            length: 0.001,
+            kind: Kind::Spiral { radius_start: Some(1e12), radius_end: Some(5e11), turn: Turn::Left },
+        }],
+    };
+    assert_eq!(landxml::export(&[a], Unit::Meter).unwrap_err().code, "UNREPRESENTABLE_SPIRAL");
+}
+
+#[test]
+fn nearly_full_turn_spiral_avoids_an_ill_conditioned_pi() {
+    let length = (1. + 1e-12) * 4. * std::f64::consts::PI / (1. / 100. + 1. / 200.);
+    let a = Alignment {
+        name: "nearly full turn".into(),
+        start_station: 100.,
+        format: StationFormat::Thousands,
+        elements: vec![Element {
+            start: [1000., -2000.],
+            direction: 0.3,
+            length,
+            kind: Kind::Spiral { radius_start: Some(100.), radius_end: Some(200.), turn: Turn::Left },
+        }],
+    };
+    let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
+    let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+    assert!(result.refusals.is_empty(), "{:?}", result.refusals);
+    let b = &result.alignments[0];
+    assert!(b.elements.len() > 1);
+    for fraction in [0., 0.5, 1.] {
+        let station = 100. + fraction * length;
+        let expected = a.at(station, 0.).unwrap();
+        let actual = b.at(station, 0.).unwrap();
+        assert!((expected.point[0] - actual.point[0]).hypot(expected.point[1] - actual.point[1]) < 1e-6);
+    }
+}
+
+#[test]
+fn maximum_allowed_turn_is_exchanged_without_approximation() {
+    let length = 32. * std::f64::consts::PI / (1. / 100. + 1. / 200.);
+    let a = Alignment {
+        name: "eight turns".into(),
+        start_station: -50.,
+        format: StationFormat::Thousands,
+        elements: vec![Element {
+            start: [234.5, -678.25],
+            direction: 2.7,
+            length,
+            kind: Kind::Spiral { radius_start: Some(100.), radius_end: Some(200.), turn: Turn::Left },
+        }],
+    };
+    let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
+    let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+    assert!(result.refusals.is_empty(), "{:?}", result.refusals);
+    let b = &result.alignments[0];
+    assert!(b.elements.len() > 32);
+    for fraction in [0., 0.01, 0.125, 0.249, 0.5, 0.751, 0.99, 1.] {
+        let station = -50. + fraction * length;
+        let expected = a.at(station, 0.).unwrap();
+        let actual = b.at(station, 0.).unwrap();
+        assert!((expected.point[0] - actual.point[0]).hypot(expected.point[1] - actual.point[1]) < 1e-6, "{fraction}");
+        assert!((expected.direction - actual.direction).sin().abs() < 1e-8, "{fraction}");
+    }
+}
+
+#[test]
+fn high_coordinate_spiral_export_does_not_claim_a_failed_exchange() {
+    for (radius_start, radius_end, length) in [(0.1, 0.2, 4. * std::f64::consts::PI / 15.), (1., 2., 4. * std::f64::consts::PI / 1.5)] {
+        let a = Alignment {
+            name: "high coordinate".into(),
+            start_station: 0.,
+            format: StationFormat::Thousands,
+            elements: vec![Element {
+                start: [1e8, 1e8],
+                direction: 0.3,
+                length,
+                kind: Kind::Spiral { radius_start: Some(radius_start), radius_end: Some(radius_end), turn: Turn::Left },
+            }],
+        };
+        match landxml::export(&[a], Unit::Meter) {
+            Ok(xml) => {
+                let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+                assert!(result.refusals.is_empty(), "{radius_start}: {:?}", result.refusals);
+                assert_eq!(result.alignments.len(), 1);
+            }
+            Err(err) => assert_eq!(err.code, "UNREPRESENTABLE_SPIRAL"),
+        }
+    }
+}
