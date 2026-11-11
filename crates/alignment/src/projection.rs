@@ -9,12 +9,14 @@ impl Alignment {
             return Err(error("OUT_OF_RANGE", "projection point outside finite XY range"));
         }
         let mut best: Option<(f64, f64, usize)> = None;
-        let mut station = self.start_station;
+        // Accumulate local lengths before adding the station origin so the last
+        // candidate has the same representable end station as Alignment::at.
+        let mut distance_along = 0.;
         let mut budget = 200_000usize;
         for (index, e) in self.elements.iter().enumerate() {
             let mut consider = |s: f64| {
                 let d = distance(e.pose(s).point, point);
-                let st = station + s;
+                let st = self.start_station + (distance_along + s);
                 if best.is_none_or(|(bd, bs, _)| d < bd - 1e-9 || ((d - bd).abs() <= 1e-9 && st < bs)) {
                     best = Some((d, st, index));
                 }
@@ -28,12 +30,14 @@ impl Alignment {
                 }
                 Kind::Arc { radius, turn } => {
                     let d = e.direction.rem_euclid(TAU);
-                    let center = [e.start[0] - turn.sign() * radius * d.sin(), e.start[1] + turn.sign() * radius * d.cos()];
-                    let r = sub(point, center);
-                    if r[0] != 0. || r[1] != 0. {
-                        let initial = (e.start[1] - center[1]).atan2(e.start[0] - center[0]);
-                        let target = r[1].atan2(r[0]);
-                        let delta = (turn.sign() * (target - initial)).rem_euclid(TAU);
+                    // Measure from the start tangent, not the difference of two
+                    // global polar angles: subtraction loses shallow-arc sweeps.
+                    let tangent = [d.cos(), d.sin()];
+                    let relative = sub(point, e.start);
+                    let along = dot(relative, tangent);
+                    let radial = radius - turn.sign() * cross(tangent, relative);
+                    if along != 0. || radial != 0. {
+                        let delta = along.atan2(radial).rem_euclid(TAU);
                         let s = delta * radius;
                         if s <= e.length {
                             consider(s);
@@ -56,7 +60,7 @@ impl Alignment {
                     let t = if ab2 > 0. { (dot(sub(point, a), ab) / ab2).clamp(0., 1.) } else { 0. };
                     let s = lo + t * (hi - lo);
                     let d = distance(e.pose(s).point, point);
-                    let st = station + s;
+                    let st = self.start_station + (distance_along + s);
                     if best.is_none_or(|(bd, bs, _)| d < bd - 1e-9 || ((d - bd).abs() <= 1e-9 && st < bs)) {
                         best = Some((d, st, index));
                     }
@@ -71,7 +75,7 @@ impl Alignment {
                     intervals.push((lo, mid));
                 }
             }
-            station += e.length;
+            distance_along += e.length;
         }
         let (distance, station, index) = best.ok_or_else(|| error("INVALID_ALIGNMENT", "empty alignment"))?;
         let pose = self.at(station, 0.)?;

@@ -148,11 +148,12 @@ fn report(s: &mut Session, p: &Value) -> Result<Value> {
         let point = super::subsurface_draw::point(&json!({"point":v}), "point", None, CMD)?;
         projections.push(a.project(point).map_err(|e| bad(CMD, e.to_string()))?);
     }
-    let mut station = a.start_station;
+    // Use the same local length sum as station queries, adding the origin only once.
+    let mut distance_along = 0.;
     let mut elements = Vec::new();
     for (index, e) in a.elements.iter().enumerate() {
-        elements.push(json!({"index":index,"start_station":station,"end_station":station+e.length,"element":e,"end":e.at(e.length).map_err(|e|bad(CMD,e.to_string()))?}));
-        station += e.length;
+        elements.push(json!({"index":index,"start_station":a.start_station+distance_along,"end_station":a.start_station+(distance_along+e.length),"element":e,"end":e.at(e.length).map_err(|e|bad(CMD,e.to_string()))?}));
+        distance_along += e.length;
     }
     Ok(
         json!({"handle":h.hex(),"definition":a,"length":a.length().map_err(|e|bad(CMD,e.to_string()))?,"elements":elements,"points_at_stations":points,"projections":projections}),
@@ -241,6 +242,27 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
 mod tests {
     use crate::Session;
     use serde_json::json;
+    #[test]
+    fn reported_endpoint_is_usable_as_an_exact_station_query() {
+        let mut s = Session::new();
+        let created = s
+            .execute(
+                "alignmentcreate",
+                &json!({
+                    "name":"fractional", "start_station":1., "elements":[
+                        {"start":[0.,0.],"direction":0.,"length":0.1,"type":"line"},
+                        {"start":[0.1,0.],"direction":0.,"length":0.1,"type":"line"}
+                    ]
+                }),
+            )
+            .unwrap();
+        let h = created["handle"].as_str().unwrap();
+        let report = s.execute("alignmentreport", &json!({"alignment":h})).unwrap();
+        let end = report["elements"][1]["end_station"].as_f64().unwrap();
+        assert_eq!(end, 1.2);
+        let queried = s.execute("alignmentreport", &json!({"alignment":h,"stations":[end]})).unwrap();
+        assert_eq!(queried["points_at_stations"][0]["point"], json!([0.2, 0.]));
+    }
     #[test]
     fn selected_polyline_arc_copy_and_move_are_explicit() {
         use cadcraft_doc::{EntityKind, LwPolyline};

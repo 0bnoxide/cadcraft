@@ -276,3 +276,49 @@ fn ground_tessellation_keeps_exact_interval_endpoints() {
     assert_eq!(ground.segments.len(), 1);
     assert_eq!(ground.segments[0].last().unwrap().station, a.start_station + a.length().unwrap());
 }
+
+#[test]
+fn arc_exchange_preserves_exact_terminal_profile_stations() {
+    use cadcraft_alignment::{
+        landxml::{self, Route, Unit},
+        profile::{GroundProfile, Profiles, Sample},
+    };
+    use std::f64::consts::{FRAC_PI_2, PI};
+    let cases = [1., 1000.]
+        .into_iter()
+        .flat_map(|radius| [0.1, FRAC_PI_2, PI, 1.5 * PI].into_iter().map(move |sweep| (radius, radius * sweep)))
+        .chain([(1e12, 1.), (1e12, 10_000.)]);
+    for (radius, length) in cases {
+        for direction in [FRAC_PI_2, 0.1, 0.4, 1., 5.9] {
+            for turn in [Turn::Left, Turn::Right] {
+                let mut a = route(length);
+                a.elements[0].direction = direction;
+                a.elements[0].kind = Kind::Arc { radius, turn };
+                let profiles = Profiles {
+                    design: Some(DesignProfile {
+                        name: "design".into(),
+                        pvis: vec![
+                            Pvi { station: 0., elevation: 0., curve_length: None },
+                            Pvi { station: length, elevation: 1., curve_length: None },
+                        ],
+                    }),
+                    ground: Some(GroundProfile {
+                        name: "ground".into(),
+                        segments: vec![vec![Sample { station: 0., elevation: 0. }, Sample { station: length, elevation: 1. }]],
+                    }),
+                };
+                let xml = landxml::export_routes(&[Route { definition: a, profiles: profiles.clone() }], Unit::Meter).unwrap();
+                let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+                assert!(imported.refusals.is_empty(), "{radius} {length} {direction} {turn:?}: {:?}", imported.refusals);
+                let b = &imported.alignments[0];
+                assert_eq!(b.definition.length().unwrap(), length);
+                assert_eq!(b.profiles, profiles);
+                b.definition.at(length, 0.).unwrap();
+                // Import must not solve roundoff by broadening strict profile bounds.
+                let mut outside = b.profiles.design.clone().unwrap();
+                outside.pvis[1].station = length.next_up();
+                assert!(outside.validate(&b.definition).is_err());
+            }
+        }
+    }
+}

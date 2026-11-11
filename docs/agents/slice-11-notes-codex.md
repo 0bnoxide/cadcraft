@@ -1,9 +1,9 @@
 # Slice 11 implementation notes
 
 Base: `cf49a049` (`main`). Tracking: [#68](https://github.com/0bnoxide/cadcraft/issues/68).
-Worktree: `.claude/worktrees/slice11-codex-horizontal`; branch `slice11/codex-horizontal`.
-Private build directory: worktree `target/slice11-codex`, set on every Cargo invocation.
-Second branch: `slice11/codex-vertical`, stacked on the horizontal PR. No merges authorized.
+Horizontal branch: `slice11/codex-horizontal`.
+Run Cargo from an isolated checkout and set `CARGO_TARGET_DIR` to a build directory owned by that checkout.
+Second branch: `slice11/codex-vertical`, stacked on the horizontal PR.
 
 ## Design and execution plan
 
@@ -206,3 +206,19 @@ The CLI displays `send_agent_prompt` as **Send message**: 13 outbound implementa
   [lookup work](https://github.com/0bnoxide/cadcraft/pull/78#discussion_r4534941992).
   The code head is followed only by this publication-log update. Both independent posted
   verdicts, the review notes PR and final hosted checks remain outstanding.
+
+## Horizontal base integration
+
+The vertical branch now incorporates horizontal repair `42a55c7f`: inclusive endpoint
+queries, consistent station accumulation, stable shallow-arc projection/exchange, strict
+radius-roundoff validation and portable checkout instructions. The profile code and its
+reconciled receipt log are preserved. This supersedes the older-base status recorded above;
+posted review verdicts, the review notes PR and final hosted checks remain required.
+
+A combined arc/profile regression exposed an exported arc recovering one ULP shorter,
+which put its exact terminal design/ground station outside the imported alignment.
+Import now preserves a finite declared element length only within four floating-point
+epsilons of the finite recovered length. Evaluated endpoints, length attributes,
+directions and strict profile bounds are still checked. The 100-case regression covers
+both turns, rotated/major/shallow arcs and exact terminal design/ground samples; a PVI
+one representable station past the endpoint remains invalid.
