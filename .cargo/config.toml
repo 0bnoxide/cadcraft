@@ -1,2 +1,4 @@
 [alias]
-xtask = "run --package xtask --"
+# The driver must not live in the workspace target: `xtask test` rebuilds all
+# workspace binaries, including xtask, which Windows cannot replace while running.
+xtask = "run --profile xtask --package xtask --"
