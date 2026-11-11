@@ -1503,5 +1503,9 @@ menu	View	视图
 	Ctrl+Enter to apply	Ctrl+Enter 应用
 	Edit Text	编辑文字
 	Point File Converter	点文件转换器
+	Create Alignment	创建路线
+	Alignment Report	路线报告
+	Import Alignments from LandXML	从 LandXML 导入路线
+	Export Alignments to LandXML	将路线导出为 LandXML
 	Callout Override	标注位置覆盖
 	The drawing changed. Close the window and open it again.	图纸已切换。请关闭窗口后重新打开。

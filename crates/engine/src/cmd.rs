@@ -1,6 +1,8 @@
 //! The command registry. Ids are AutoCAD command names in lower case; menu paths follow
 //! AutoCAD's menu bar so the catalog doubles as the parity metric.
 
+mod alignment_cmd;
+mod alignment_store;
 pub(crate) mod annoscale;
 mod annotate;
 mod array;
@@ -227,6 +229,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(survey_points::specs());
         v.extend(survey_level::specs());
         v.extend(surface_build::specs());
+        v.extend(alignment_cmd::specs());
         v.extend(surface_contour::specs());
         v.extend(surface_volume::specs());
         v.extend(surface_audit::specs());
