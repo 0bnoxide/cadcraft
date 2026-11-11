@@ -662,6 +662,15 @@ dependencies = [
 ]
 
 [[package]]
+name = "cadcraft-alignment"
+version = "0.17.0"
+dependencies = [
+ "quick-xml 0.42.0",
+ "serde",
+ "thiserror 2.0.21",
+]
+
+[[package]]
 name = "cadcraft-cli"
 version = "0.17.0"
 dependencies = [
@@ -738,6 +747,7 @@ dependencies = [
 name = "cadcraft-engine"
 version = "0.17.0"
 dependencies = [
+ "cadcraft-alignment",
  "cadcraft-color",
  "cadcraft-constraints",
  "cadcraft-doc",
