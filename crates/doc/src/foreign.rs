@@ -214,11 +214,48 @@ impl Foreign {
         out
     }
 
+    /// An owned tree only when every child can be copied. `tree` caps at 4096; reaching that
+    /// bound might have silently omitted a child, so COPY conservatively refuses it.
+    pub fn complete_tree(&self, root: Handle) -> Option<Vec<Handle>> {
+        let tree = self.tree(root);
+        if tree.len() >= 4096 {
+            return None;
+        }
+        let by_handle = self.object_index();
+        let members: BTreeSet<_> = tree.iter().copied().collect();
+        let mut unique = BTreeSet::new();
+        if self.objects.iter().any(|o| members.contains(&o.handle) && !unique.insert(o.handle)) {
+            return None;
+        }
+        for h in &tree {
+            let object = by_handle.get(h)?;
+            if object
+                .tags
+                .iter()
+                .filter(|t| matches!(t.code, 350 | 360))
+                .any(|t| Handle::parse_hex(t.value.trim()).is_none_or(|child| !members.contains(&child)))
+            {
+                return None;
+            }
+        }
+        Some(tree)
+    }
+
     /// Copy the objects of `tree` (see [`Foreign::tree`]) of `src` into this one under the handles
     /// `fresh` (the same order; two more follow for a field list), `owner` taking the place of the
     /// root's owner. References to objects outside the tree become null. Fields keep a field
     /// list: this one gets a copy of the source's if it has none.
     pub fn adopt_tree(&mut self, src: &Foreign, tree: &[Handle], fresh: &[Handle], owner: Handle) {
+        self.copy_tree(src, tree, fresh, owner, false);
+    }
+
+    /// Same-drawing counterpart to `adopt_tree`: remap owned handles but leave references to
+    /// objects outside the owned tree intact. The caller must pass a checked complete tree.
+    pub fn duplicate_tree(&mut self, src: &Foreign, tree: &[Handle], fresh: &[Handle], owner: Handle) {
+        self.copy_tree(src, tree, fresh, owner, true);
+    }
+
+    fn copy_tree(&mut self, src: &Foreign, tree: &[Handle], fresh: &[Handle], owner: Handle, same_drawing: bool) {
         if fresh.len() < tree.len() + 2 {
             return;
         }
@@ -234,8 +271,16 @@ impl Foreign {
                 if t.code == 5 {
                     t.value = new.hex();
                 } else if matches!(t.code, 320..=369 | 390..=399) {
-                    let to = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()).or((n == 0 && t.code == 330).then_some(owner));
-                    t.value = to.map_or_else(|| "0".to_string(), Handle::hex);
+                    if same_drawing {
+                        if n == 0 && t.code == 330 {
+                            t.value = owner.hex();
+                        } else if let Some(to) = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()) {
+                            t.value = to.hex();
+                        }
+                    } else {
+                        let to = Handle::parse_hex(t.value.trim()).and_then(|h| map.get(&h).copied()).or((n == 0 && t.code == 330).then_some(owner));
+                        t.value = to.map_or_else(|| "0".to_string(), Handle::hex);
+                    }
                 }
             }
             kinds.push(c.kind.clone());
@@ -293,4 +338,34 @@ pub fn class_number<S: AsRef<str>>(groups: impl IntoIterator<Item = (i32, S)> + 
 /// The place in CLASSES a class number names (500 is the first class).
 pub fn class_index(number: Option<i64>) -> Option<usize> {
     usize::try_from(number?.checked_sub(500)?).ok()
+}
+
+#[cfg(test)]
+mod tree_copy_tests {
+    use super::*;
+
+    fn tag(code: i32, value: &str) -> RawTag {
+        RawTag { code, value: value.into() }
+    }
+
+    #[test]
+    fn cross_drawing_adoption_still_nulls_external_references() {
+        let src = Foreign {
+            objects: vec![
+                ForeignObject {
+                    handle: Handle(1),
+                    kind: "DICTIONARY".into(),
+                    tags: vec![tag(5, "1"), tag(330, "A"), tag(3, "ENTRY"), tag(360, "2")],
+                },
+                ForeignObject { handle: Handle(2), kind: "XRECORD".into(), tags: vec![tag(5, "2"), tag(330, "1"), tag(340, "B")] },
+            ],
+            ..Default::default()
+        };
+        let tree = src.complete_tree(Handle(1)).unwrap();
+        let mut dst = Foreign::default();
+        dst.adopt_tree(&src, &tree, &[Handle(3), Handle(4), Handle(5), Handle(6)], Handle(7));
+        assert_eq!(dst.objects[0].tags.iter().find(|t| t.code == 330).unwrap().value, "7");
+        assert_eq!(dst.objects[1].tags.iter().find(|t| t.code == 330).unwrap().value, "3");
+        assert_eq!(dst.objects[1].tags.iter().find(|t| t.code == 340).unwrap().value, "0");
+    }
 }

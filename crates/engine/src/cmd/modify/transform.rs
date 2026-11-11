@@ -1,4 +1,7 @@
+use crate::cmd::alignment_store;
+use cadcraft_doc::EntityKind;
 use cadcraft_geom::Vec3;
+use std::sync::Arc;
 
 use super::{Entity, Handle, Mat3, Result, Session, Value, Vec2, bad, bool_or, erase_kept, f64_req, json, point_param, point_req, targets};
 
@@ -83,6 +86,61 @@ fn edit_entities(s: &mut Session, hs: &[Handle], copy: bool, edit: impl Fn(&mut 
     Ok(out)
 }
 
+/// COPY alone duplicates an alignment's owned extension tree and translates its authoritative
+/// definition. Stage the whole batch: a stale source or an invalid later offset must add nothing.
+pub(super) fn copy_translated(s: &mut Session, hs: &[Handle], delta: Vec2, count: u64) -> Result<Vec<Handle>> {
+    let source = s.doc()?;
+    let mut staged = source.clone();
+    let max_foreign = source.foreign.objects.iter().map(|o| o.handle.0).max().unwrap_or(0);
+    staged.handseed = staged.handseed.max(max_foreign.saturating_add(1));
+    let mut out = Vec::new();
+    for k in 1..=count {
+        let offset = delta * k as f64;
+        if !offset.x.is_finite() || !offset.y.is_finite() {
+            return Err(bad("copy", "copy offset must remain finite"));
+        }
+        let matrix = Mat3::translate(offset);
+        refuse_ole_frames(s, hs, &matrix, true)?;
+        for h in hs {
+            let Some(entity) = source.entity(*h).map(|e| (**e).clone()) else { continue };
+            let Some(space) = source.space_of(*h) else { continue };
+            let data = alignment_store::translated_if_present(source, *h, offset)?;
+            let tree = data
+                .as_ref()
+                .and_then(|_| source.foreign.entities.get(h))
+                .and_then(|extra| extra.xdict)
+                .map(|root| source.foreign.complete_tree(root).ok_or_else(|| bad("copy", "incomplete or oversized extension dictionary")))
+                .transpose()?;
+            let needed = tree.as_ref().map_or(1, |t| t.len() + 3) as u64;
+            if staged.handseed.checked_add(needed).is_none() {
+                return Err(bad("copy", "handle space exhausted"));
+            }
+            let new_handle = staged.new_handle();
+            let mut copied = Entity { handle: new_handle, ..entity };
+            if let Some(data) = &data {
+                copied.kind = EntityKind::LwPolyline(alignment_store::carrier(data)?);
+            } else {
+                copied.kind.transform(&matrix);
+            }
+            let dst = staged.space_mut(&space).ok_or_else(|| bad("copy", "target space missing"))?;
+            dst.push(copied);
+            if let (Some(data), Some(tree)) = (data, tree) {
+                let fresh: Vec<Handle> = (0..tree.len() + 2).map(|_| staged.new_handle()).collect();
+                let foreign = Arc::make_mut(&mut staged.foreign);
+                foreign.duplicate_tree(&source.foreign, &tree, &fresh, new_handle);
+                foreign.entities.entry(new_handle).or_default().xdict = fresh.first().copied();
+                alignment_store::save(&mut staged, new_handle, &data)?;
+                alignment_store::load(&staged, new_handle)?;
+            }
+            out.push(new_handle);
+        }
+    }
+    if !out.is_empty() {
+        *s.doc_mut()? = staged;
+    }
+    Ok(out)
+}
+
 pub(super) fn erase(s: &mut Session, hs: &[Handle]) -> Result<usize> {
     let d = s.doc()?;
     let free: Vec<Handle> = hs.iter().copied().filter(|h| !d.entity(*h).and_then(|e| d.layer(&e.common.layer)).is_some_and(|l| l.locked)).collect();
@@ -120,10 +178,7 @@ pub(super) fn run_copy(s: &mut Session, p: &Value) -> Result<Value> {
         None => 1,
         Some(v) => v.as_u64().filter(|n| (1..=10_000).contains(n)).ok_or_else(|| bad("copy", "`count` must be an integer from 1 to 10000"))?,
     };
-    let mut out = Vec::new();
-    for k in 1..=n {
-        out.extend(transform_entities(s, &hs, &Mat3::translate(d * k as f64), true)?.into_iter().map(|h| h.hex()));
-    }
+    let out: Vec<_> = copy_translated(s, &hs, d, n)?.into_iter().map(|h| h.hex()).collect();
     Ok(json!({ "handles": out }))
 }
 
