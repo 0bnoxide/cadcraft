@@ -1,9 +1,9 @@
 # Slice 11 implementation notes
 
 Base: `cf49a049` (`main`). Tracking: [#68](https://github.com/0bnoxide/cadcraft/issues/68).
-Worktree: `.claude/worktrees/slice11-codex-horizontal`; branch `slice11/codex-horizontal`.
-Private build directory: worktree `target/slice11-codex`, set on every Cargo invocation.
-Second branch: `slice11/codex-vertical`, stacked on the horizontal PR. No merges authorized.
+Horizontal branch: `slice11/codex-horizontal`.
+Run Cargo from an isolated checkout and set `CARGO_TARGET_DIR` to a build directory owned by that checkout.
+Second branch: `slice11/codex-vertical`, stacked on the horizontal PR.
 
 ## Design and execution plan
 
@@ -56,7 +56,7 @@ LandXML 1.2 schema and standard route geometry only. `crates/handoff` remains un
 Messages use `[slice11]` only; own id `c2f6c537-b8b1-4a44-a5d3-039989a37c27`, reviewer
 `c247b28f-eab2-4645-85eb-cf13e141f31d`. All five agreements were received before the first
 implementation commit. Receipt identifiers below preserve ordering; exact transport timestamps
-are to be reconciled from Paseo's tool log before completion (CLI not currently on PATH).
+still need reconciliation from the message receipts.
 
 | Recorded 2026-11-10 America/Denver | Direction | Message / receipt |
 |---|---|---|

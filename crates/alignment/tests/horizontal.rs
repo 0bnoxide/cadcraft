@@ -134,3 +134,84 @@ fn start_station_accepts_finite_values_beyond_coordinate_limits() {
     assert_eq!(a.at(a.start_station + 5., 0.).unwrap().point, [5., 0.]);
     assert_eq!(StationFormat::Thousands.display(1e12).unwrap(), "1000000000+000.000");
 }
+
+#[test]
+fn inclusive_end_station_survives_subtraction_roundoff() {
+    let mut a = route(vec![element([0., 0.], 0., 0.1, Kind::Line)]);
+    for start in [1., 1000., -1000., 1e12, -1e12] {
+        a.start_station = start;
+        let end = start + 0.1;
+        assert_eq!(a.at(start, 0.).unwrap().point, [0., 0.]);
+        assert_eq!(a.at(end, 2.).unwrap().point, [0.1, 2.]);
+        assert!(a.at(start.next_down(), 0.).is_err());
+        assert!(a.at(end.next_up(), 0.).is_err());
+    }
+}
+
+#[test]
+fn projection_accepts_single_element_inclusive_endpoint() {
+    let mut a = route(vec![element([0., 0.], 0., 0.1, Kind::Line)]);
+    a.start_station = 1.;
+    let end = a.project([0.1, 0.]).unwrap();
+    assert_eq!(end.station, 1.1);
+    assert_eq!(end.distance, 0.);
+    assert_eq!(end.beyond, None);
+    let after = a.project([1.1, 2.]).unwrap();
+    assert_eq!(after.station, 1.1);
+    assert_eq!(after.offset, 2.);
+    assert_eq!(after.beyond, Some(cadcraft_alignment::Beyond::After));
+}
+
+#[test]
+fn projection_uses_one_station_origin_across_multiple_elements() {
+    let mut a = route(vec![element([0., 0.], 0., 0.1, Kind::Line), element([0.1, 0.], 0., 0.1, Kind::Line)]);
+    a.start_station = 1.;
+    let end = a.project([0.2, 0.]).unwrap();
+    assert_eq!(end.station, 1.2);
+    assert_eq!(end.distance, 0.);
+    assert_eq!(end.element, 1);
+    assert_eq!(end.beyond, None);
+    let after = a.project([1.2, 2.]).unwrap();
+    assert_eq!(after.station, 1.2);
+    assert_eq!(after.offset, 2.);
+    assert_eq!(after.beyond, Some(cadcraft_alignment::Beyond::After));
+}
+
+#[test]
+fn shallow_arc_projection_preserves_small_sweep_precision() {
+    for (turn, y) in [(Turn::Left, 5e-13), (Turn::Right, -5e-13)] {
+        let mut a = route(vec![element([0., 0.], 0., 10., Kind::Arc { radius: 1e12, turn })]);
+        a.start_station = 0.;
+        // sin(1e-12)*1e12 = 1 within 1e-24; sagitta = 5e-13 within 1e-37.
+        let projected = a.project([1., y]).unwrap();
+        assert!((projected.station - 1.).abs() < 1e-6, "{projected:?}");
+        assert!(projected.offset.abs() < 1e-6, "{projected:?}");
+        assert!(projected.distance < 1e-6, "{projected:?}");
+    }
+}
+
+#[test]
+fn inclusive_endpoint_uses_final_element_after_long_route() {
+    let mut elements = Vec::new();
+    let mut point = [0., 0.];
+    let mut direction = 0.;
+    // Keep coordinates bounded while the cumulative length grows. Subtracting
+    // those large lengths back out of the total loses part of the final 0.1.
+    for i in 0..4094 {
+        let e = element(point, direction, 1e7, Kind::Arc { radius: 2e6 + 100. * f64::from(i), turn: Turn::Left });
+        let end = e.at(e.length).unwrap();
+        point = end.point;
+        direction = end.direction;
+        elements.push(e);
+    }
+    let last = element(point, direction, 0.1, Kind::Line);
+    let endpoint = last.at(0.1).unwrap();
+    elements.push(last);
+    let mut a = route(elements);
+    a.start_station = 0.;
+    assert_eq!(a.at(a.length().unwrap(), 0.).unwrap(), endpoint);
+    let projected = a.project(endpoint.point).unwrap();
+    assert_eq!(projected.distance, 0.);
+    assert_eq!(projected.offset, 0.);
+    assert_eq!(projected.beyond, None);
+}

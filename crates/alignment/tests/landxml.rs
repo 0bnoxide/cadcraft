@@ -95,3 +95,89 @@ fn export_uses_the_same_normalized_direction_as_evaluation() {
     let b = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
     assert!(b.refusals.is_empty(), "{:?}", b.refusals);
 }
+
+#[test]
+fn shallow_arc_roundtrip_preserves_small_sweep_precision() {
+    for (turn, direction, length) in [Turn::Left, Turn::Right]
+        .into_iter()
+        .flat_map(|turn| [0., 0.1, 0.4, std::f64::consts::FRAC_PI_2, 5.9].into_iter().map(move |direction| (turn, direction)))
+        .flat_map(|(turn, direction)| [1., 10_000.].into_iter().map(move |length| (turn, direction, length)))
+    {
+        let a = Alignment {
+            name: "shallow".into(),
+            start_station: 0.,
+            format: StationFormat::Thousands,
+            elements: vec![Element { start: [0., 0.], direction, length, kind: Kind::Arc { radius: 1e12, turn } }],
+        };
+        let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
+        let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+        assert_eq!(imported.alignments.len(), 1);
+        let b = &imported.alignments[0];
+        assert!((b.length().unwrap() - length).abs() < 1e-6);
+        assert_eq!(b.elements[0].kind, Kind::Arc { radius: 1e12, turn });
+        let end = b.elements[0].at(b.elements[0].length).unwrap();
+        // For sweep <= 1e-8, the omitted Taylor terms contribute < 2e-13
+        // drawing units: local x=L, local y=+/-L^2/(2R), then rotate.
+        let left = if turn == Turn::Left { 1. } else { -1. } * length * length / 2e12;
+        let expected = [length * direction.cos() - left * direction.sin(), length * direction.sin() + left * direction.cos()];
+        assert!((end.point[0] - expected[0]).abs() < 1e-6);
+        assert!((end.point[1] - expected[1]).abs() < 1e-6);
+    }
+}
+
+#[test]
+fn arc_exchange_and_projection_keep_major_sweeps_and_rotation() {
+    for (turn, side) in [(Turn::Left, -1.), (Turn::Right, 1.)] {
+        // Radius 2, north-facing start, 270-degree turn: end=(+/-2,-2).
+        // At half the arc, 135 degrees from the start radius, the point is
+        // (+/-(2+sqrt(2)),sqrt(2)) and station is 3*pi/2.
+        let a = Alignment {
+            name: "major".into(),
+            start_station: 0.,
+            format: StationFormat::Thousands,
+            elements: vec![Element {
+                start: [0., 0.],
+                direction: std::f64::consts::FRAC_PI_2,
+                length: 3. * std::f64::consts::PI,
+                kind: Kind::Arc { radius: 2., turn },
+            }],
+        };
+        let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
+        let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+        let b = &imported.alignments[0];
+        assert!((b.length().unwrap() - 3. * std::f64::consts::PI).abs() < 1e-6);
+        let endpoint = b.at(b.length().unwrap(), 0.).unwrap().point;
+        assert!((endpoint[0] - side * 2.).abs() < 1e-6);
+        assert!((endpoint[1] + 2.).abs() < 1e-6);
+        let mid = [side * (2. + 2f64.sqrt()), 2f64.sqrt()];
+        let projected = b.project(mid).unwrap();
+        assert!((projected.station - 1.5 * std::f64::consts::PI).abs() < 1e-6);
+        assert!(projected.distance < 1e-6);
+    }
+}
+
+#[test]
+fn arc_radius_roundoff_keeps_geometry_and_radius_checks_strict() {
+    // A one-unit arc at radius 1e12 has endpoint (1, 5e-13) to much
+    // better than 1e-6. Radial calculations may round at that radius,
+    // but a 1e-4 endpoint displacement is still a geometry mismatch.
+    for (radius, end, reason) in [
+        ("1000000000000", "0.0001000000005 1", "End gap"),
+        ("999999999999", "0.0000000000005 1", "radius mismatch"),
+        ("999999999999.9999", "0.0000000000005 1", ""),
+    ] {
+        let xml = file(&format!(
+            "<Alignment name='radius' staStart='0' length='1'><CoordGeom><Curve radius='{radius}' length='1' rot='ccw'><Start>0 0</Start><Center>1000000000000 0</Center><End>{end}</End></Curve></CoordGeom></Alignment>"
+        ));
+        let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        if reason.is_empty() {
+            assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+        } else {
+            assert!(imported.alignments.is_empty());
+            assert_eq!(imported.refusals[0].code, "GEOMETRY_MISMATCH");
+            assert!(imported.refusals[0].reason.contains(reason), "{:?}", imported.refusals);
+        }
+    }
+}

@@ -1,5 +1,5 @@
 //! Public LandXML 1.2 alignment exchange; deliberately independent of the frozen handoff contract.
-use crate::geometry::{angle_delta, cross, distance, sub};
+use crate::geometry::{angle_delta, cross, distance, dot, sub};
 use crate::{Alignment, DIRECTION_TOLERANCE, Element, Kind, MAX_ELEMENTS, POSITION_TOLERANCE, Result, StationFormat, Turn, error};
 use quick_xml::{
     NsReader, XmlVersion,
@@ -339,20 +339,27 @@ fn element(n: &Node, scale: f64) -> Result<Element> {
 }
 fn curve(n: &Node, start: [f64; 2], end: [f64; 2], scale: f64) -> Result<Element> {
     let center = point(n.child("Center")?, scale)?;
-    let r = distance(start, center);
+    let measured_radius = distance(start, center);
+    let r = n.attrs.get("radius").map(|v| number(v).map(|r| r * scale)).transpose()?.unwrap_or(measured_radius);
+    // Generated center coordinates and their hypot incur a few rounding steps.
+    // Preserve the stated radius within that error, not a looser geometry limit:
+    // element() still checks the evaluated End to POSITION_TOLERANCE.
+    let radius_tolerance = POSITION_TOLERANCE.max(4. * f64::EPSILON * r);
+    if !r.is_finite() || !measured_radius.is_finite() || (measured_radius - r).abs() > radius_tolerance {
+        return Err(error("GEOMETRY_MISMATCH", "arc radius mismatch"));
+    }
     let turn = rotation(n)?;
-    let a = (start[1] - center[1]).atan2(start[0] - center[0]);
-    let b = (end[1] - center[1]).atan2(end[0] - center[0]);
-    if distance(start, end) == 0. || (distance(end, center) - r).abs() > POSITION_TOLERANCE {
+    // Derive the tangent directly and measure the sweep in its local frame.
+    // Subtracting endpoint polar angles loses precision for a very shallow arc.
+    let inward = sub(center, start);
+    let direction = (-turn.sign() * inward[0]).atan2(turn.sign() * inward[1]).rem_euclid(TAU);
+    let tangent = [direction.cos(), direction.sin()];
+    let chord = sub(end, start);
+    let sweep = dot(chord, tangent).atan2(r - turn.sign() * cross(tangent, chord)).rem_euclid(TAU);
+    if distance(start, end) == 0. || (distance(end, center) - r).abs() > radius_tolerance {
         return Err(error("GEOMETRY_MISMATCH", "arc full circle or unequal endpoint radii"));
     }
-    check_attr(n, "radius", r, scale)?;
-    Ok(Element {
-        start,
-        direction: (a + turn.sign() * FRAC_PI_2).rem_euclid(TAU),
-        length: (turn.sign() * (b - a)).rem_euclid(TAU) * r,
-        kind: Kind::Arc { radius: r, turn },
-    })
+    Ok(Element { start, direction, length: sweep * r, kind: Kind::Arc { radius: r, turn } })
 }
 fn spiral(n: &Node, start: [f64; 2], scale: f64) -> Result<Element> {
     let pi = n.children.iter().find(|c| c.name == "PI").map(|p| point(p, scale)).transpose()?;

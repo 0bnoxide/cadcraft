@@ -282,14 +282,22 @@ impl Alignment {
         if !station.is_finite() || !offset.is_finite() {
             return Err(error("OUT_OF_RANGE", "station and offset must be finite"));
         }
-        let mut distance = station - self.start_station;
         let total: f64 = self.elements.iter().map(|e| e.length).sum();
-        if distance < 0. || distance > total {
+        let end = self.start_station + total;
+        if station < self.start_station || station > end {
             return Err(error("OUT_OF_RANGE", "station outside alignment"));
         }
+        // Compare absolute bounds before subtraction: a rounded end station can
+        // subtract to either side of total, but must still reach the exact endpoint.
+        let mut distance = if station == end { total } else { (station - self.start_station).clamp(0., total) };
         for (i, e) in self.elements.iter().enumerate() {
+            // Do not deplete the final short element by repeatedly subtracting
+            // large element lengths from the accumulated total.
+            if station == end && i + 1 != self.elements.len() {
+                continue;
+            }
             if distance < e.length || i + 1 == self.elements.len() {
-                let mut p = e.at(distance.min(e.length))?;
+                let mut p = e.at(if station == end { e.length } else { distance.min(e.length) })?;
                 p.point[0] -= offset * p.direction.sin();
                 p.point[1] += offset * p.direction.cos();
                 if p.point.iter().any(|x| !x.is_finite() || x.abs() > 1e9) {
