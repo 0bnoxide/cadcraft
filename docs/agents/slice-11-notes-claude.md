@@ -4,36 +4,48 @@ Review-only role: design agreement by message, a full review of each code PR, no
 
 ## Message log
 
-Times are local (UTC-7), 2026-11-10 unless a date is given. Times marked ~ were not read from a clock when the message was handled and are approximate; rows marked 11-11 carry no time. The order of the rows is exact, and the Paseo logs hold the exact times.
+Times are America/Denver, taken from the author's provider log of receipts (sent to the reviewer on 2026-11-11 03:4x); the reviewer's own Paseo log did not yield timestamps. "out" is reviewer to author, timed at the author's receipt. "in" is author to reviewer, timed at the author's send. The short code is the start of the Paseo message id.
 
 | Time | Direction | Summary |
 |---|---|---|
-| 21:46 | out | Sent reviewer id; asked for the five design proposals, `crates/alignment` API first. |
-| 21:47 | in | Author acknowledged; reading the brief, proposals to follow. |
-| ~21:55 | in | Proposal 1 (API): element types, conventions, tolerances, caps, error type. |
-| ~21:55 | out | Proposal 1 agreed with nine pins (below). Asked for proposal 2. |
-| ~22:00 | in | Pins for 1 accepted. Proposal 2 (clothoid): piecewise Taylor integration, bounded projection search. |
-| ~22:00 | out | Proposal 2 agreed with four pins. Asked for proposal 3. |
-| ~22:10 | in | Pins for 2 accepted. Proposal 3 (storage): extension dictionary XRECORD with chunked JSON, staleness check. |
-| ~22:10 | out | Proposal 3 mechanism agreed with five changes; agreed the `engine/Cargo.toml` and `xtask/src/layers.rs` lines. Asked for proposal 4. |
+| 11-10 21:48:08 | out | fe4dc566: reviewer id; asked for the five proposals, API first. |
+| 11-10 21:48:32 | in | 7fe0a83d: acknowledged. |
+| 11-10 21:49:42 | in | 0ccaf0db: proposal 1, `crates/alignment` API. |
+| 11-10 21:50:16 | out | 0efaade8: proposal 1 agreed with nine pins. |
+| 11-10 21:51:05 | in | 5c5d9f7f: pins accepted; proposal 2, clothoid evaluation. |
+| 11-10 21:51:26 | out | 6621485a: proposal 2 agreed with four pins. |
+| 11-10 21:52:00 | in | 88139b1a: proposal 3, storage. |
+| 11-10 21:52:38 | out | da249b04: proposal 3 agreed with five changes; shared-file edits agreed. |
+| 11-10 21:53:25 | in | 6b25a552: proposal 4, LandXML. |
+| 11-10 21:53:57 | in | 52be26d2: proposal 5, sampling and view. |
+| 11-10 21:54:09 | out | 486cbf67: proposal 4 agreed with eight changes. #69 and #70 filed. |
+| 11-10 21:54:59 | out | a7757343: proposal 5 agreed with seven changes; PR 1 may start. |
+| 11-10 21:5x | in | adaa8113: `tinexport` already has a `unit` parameter (default meter); proposes reusing it. |
+| 11-10 21:57:15 | out | 70a8e68c: `unit` parameter agreed. |
+| 11-10 21:5x | in | 0d0f37b7: proposal 5 pins accepted; tracking issue #68. |
+| 11-10 22:33:27 | in | e4928f8a: schema reached over HTTP; #72 and #73 filed. |
+| 11-10 22:40:01 | in | 07a3fb8d: PR 1 up, #74 at 000afb94. |
+| 11-10 23:29:23 | in | 5443c715: PR 2 up, #78. |
+| 11-10 23:30:20 | in | 134dc57a: review request repeated. |
+| 11-11 00:04:53 | in | cfd0f244: fixes to #78 for automated findings. |
+| 11-11 02:16:29 | in | 7249c113: retry; #74 now at 42a55c7f. |
+| 11-11 02:16:47 | in | 319b07cf: hold #78 until the integrated head is frozen. |
+| 11-11 02:21:43 | out | bddbbf28: #74 at 42a55c7f, changes requested, three findings. |
+| 11-11 02:25:56 | in | aaa95ec4: findings confirmed; repair plan proposed. |
+| 11-11 02:26:17 | out | 8e87fe6d: repair plan agreed with pins. |
+| 11-11 02:42:35 | in | 36e3a177: repair progress. |
+| 11-11 02:4x | in/out | Permission prompt asking for another worker's Paseo id; answered that the reviewer does not know it and passed it to the owner. |
+| 11-11 03:08:17 | in | 020dbe62: #74 repairs at 74917b9c; proposes `Profiles::validate_on`. |
+| 11-11 03:09:03 | out | f65d224e: profile API adaptation agreed. |
+| 11-11 03:11:09 | out | 7c971383: #74 approved once hosted gates are green. |
+| 11-11 03:26:34 | in | 86ecdf14: hosted gates green for #74 at 74917b9c. |
+| 11-11 03:33:47 | in | 613d1eae: #78 frozen at 57334e6c. |
+| 11-11 03:36:25 | out | 44f64214: #78 code approved, not ready to merge. |
+| 11-11 03:36:58 | in | 65c7993b: conflict confirmed; asks whether a branch merge is allowed. |
+| 11-11 03:37:17 | out | 051992fd: reviewer's reading of "no merges"; decision left to the owner. |
+| 11-11 03:4x | in | 6d0208ea: receipt times above. A second permission prompt (branch-only merge) was left for the owner. |
 
-| ~22:20 | in | Pins for 3 accepted. Proposal 4 (LandXML mapping, units, refusal codes). |
-| ~22:20 | out | Proposal 4 agreed with eight changes. Filed #69 and #70. Asked for proposal 5. |
-| ~22:30 | in | Proposal 5 (ground sampling, vertical design, profile view). |
-| ~22:30 | out | Proposal 5 agreed with seven changes. All five agreed; PR 1 may start. |
-| ~22:32 | in | Unit question answered: reuse `tinexport`'s `unit` parameter (default meter). |
-| ~22:32 | out | Agreed the `unit` parameter. |
-| 22:33 on | in | Proposal 5 pins accepted; schema reached over HTTP; issues #68, #72, #73 filed by the author. |
-| 11-11 | in | PR 1 up (#74, head 000afb94); PR 2 up (#78); later heads 42a55c7f (#74) and 455bfd0f (#78); #78 to be re-based by the owner, review held until the head is frozen. |
-| 11-11 | out | Review of #74 at 42a55c7f posted: changes requested, three must-fix findings. |
-| 11-11 | in | Author confirmed the three findings and proposed repairs: stationary-point refinement, a validated view, bulge vertices for arcs. |
-| 11-11 | out | Repair plan agreed with pins (1e-7 station tests, test-only counter, bulge tolerance 1e-9). |
-| 11-11 | in | The author asked for another worker's Paseo id through a permission prompt. Answered that the reviewer does not know it; passed the question to the owner. |
-| 11-11 | in | #74 repairs published at 74917b9c; proposed `Profiles::validate_on(&ValidatedAlignment)` for #78. |
-| 11-11 | out | Agreed the profile API adaptation. Updated verdict on #74 posted: approved once hosted gates are green. |
-| 11-11 | in | Hosted Linux and Windows gates green for #74 at 74917b9c. |
-| 11-11 | in | #78 frozen at 57334e6c, with the #74 repairs carried forward. |
-| 11-11 | out | Review of #78 posted: code approved, not ready to merge (conflicts with its base; no hosted gate result for the head). |
+Counts from the author's provider log at that point: 13 messages from the reviewer received, 19 sent by the author. All five design agreements (21:50 to 21:55 on 11-10) precede PR 1 (22:40).
 
 ## Design agreements
 
