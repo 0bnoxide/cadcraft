@@ -4,14 +4,14 @@ Review-only role: design agreement by message, a full review of each code PR, no
 
 ## Message log
 
-Times are local (UTC-7), 2026-11-10 unless a date is given.
+Times are local (UTC-7), 2026-11-10 unless a date is given. Times marked ~ were not read from a clock when the message was handled and are approximate; rows marked 11-11 carry no time. The order of the rows is exact, and the Paseo logs hold the exact times.
 
 | Time | Direction | Summary |
 |---|---|---|
 | 21:46 | out | Sent reviewer id; asked for the five design proposals, `crates/alignment` API first. |
 | 21:47 | in | Author acknowledged; reading the brief, proposals to follow. |
-| 21:5x | in | Proposal 1 (API): element types, conventions, tolerances, caps, error type. |
-| 21:5x | out | Proposal 1 agreed with nine pins (below). Asked for proposal 2. |
+| ~21:55 | in | Proposal 1 (API): element types, conventions, tolerances, caps, error type. |
+| ~21:55 | out | Proposal 1 agreed with nine pins (below). Asked for proposal 2. |
 | ~22:00 | in | Pins for 1 accepted. Proposal 2 (clothoid): piecewise Taylor integration, bounded projection search. |
 | ~22:00 | out | Proposal 2 agreed with four pins. Asked for proposal 3. |
 | ~22:10 | in | Pins for 2 accepted. Proposal 3 (storage): extension dictionary XRECORD with chunked JSON, staleness check. |
@@ -21,8 +21,8 @@ Times are local (UTC-7), 2026-11-10 unless a date is given.
 | ~22:20 | out | Proposal 4 agreed with eight changes. Filed #69 and #70. Asked for proposal 5. |
 | ~22:30 | in | Proposal 5 (ground sampling, vertical design, profile view). |
 | ~22:30 | out | Proposal 5 agreed with seven changes. All five agreed; PR 1 may start. |
-| 22:3x | in | Unit question answered: reuse `tinexport`'s `unit` parameter (default meter). |
-| 22:3x | out | Agreed the `unit` parameter. |
+| ~22:32 | in | Unit question answered: reuse `tinexport`'s `unit` parameter (default meter). |
+| ~22:32 | out | Agreed the `unit` parameter. |
 | 22:33 on | in | Proposal 5 pins accepted; schema reached over HTTP; issues #68, #72, #73 filed by the author. |
 | 11-11 | in | PR 1 up (#74, head 000afb94); PR 2 up (#78); later heads 42a55c7f (#74) and 455bfd0f (#78); #78 to be re-based by the owner, review held until the head is frozen. |
 | 11-11 | out | Review of #74 at 42a55c7f posted: changes requested, three must-fix findings. |
@@ -32,6 +32,8 @@ Times are local (UTC-7), 2026-11-10 unless a date is given.
 | 11-11 | in | #74 repairs published at 74917b9c; proposed `Profiles::validate_on(&ValidatedAlignment)` for #78. |
 | 11-11 | out | Agreed the profile API adaptation. Updated verdict on #74 posted: approved once hosted gates are green. |
 | 11-11 | in | Hosted Linux and Windows gates green for #74 at 74917b9c. |
+| 11-11 | in | #78 frozen at 57334e6c, with the #74 repairs carried forward. |
+| 11-11 | out | Review of #78 posted: code approved, not ready to merge (conflicts with its base; no hosted gate result for the head). |
 
 ## Design agreements
 
@@ -110,6 +112,7 @@ Changes asked for:
 
 - [#69](https://github.com/0bnoxide/cadcraft/issues/69): LandXML files with rounded coordinates are refused on import.
 - [#83](https://github.com/0bnoxide/cadcraft/issues/83): non-blocking review notes from #74.
+- [#85](https://github.com/0bnoxide/cadcraft/issues/85): non-blocking review notes from #78.
 - [#70](https://github.com/0bnoxide/cadcraft/issues/70): MOVE or an angle point makes an alignment unusable.
 
 ## Reviews
@@ -144,6 +147,27 @@ Full delta from 42a55c7f read. Ran `cargo test -p cadcraft-alignment` (22 passed
 2. One validation per command through `ValidatedAlignment`. The raw one-shot methods still validate each call (0.68 s for one `at()` on the 4096 tight spiral case), so loops must use the view.
 3. One bulge vertex per arc. Hand check: 270° gives tan 67.5° = 1 + √2.
 
-### #78 Profiles
+### #78 Profiles, head 57334e6c: code approved, not ready to merge
 
-Held until the author sends the frozen head after the owner's re-base onto the updated #74.
+Review: https://github.com/0bnoxide/cadcraft/pull/78 (posted as a comment review).
+
+Before merge: GitHub reported the PR as conflicting with its base `slice11/codex-horizontal`, and no hosted Linux or Windows gate result existed for this head.
+
+What ran: `cargo test -p cadcraft-alignment` (40 passed) and the engine alignment and profile command tests (8 passed). Not run locally: `cargo xtask ci`, the CLI flow, the native UI; no rendered profile view was inspected.
+
+Hand calculations, independent of the code:
+
+- Crest, PVIs (0, 0), (200, 6), (400, 2), L = 200: g1 = 0.03, g2 = −0.02, PVC (100, 3), z = 3 + 0.03x − 0.000125x². Stations 100, 150, 200, 250, 300 give z = 3, 4.1875, 4.75, 4.6875, 4 and grades 0.03, 0.0175, 0.005, −0.0075, −0.02. High point x = 0.03·200/0.05 = 120: station 220, z = 4.8.
+- Sag, middle PVI (200, −4): g1 = −0.02, g2 = 0.03, PVC (100, −2). z = −2, −2.6875, −2.75, −2.1875, −1. Low point x = 80: station 180, z = −2.8.
+- TIN crossings: the test's four vertices lie on z = x + 2y. The line y = 5 from x = −5 gives (station, z) = (5, 10), (10, 15), (15, 20).
+- Quarter circle on z = x: midpoint cos 45° = 0.7071.
+
+All match the tests' expected values.
+
+Non-blocking notes: #85.
+
+## Not verified by the reviewer
+
+- `cargo xtask ci` was never run locally for either PR; the hosted gates were relied on for #74, and none had run for #78 at 57334e6c.
+- The CLI and control-channel pass criteria and the native UI were not exercised by the reviewer.
+- The Paseo log counts in the pass criteria were not checked.
