@@ -114,3 +114,45 @@ still need reconciliation from the message receipts.
 - Follow-ups outside this PR: [rounded input coordinates #69](https://github.com/0bnoxide/cadcraft/issues/69),
   [COPY exact definitions #72](https://github.com/0bnoxide/cadcraft/issues/72), and
   [unusual clothoids without a usable LandXML PI #73](https://github.com/0bnoxide/cadcraft/issues/73).
+
+## Full horizontal review and repair
+
+- The separately claimed numerical/portable-notes corrections were published as `42a55c7f`.
+  Both hosted Linux and Windows gates passed for that head. The designated full review at
+  that head requested three further corrections; its independent geometry hand checks matched.
+  [Review](https://github.com/0bnoxide/cadcraft/pull/74#pullrequestreview-5856481019),
+  [review notes PR #84](https://github.com/0bnoxide/cadcraft/pull/84).
+- 2026-11-11 America/Denver message log:
+  - 02:15 sent: retry full reviews at live heads, `7249c113-c504-4d71-96bd-760a4521b1e5`.
+  - 02:16 sent: preserve the separate vertical-integration claim and hold its final review,
+    `319b07cf-6287-472c-83e9-3f8d62eea82a`.
+  - 02:21 received: full horizontal review requested changes, `bddbbf28-f9b0-4063-b1c8-fe85cbfe606f`.
+  - 02:25 sent: proposed stationary-point refinement, an immutable borrowed validated view,
+    and true arc carrier bulges, `aaa95ec4-d205-4fd7-8a03-11c74bf95eb0`.
+  - 02:26 received: all three repairs agreed, `8e87fe6d-c699-4d13-b07e-74c274ea26b2`;
+    1e-7 station checks at offsets 1/50/-1000, test-only validation counter, bulge tolerance
+    1e-9, both-format major-arc reopen, and unchanged storage version 1.
+  - 02:42 sent: implementation progress and pending full gate,
+    `36e3a177-bd1b-4f16-8026-9c61b6ee1633`.
+- The new repair branch starts at `42a55c7f` and will fast-forward the horizontal PR without
+  a force push. It does not modify the separately claimed vertical integration.
+- Spiral search keeps its global distance bounds, then brackets and bisects `(C-P).T = 0`.
+  Only roots and element ends compete until the terminal 1e-8 station intervals; refinement
+  uses the same 200000-step budget and stops within 1e-9 station units. Off-curve entry,
+  exit and compound regressions fail before the correction and pass at 1e-7 station error.
+- `ValidatedAlignment` borrows immutable data and caches cumulative lengths. One-shot methods
+  retain their signatures; batch queries use the borrowed view. Report input, carrier checking
+  and LandXML export reuse it. A cfg(test)-only thread-local counter confirms one full
+  validation for 4096 station queries, length queries and projection on 4096 tight spirals.
+- Carrier vertices retain one bulged segment for each arc, including clockwise/counterclockwise
+  270-degree arcs; only spirals use chords. The generic chord approximation API remains available.
+  Staleness compares bulges at 1e-9 and coordinates at 1e-7. Both-format engine tests verify
+  major-arc persistence, tolerated rounding and refusal of a real bulge edit.
+- Focused checks: 22 alignment tests and five engine command tests passed. Corrected-binary CLI
+  checks pass for drawn line/arc geometry, report/exchange, DXF/DWG reopen, off-curve entry/exit/
+  compound queries at offsets 1/50/-1000, and public LandXML XSD validation. Full CI passed
+  all seven steps: 4157 tests passed, 28 skipped, plus doc tests, i18n, assets, layers and WASM.
+  The vertical sampling path
+  will adopt the validated view after its integration includes these new horizontal repairs.
+- Other full-review observations are tracked in [#83](https://github.com/0bnoxide/cadcraft/issues/83);
+  angle points/MOVE remain tracked in [#70](https://github.com/0bnoxide/cadcraft/issues/70).

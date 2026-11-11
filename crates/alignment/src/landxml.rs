@@ -408,8 +408,8 @@ fn alignment(n: &Node, scale: f64) -> Result<Alignment> {
         })?;
         out.elements.push(e);
     }
-    out.checked()?;
-    check_attr(n, "length", out.length()?, scale)?;
+    let view = out.validated()?;
+    check_attr(n, "length", view.length(), scale)?;
     Ok(out)
 }
 
@@ -492,7 +492,7 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
     write!(&mut out,"<?xml version=\"1.0\" encoding=\"UTF-8\"?><LandXML xmlns=\"{NS}\" version=\"1.2\" date=\"1970-01-01\" time=\"00:00:00\"><Units><{family} linearUnit=\"{}\" areaUnit=\"{}\" volumeUnit=\"{}\" temperatureUnit=\"{}\" pressureUnit=\"{}\" angularUnit=\"decimal degrees\" directionUnit=\"decimal degrees\"/></Units><Alignments name=\"Alignments\">",unit.name(),if unit==Unit::Meter{"squareMeter"}else{"squareFoot"},if unit==Unit::Meter{"cubicMeter"}else{"cubicFeet"},if unit==Unit::Meter{"celsius"}else{"fahrenheit"},if unit==Unit::Meter{"milliBars"}else{"inHG"}).map_err(|_|error("XML_LIMIT","formatting failed"))?;
     let mut total = 0usize;
     for a in alignments {
-        a.checked()?;
+        let view = a.validated()?;
         total += a.elements.len();
         if total > MAX_ELEMENTS {
             return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
@@ -502,7 +502,7 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
         }
         append(
             &mut out,
-            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, a.length()?),
+            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
         for e in &a.elements {
             export_element(&mut out, e)?;

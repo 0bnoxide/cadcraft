@@ -8,7 +8,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
         CommandSpec::new("packagedeliverables", "Package Deliverables", run)
             .menu(&["File", "Package Deliverables"])
-            .params("{action:plan|preview|execute,proposal_root,manifest_path,profile_path,approved_hash?}")
+            .params("{action:plan|preview|execute|create (alias for execute),proposal_root,manifest_path,profile_path,approved_hash?}")
             .noundo()
             .interactive(|_| Ok(super::figureexport::prompt("packagedeliverables"))),
     ]
@@ -28,12 +28,16 @@ fn run(_: &mut Session, p: &Value) -> Result<Value> {
 pub(super) fn run_with_move(p: &Value, mover: &super::proposal::files::Mover<'_>) -> Value {
     native::run(p, mover).unwrap_or_else(super::proposal::files::issue)
 }
+#[cfg(all(test, not(target_arch = "wasm32")))]
+pub(super) fn run_with_hooks(p: &Value, h: &super::file::IoHooks, mover: &super::proposal::files::Mover<'_>) -> Value {
+    native::run_with_hooks(p, h, mover).unwrap_or_else(super::proposal::files::issue)
+}
 #[cfg(not(target_arch = "wasm32"))]
 mod native {
     use super::super::{
         figureexport::native as outgoing,
         file,
-        proposal::files::{self, Checked, Mover, Project},
+        proposal::files::{self, Checked, Mover, Project, no_named_streams},
     };
     use cadcraft_proposal::{
         approval,
@@ -163,7 +167,7 @@ mod native {
             closure.add(&source)?;
             let mut qa = Vec::new();
             closure.walk(&d, &source, h, 0, &mut BTreeSet::from([source.clone()]), &mut qa)?;
-            let session = outgoing::plot_session(d, &source, &mut qa)?;
+            let session = outgoing::plot_session(d, &source, h, &mut qa)?;
             let d = session.doc().map_err(|e| e.to_string())?;
             let page = &d.layout(&layout).ok_or("layout_missing: selected sheet layout does not exist")?.page;
             if !page.width_mm.is_finite()
@@ -243,35 +247,6 @@ mod native {
         let plan = json!({"version":1,"command":"packagedeliverables","proposal_root":project.root,"package_path":package_path,"zip_path":zip_path,
             "sheets":sheets,"files":entries,"generated_files":["checksums.json"],"fingerprints":refs.fingerprints,"project_fingerprints":project.fingerprints});
         Ok(Built { plan, project, refs, entries })
-    }
-    fn no_named_streams(path: &Path) -> Checked<()> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            // Bound the dependency's UTF-16 path allocation and prevent Win32 NUL truncation.
-            if path.as_os_str().encode_wide().take(32_768).count() >= 32_768 || path.as_os_str().encode_wide().any(|c| c == 0) {
-                return Err("stream_inspection_failed: path is invalid or too long".into());
-            }
-            let failed = |e| format!("stream_inspection_failed: cannot inspect {}: {e}", path.display());
-            // The lazy iterator skips only the unnamed $DATA stream on Windows. One next()
-            // inspects at most that stream and the first named stream, including empty ones.
-            // Copies and ZIPs preserve only primary bytes: never certify omitted data.
-            let mut streams = match fsquirrel::list(path) {
-                Ok(streams) => streams,
-                // FindFirstStreamW reports ERROR_HANDLE_EOF for an ordinary directory:
-                // directories have no unnamed $DATA stream. fsquirrel returns the HRESULT.
-                // Only this documented empty result is accepted; unsupported filesystems
-                // and all other inspection failures must remain errors.
-                Err(e) if e.raw_os_error() == Some(0x8007_0026_u32.cast_signed()) && path.is_dir() => return Ok(()),
-                Err(e) => return Err(failed(e)),
-            };
-            if streams.next().transpose().map_err(failed)?.is_some() {
-                return Err(format!("named_stream: {} has a named stream not covered by the package checksums", path.display()));
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = path;
-        Ok(())
     }
     #[cfg(all(test, windows))]
     mod stream_tests {
@@ -424,14 +399,14 @@ mod native {
                 if let Some(layout) = &entry.layout {
                     let mut qa = Vec::new();
                     let d = outgoing::read_drawing(&entry.source, h)?;
-                    let mut session = outgoing::plot_session(d, &entry.source, &mut qa)?;
+                    let mut session = outgoing::plot_session(d, &entry.source, h, &mut qa)?;
                     if qa.iter().any(|q| q.severity == cadcraft_proposal::figures::Severity::Error) {
                         return Err("broken_reference: sheet references changed".into());
                     }
                     if session.doc().map_err(|e| e.to_string())?.layout(layout).is_none() {
                         return Err("layout_missing: sheet layout disappeared".into());
                     }
-                    outgoing::plot(&mut session, entry.plot_options.as_ref().ok_or("invalid_plan: plot options missing")?, &target)?;
+                    outgoing::plot(&mut session, entry.plot_options.as_ref().ok_or("invalid_plan: plot options missing")?, &target, h)?;
                     pdfs += 1;
                 } else {
                     copy(&entry.source, &target)?;
@@ -525,19 +500,34 @@ mod native {
         })
     }
     pub fn run(p: &Value, mover: &Mover<'_>) -> Checked<Value> {
+        let r = request(p)?;
+        let h = file::io().filter(|h| h.plot.is_some()).ok_or("plot_unavailable: plotting is not available in this build")?;
+        run_request(p, &r, h, mover)
+    }
+    #[cfg(test)]
+    pub fn run_with_hooks(p: &Value, h: &file::IoHooks, mover: &Mover<'_>) -> Checked<Value> {
+        let r = request(p)?;
+        run_request(p, &r, h, mover)
+    }
+    fn request(p: &Value) -> Checked<Request> {
         if serde_json::to_vec(p).map_err(|e| e.to_string())?.len() > 4 << 20 {
             return Err("invalid_input: inputs exceed 4 MiB".into());
         }
         let r: Request = serde_json::from_value(p.clone()).map_err(|e| format!("invalid_input: {e}"))?;
         if !["plan", "preview", "execute", "create"].contains(&r.action.as_str()) {
-            return Err("invalid_input: expected plan, preview or execute".into());
+            return Err("invalid_input: expected plan, preview, execute or create (alias for execute)".into());
         }
         // Read these fields through the same Project::open contract as the existing follow-ons.
         if r.proposal_root.is_empty() {
             return Err("invalid_input: proposal_root is empty".into());
         }
-        let h = file::io().filter(|h| h.plot.is_some()).ok_or("plot_unavailable: plotting is not available in this build")?;
-        let b = build(p, &r, h)?;
+        Ok(r)
+    }
+    fn run_request(p: &Value, r: &Request, h: &file::IoHooks, mover: &Mover<'_>) -> Checked<Value> {
+        if h.plot.is_none() {
+            return Err("plot_unavailable: plotting is not available in this build".into());
+        }
+        let b = build(p, r, h)?;
         let hash = files::hash(&b.plan)?;
         if r.action == "plan" || r.action == "preview" {
             return Ok(json!({"plan":b.plan,"hash":hash,"issues":[]}));
