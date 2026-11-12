@@ -503,13 +503,18 @@ fn plan_only_updates_matchlines_without_any_profile_stage() {
     s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap();
     s.execute("move", &json!({"handles":[g["frames"][0]["handle"]],"delta":[10,5]})).unwrap();
     s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
-    assert!(
-        s.doc()
-            .unwrap()
-            .model
-            .iter()
-            .any(|e| e.common.layer == "CADCRAFT-MATCHLINES" && matches!(&e.kind,EntityKind::MText(t) if t.contents=="0+010.000"))
-    );
+    let mut labels = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .filter_map(|e| match &e.kind {
+            EntityKind::MText(t) if e.common.layer == "CADCRAFT-MATCHLINES" => Some(t.contents.clone()),
+            _ => None,
+        })
+        .collect::<Vec<_>>();
+    labels.sort();
+    assert_eq!(labels, ["0+250.000", "0+260.000", "0+500.000", "0+750.000"]);
 }
 #[test]
 fn an_erased_owned_profile_component_refuses_sheet_creation() {

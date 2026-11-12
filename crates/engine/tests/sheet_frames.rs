@@ -170,9 +170,8 @@ fn named_matchline_attributes_are_written_and_missing_names_refuse() {
         )
         .unwrap();
     let inserts: Vec<_> = s.doc().unwrap().model.iter().filter_map(|e| if let EntityKind::Insert(i) = &e.kind { Some(i) } else { None }).collect();
-    assert_eq!(inserts.len(), 8);
-    assert_eq!(inserts[0].attribs[0].text.value, "0+000.000");
-    assert_eq!(inserts[1].attribs[0].text.value, "0+250.000");
+    assert_eq!(inserts.len(), 3);
+    assert_eq!(inserts.iter().map(|i| i.attribs[0].text.value.as_str()).collect::<Vec<_>>(), ["0+250.000", "0+500.000", "0+750.000"]);
     assert_eq!(result["frames"].as_array().unwrap().len(), 4);
     let before = s.doc().unwrap().clone();
     assert!(
@@ -183,6 +182,29 @@ fn named_matchline_attributes_are_written_and_missing_names_refuse() {
         .is_err()
     );
     assert_eq!(*s.doc().unwrap(), before);
+}
+#[test]
+fn plain_matchlines_cover_only_the_interior_frame_boundaries() {
+    for (spacing, expected) in [(250., vec![250., 500., 750.]), (1000., vec![])] {
+        let mut s = Session::new();
+        let h = road(&mut s);
+        s.execute("viewframecreate", &json!({"alignment":h,"paper_size":[1000,100],"scale":1,"spacing":spacing})).unwrap();
+        let stations = s
+            .doc()
+            .unwrap()
+            .model
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Line(l) if e.common.layer == "CADCRAFT-MATCHLINES" => Some((l.a.x + l.b.x) / 2.),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        assert_eq!(stations, expected);
+        assert_eq!(
+            s.doc().unwrap().model.iter().filter(|e| e.common.layer == "CADCRAFT-MATCHLINES" && matches!(e.kind, EntityKind::MText(_))).count(),
+            expected.len()
+        );
+    }
 }
 
 #[test]

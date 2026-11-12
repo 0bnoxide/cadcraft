@@ -127,10 +127,21 @@ pub(super) fn redraw_matchlines(d: &mut Drawing, g: &mut Group, a: &alignment_st
     if let Some(m) = &g.matchline {
         validate_matchline(d, m)?;
     }
-    for f in &mut g.frames {
+    // Keep range validation for outer endpoints even though they are no longer drawn.
+    for station in g.frames.first().map(|f| f.geometry.range[0]).into_iter().chain(g.frames.last().map(|f| f.geometry.range[1])) {
+        a.definition.at(station, 0.).map_err(|e| bad(CMD, e.to_string()))?;
+    }
+    let count = g.frames.len();
+    let mut previous_end: Option<f64> = None;
+    for (position, f) in g.frames.iter_mut().enumerate() {
         store::erase(d, &f.matchlines, &g.own, f.index, "matchline")?;
         f.matchlines.clear();
-        for station in f.geometry.range {
+        // A shared boundary belongs to the preceding frame; outer ends are not matchlines.
+        let start =
+            previous_end.is_some_and(|end| (f.geometry.range[0] - end).abs() > cadcraft_alignment::POSITION_TOLERANCE).then_some(f.geometry.range[0]);
+        let end = (position + 1 < count).then_some(f.geometry.range[1]);
+        previous_end = Some(f.geometry.range[1]);
+        for station in [start, end].into_iter().flatten() {
             let pose = a.definition.at(station, 0.).map_err(|e| bad(CMD, e.to_string()))?;
             let at = Vec2::new(pose.point[0], pose.point[1]);
             let label = a.definition.format.display(station).map_err(|e| bad(CMD, e.to_string()))?;
@@ -373,5 +384,64 @@ mod rectangle_tests {
         assert_eq!(size, [10., 30.]);
         assert_eq!(angle, std::f64::consts::FRAC_PI_2);
         assert!(super::rectangle(&[[0., 0.], [0., 10.], [30., 0.], [30., 10.]]).is_err());
+    }
+}
+#[cfg(test)]
+mod matchline_tests {
+    use super::{alignment_store, redraw_matchlines, refresh_frames, store};
+    use crate::Session;
+    use cadcraft_doc::{Drawing, EntityKind};
+    use serde_json::json;
+    fn stations(d: &Drawing) -> Vec<f64> {
+        let mut out = d
+            .model
+            .iter()
+            .filter_map(|e| match &e.kind {
+                EntityKind::Line(l) if e.common.layer == "CADCRAFT-MATCHLINES" => Some((l.a.x + l.b.x) / 2.),
+                _ => None,
+            })
+            .collect::<Vec<_>>();
+        out.sort_by(f64::total_cmp);
+        out
+    }
+    #[test]
+    fn hidden_outer_stations_still_refuse_out_of_alignment_ranges() {
+        let mut s = Session::new();
+        let a = s.execute("alignmentcreate", &json!({"name":"Road","elements":[{"start":[0,0],"direction":0,"length":1000,"type":"line"}]})).unwrap();
+        let created = s.execute("viewframecreate", &json!({"alignment":a["handle"],"paper_size":[1000,100],"scale":1,"spacing":1000})).unwrap();
+        let h = store::handle(created["group"].as_str().unwrap()).unwrap();
+        let a = alignment_store::load(s.doc().unwrap(), store::handle(a["handle"].as_str().unwrap()).unwrap()).unwrap();
+        for range in [[-1., 1000.], [0., 1001.]] {
+            let mut g = store::load(s.doc().unwrap(), h).unwrap();
+            g.frames[0].geometry.range = range;
+            let before = s.doc().unwrap().clone();
+            assert!(redraw_matchlines(s.doc_mut().unwrap(), &mut g, &a).is_err());
+            assert_eq!(*s.doc().unwrap(), before);
+        }
+    }
+    #[test]
+    fn touching_boundaries_share_one_matchline_and_moved_neighbours_keep_both() {
+        let mut s = Session::new();
+        let a = s.execute("alignmentcreate", &json!({"name":"Road","elements":[{"start":[0,0],"direction":0,"length":1000,"type":"line"}]})).unwrap();
+        let created = s.execute("viewframecreate", &json!({"alignment":a["handle"],"paper_size":[300,100],"scale":1,"spacing":250})).unwrap();
+        let h = store::handle(created["group"].as_str().unwrap()).unwrap();
+        let mut g = store::load(s.doc().unwrap(), h).unwrap();
+        let a = alignment_store::load(s.doc().unwrap(), store::handle(a["handle"].as_str().unwrap()).unwrap()).unwrap();
+        // Half-tolerance station noise at each side of the middle frame still shares both boundaries.
+        for station in &mut g.frames[1].geometry.range {
+            *station += cadcraft_alignment::POSITION_TOLERANCE / 2.;
+        }
+        redraw_matchlines(s.doc_mut().unwrap(), &mut g, &a).unwrap();
+        let found = stations(s.doc().unwrap());
+        assert_eq!(found.len(), 3);
+        for (actual, expected) in found.into_iter().zip([250., 500., 750.]) {
+            assert!((actual - expected).abs() <= cadcraft_alignment::POSITION_TOLERANCE);
+        }
+        store::save(s.doc_mut().unwrap(), &g).unwrap();
+        s.execute("move", &json!({"handles":[created["frames"][1]["handle"]],"delta":[10,0]})).unwrap();
+        refresh_frames(s.doc().unwrap(), &mut g, &a).unwrap();
+        redraw_matchlines(s.doc_mut().unwrap(), &mut g, &a).unwrap();
+        // Middle range 250..500 moves to 260..510: gap 250/260, overlap 510/500, shared 750.
+        assert_eq!(stations(s.doc().unwrap()), [250., 260., 500., 510., 750.]);
     }
 }
