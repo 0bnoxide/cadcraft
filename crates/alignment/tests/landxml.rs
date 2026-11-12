@@ -379,7 +379,11 @@ fn review_spiral_precision_and_mixed_file_regressions() {
 
     let mut joined = make("joined", [0., 0.], 0., 1000., Kind::Line);
     joined.elements.push(Element { start: [1000., 0.], direction: 0., length: 4. * std::f64::consts::PI / 0.015, kind });
-    assert_eq!(landxml::export(&[joined], Unit::Meter).unwrap_err().code, "UNREPRESENTABLE_SPIRAL");
+    let xml = landxml::export(std::slice::from_ref(&joined), Unit::Meter).unwrap();
+    let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+    let restored = &imported.alignments[0].definition;
+    assert_eq!(restored.length().unwrap(), joined.length().unwrap());
+    assert!(restored.at(joined.length().unwrap(), 0.).is_ok());
 
     let outside_pi = make(
         "outside PI",

@@ -502,7 +502,7 @@ fn export_element(out: &mut String, e: &Element) -> Result<()> {
 /// tangents cannot supply the finite PI required by LandXML 1.2. Splitting
 /// the same linear-curvature law keeps the physical route and stations exact,
 /// though an importer will see a different element partition.
-fn export_spiral_parts(e: &Element) -> Result<(String, usize)> {
+fn export_spiral_parts(e: &Element, prefix_length: f64) -> Result<(String, usize)> {
     let Kind::Spiral { turn, radius_start, radius_end } = e.kind else {
         return Err(error("UNREPRESENTABLE_SPIRAL", "only clothoids can be subdivided"));
     };
@@ -524,14 +524,38 @@ fn export_spiral_parts(e: &Element) -> Result<(String, usize)> {
         }
     };
     let mut out = String::new();
+    let mut accumulated = prefix_length;
     for i in 0..count {
         let start_distance = e.length * (i as f64 / count as f64);
         let end_distance = if i + 1 == count { e.length } else { e.length * ((i + 1) as f64 / count as f64) };
         let start = e.at(start_distance)?;
+        let mut length = end_distance - start_distance;
+        if i + 1 == count {
+            // Match the original accumulation order so the inclusive end station survives subdivision.
+            let target = prefix_length + e.length;
+            for _ in 0..8 {
+                let actual = accumulated + length;
+                if actual == target {
+                    break;
+                }
+                let corrected = length + (target - actual);
+                length = if corrected != length {
+                    corrected
+                } else if actual < target {
+                    length.next_up()
+                } else {
+                    length.next_down()
+                };
+            }
+            if accumulated + length != target || !length.is_finite() || length <= 0. {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision changes station extent"));
+            }
+        }
+        accumulated += length;
         let piece = Element {
             start: start.point,
             direction: start.direction,
-            length: end_distance - start_distance,
+            length,
             kind: Kind::Spiral { radius_start: radius_at(i), radius_end: radius_at(i + 1), turn },
         };
         let expected_end = e.at(end_distance)?;
@@ -575,6 +599,7 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
             &mut out,
             &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
+        let mut prefix_length = 0.;
         for e in &a.elements {
             if matches!(e.kind, Kind::Spiral { .. }) {
                 spiral_names.insert(a.name.as_str());
@@ -583,12 +608,13 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
             let count = match export_element(&mut encoded, e) {
                 Ok(()) => 1,
                 Err(err) if err.code == "UNREPRESENTABLE_SPIRAL" => {
-                    let (parts, count) = export_spiral_parts(e)?;
+                    let (parts, count) = export_spiral_parts(e, prefix_length)?;
                     encoded = parts;
                     count
                 }
                 Err(err) => return Err(err),
             };
+            prefix_length += e.length;
             total = total.checked_add(count).ok_or_else(|| error("ELEMENT_LIMIT", "file exceeds 4096 elements"))?;
             if total > MAX_ELEMENTS {
                 return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
