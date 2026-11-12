@@ -79,7 +79,7 @@ pub struct CarrierVertex {
 }
 #[cfg(test)]
 std::thread_local! {
-    static VALIDATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
+    pub(crate) static VALIDATION_CALLS: std::cell::Cell<usize> = const { std::cell::Cell::new(0) };
 }
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Pose {

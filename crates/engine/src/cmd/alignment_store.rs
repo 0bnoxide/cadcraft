@@ -14,6 +14,8 @@ pub(super) struct Stored {
     pub version: u32,
     pub definition: Alignment,
     pub chord_tolerance: f64,
+    #[serde(default)]
+    pub profiles: cadcraft_alignment::profile::Profiles,
 }
 pub(super) fn carrier(data: &Stored) -> Result<LwPolyline> {
     let view = data.definition.validated().map_err(|e| super::bad("alignment", e.to_string()))?;
@@ -39,6 +41,17 @@ pub(super) fn load_data(d: &Drawing, handle: Handle) -> Result<Stored> {
     if value.get("definition").and_then(|v| v.get("elements")).and_then(|v| v.as_array()).is_none_or(|v| v.len() > MAX_ELEMENTS) {
         return Err(invalid("element count limit"));
     }
+    if let Some(profiles) = value.get("profiles") {
+        if profiles.get("design").and_then(|d| d.get("pvis")).and_then(|v| v.as_array()).is_some_and(|p| p.len() > MAX_ELEMENTS) {
+            return Err(invalid("too many PVIs"));
+        }
+        if let Some(segments) = profiles.get("ground").and_then(|g| g.get("segments")).and_then(|v| v.as_array()) {
+            let total = segments.iter().try_fold(0usize, |n, v| n.checked_add(v.as_array().map_or(0, Vec::len)));
+            if segments.len() > cadcraft_alignment::MAX_POINTS || total.is_none_or(|n| n > cadcraft_alignment::MAX_POINTS) {
+                return Err(invalid("too many ground samples"));
+            }
+        }
+    }
     let data: Stored = serde_json::from_value(value).map_err(|_| invalid("invalid definition fields"))?;
     if data.version != 1 {
         return Err(invalid("unsupported storage version"));
@@ -47,6 +60,7 @@ pub(super) fn load_data(d: &Drawing, handle: Handle) -> Result<Stored> {
 }
 pub(super) fn validated<'a>(d: &Drawing, handle: Handle, data: &'a Stored) -> Result<ValidatedAlignment<'a>> {
     let view = data.definition.validated().map_err(|e| invalid(&e.to_string()))?;
+    data.profiles.validate_on(&view).map_err(|e| invalid(&e.to_string()))?;
     let expected = carrier_from_view(&view, data.chord_tolerance)?;
     let e = d.entity(handle).ok_or_else(|| invalid("carrier missing"))?;
     let EntityKind::LwPolyline(actual) = &e.kind else { return Err(invalid("carrier is not a lightweight polyline")) };
@@ -83,6 +97,7 @@ pub(super) fn translated_if_present(d: &Drawing, handle: Handle, delta: Vec2) ->
     Ok(Some(data))
 }
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
+    data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;
     // Serialization is capped while writing, before an input-sized string can be allocated.
     struct Capped(Vec<u8>);
     impl std::io::Write for Capped {
