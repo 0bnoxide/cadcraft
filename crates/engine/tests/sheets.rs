@@ -219,6 +219,44 @@ fn profile_only_and_profile_pair_arrangements_keep_horizontal_scale() {
     }
 }
 #[test]
+fn tall_profile_viewports_plot_only_their_own_figure() {
+    hooks();
+    let temp = Temp::new();
+    let t = template(&temp, &["SHEET-PLAN-1", "SHEET-PROFILE-1"]);
+    let mut source = cadcraft_io::read(&std::fs::read(&t).unwrap(), &t).unwrap();
+    let h = source.layout("Template").unwrap().entities.iter().find(|e| e.common.layer == "SHEET-PROFILE-1").unwrap().handle;
+    source
+        .modify_entity(h, |e| {
+            if let EntityKind::Viewport(v) = &mut e.kind {
+                v.height = 200.;
+            }
+        })
+        .unwrap();
+    std::fs::write(&t, cadcraft_io::write(&source, &t).unwrap()).unwrap();
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_profile")).unwrap();
+    // The 200-unit viewport exceeds the 40-unit figure height and 60-unit stack pitch.
+    // A neighbouring red design line would therefore bleed into the plotted viewport.
+    for file in ["sheets.dxf", "sheets.dwg"] {
+        let d = cadcraft_io::read(&cadcraft_io::write(s.doc().unwrap(), file).unwrap(), file).unwrap();
+        for name in ["Road-010", "Road-012", "Road-014", "Road-016"] {
+            let layout = d.layout(name).unwrap();
+            for e in layout.entities.iter() {
+                if let EntityKind::Viewport(v) = &e.kind
+                    && v.id != 1
+                {
+                    let hidden = v.frozen_layers.iter().filter(|n| n.starts_with("CADCRAFT-SHEET-PROFILE-")).count();
+                    assert_eq!(hidden, if e.common.layer.contains("PLAN") { 4 } else { 3 });
+                }
+            }
+            let svg = cadcraft_io::plotter::plot(&d, &Space::Paper(name.into()), &json!({"output":"svg"})).unwrap();
+            let svg = String::from_utf8(svg).unwrap();
+            assert_eq!(svg.matches("stroke=\"#ff0000\"").count(), 1, "{file}/{name}: neighbouring figure leaked into plot");
+        }
+    }
+}
+#[test]
 fn north_arrow_rotation_is_absolute_and_owned_sheets_reopen_in_both_formats() {
     hooks();
     let temp = Temp::new();
@@ -480,7 +518,15 @@ fn an_erased_owned_profile_component_refuses_sheet_creation() {
     let t = template(&temp, &["SHEET-PLAN-1", "SHEET-PROFILE-1"]);
     let mut s = Session::new();
     let g = group(&mut s);
-    let h = s.doc().unwrap().model.iter().find(|e| e.common.layer == "PROFILE-DESIGN").unwrap().handle.hex();
+    let h = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find(|e| e.common.layer.starts_with("CADCRAFT-SHEET-PROFILE-") && matches!(e.kind, EntityKind::LwPolyline(_)))
+        .unwrap()
+        .handle
+        .hex();
     s.execute("erase", &json!({"handles":[h]})).unwrap();
     let before = s.doc().unwrap().clone();
     assert!(s.execute("sheetcreate", &request(&g, &t, "plan_profile")).unwrap_err().to_string().contains("MISSING_PROFILE_VIEW"));

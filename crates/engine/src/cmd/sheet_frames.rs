@@ -348,7 +348,10 @@ pub(super) fn redraw_profiles(d: &mut Drawing, g: &mut Group, a: &alignment_stor
             return Err(bad(CMD, "PROFILE_LIMIT: too many figure entities"));
         }
         let handles = profile_cmd::add_marks(d, &Space::Model, figure.marks, text_height)?;
+        let layer = store::profile_layer(&g.own, f.index);
+        d.ensure_layer(&layer);
         for h in &handles {
+            d.modify_entity(*h, |e| e.common.layer.clone_from(&layer))?;
             store::own(d, *h, &g.own, f.index, "profile")?;
         }
         clipped.push(json!({"frame":f.index,"spans":figure.clipped}));

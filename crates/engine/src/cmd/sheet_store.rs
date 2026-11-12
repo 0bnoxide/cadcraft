@@ -11,6 +11,10 @@ use std::collections::BTreeSet;
 pub(super) const GROUP_KEY: &str = "CADCRAFT_SHEET_GROUP";
 const OWNER_KEY: &str = "CADCRAFT_SHEET_OWNER";
 pub(super) const MAX_MEMBERS: usize = 200_000;
+pub(super) const PROFILE_LAYER_PREFIX: &str = "CADCRAFT-SHEET-PROFILE-";
+pub(super) fn profile_layer(group: &str, index: u32) -> String {
+    format!("{PROFILE_LAYER_PREFIX}{group}-{index}")
+}
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
 pub(super) struct Group {

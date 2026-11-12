@@ -561,6 +561,9 @@ pub(super) mod native {
             .ok_or_else(|| bad(CMD, "VIEWPORT_ID_LIMIT"))?;
         let mut sheets = Vec::new();
         let mut unused = Vec::new();
+        let profile_layers: Vec<_> =
+            d.layers.iter().map(|l| &l.name).filter(|n| n.starts_with(store::PROFILE_LAYER_PREFIX)).take(store::MAX_MEMBERS + 1).cloned().collect();
+        let mut frozen_count = 0usize;
         for (name, indices, values) in planned {
             let mut copied = layout.clone();
             copied.name = name.clone();
@@ -590,6 +593,14 @@ pub(super) mod native {
                         next_viewport = next_viewport.checked_add(1).ok_or_else(|| bad(CMD, "VIEWPORT_ID_LIMIT"))?;
                         v.locked = true;
                         v.view_height = v.height * g.scale;
+                        // A tall viewport can include neighbouring stacked figures unless their layers are frozen.
+                        let own_profile = (!role.contains("PLAN")).then(|| store::profile_layer(&g.own, f.index));
+                        v.frozen_layers.retain(|n| !n.starts_with(store::PROFILE_LAYER_PREFIX));
+                        frozen_count = frozen_count.saturating_add(v.frozen_layers.len()).saturating_add(profile_layers.len());
+                        if frozen_count > store::MAX_MEMBERS {
+                            return Err(bad(CMD, "PROFILE_LAYER_LIMIT: too many viewport layer references"));
+                        }
+                        v.frozen_layers.extend(profile_layers.iter().filter(|n| own_profile.as_ref() != Some(*n)).cloned());
                         if role.contains("PLAN") {
                             v.view_center = Vec2::new(f.geometry.center[0], f.geometry.center[1]);
                             v.twist = -f.geometry.angle;
