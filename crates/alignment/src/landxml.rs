@@ -483,8 +483,13 @@ fn export_element(out: &mut String, e: &Element) -> Result<()> {
             let t = cross(sub(end.point, e.start), b) / det;
             let u = cross(sub(end.point, e.start), a) / det;
             let pi = [e.start[0] + t * a[0], e.start[1] + t * a[1]];
-            if t <= 0. || u >= 0. || pi.iter().any(|v| !v.is_finite() || v.abs() > 1e9) || cross(b, sub(pi, end.point)).abs() > POSITION_TOLERANCE {
+            if t <= 0. || u >= 0. || pi.iter().any(|v| !v.is_finite()) || cross(b, sub(pi, end.point)).abs() > POSITION_TOLERANCE {
                 return Err(error("UNREPRESENTABLE_SPIRAL", "no reliable finite forward LandXML PI"));
+            }
+            // A bearing error rotates every interior point, even when the endpoint nearly closes.
+            let recovered = (pi[1] - e.start[1]).atan2(pi[0] - e.start[0]);
+            if angle_delta(recovered, direction) * e.length > POSITION_TOLERANCE {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "PI bearing exceeds interior position precision"));
             }
             xml_point(out, "PI", pi)?;
         }
@@ -554,7 +559,7 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
     }
     let mut names = BTreeSet::new();
     let mut out = String::new();
-    let mut has_spiral = false;
+    let mut spiral_names = BTreeSet::new();
     let family = if unit == Unit::Meter { "Metric" } else { "Imperial" };
     // Fixed epoch is deterministic; no hand-written calendar conversion or clock is needed.
     write!(&mut out,"<?xml version=\"1.0\" encoding=\"UTF-8\"?><LandXML xmlns=\"{NS}\" version=\"1.2\" date=\"1970-01-01\" time=\"00:00:00\"><Units><{family} linearUnit=\"{}\" areaUnit=\"{}\" volumeUnit=\"{}\" temperatureUnit=\"{}\" pressureUnit=\"{}\" angularUnit=\"decimal degrees\" directionUnit=\"decimal degrees\"/></Units><Alignments name=\"Alignments\">",unit.name(),if unit==Unit::Meter{"squareMeter"}else{"squareFoot"},if unit==Unit::Meter{"cubicMeter"}else{"cubicFeet"},if unit==Unit::Meter{"celsius"}else{"fahrenheit"},if unit==Unit::Meter{"milliBars"}else{"inHG"}).map_err(|_|error("XML_LIMIT","formatting failed"))?;
@@ -571,7 +576,9 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
             &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
         for e in &a.elements {
-            has_spiral |= matches!(e.kind, Kind::Spiral { .. });
+            if matches!(e.kind, Kind::Spiral { .. }) {
+                spiral_names.insert(a.name.as_str());
+            }
             let mut encoded = String::new();
             let count = match export_element(&mut encoded, e) {
                 Ok(()) => 1,
@@ -596,10 +603,21 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
     // PI coordinates lose angular precision at large map coordinates. A
     // schema-valid file is not an exchange if its PI-derived bearings or
     // joints fail our import contract, so refuse rather than return it.
-    if has_spiral {
+    if !spiral_names.is_empty() {
         let checked = import(out.as_bytes(), unit)?;
-        if let Some(f) = checked.refusals.first() {
+        if let Some(f) = checked.refusals.iter().find(|f| spiral_names.contains(f.name.as_str())) {
             return Err(error("UNREPRESENTABLE_SPIRAL", format!("exported spiral cannot be reimported: {}: {}", f.code, f.reason)));
+        }
+        for original in alignments.iter().filter(|a| spiral_names.contains(a.definition.name.as_str())) {
+            let restored = checked
+                .alignments
+                .iter()
+                .find(|a| a.definition.name == original.definition.name)
+                .ok_or_else(|| error("UNREPRESENTABLE_SPIRAL", "exported spiral alignment is missing"))?;
+            // Even one ulp changes whether the original inclusive end station is queryable.
+            if original.definition.length()? != restored.definition.length()? {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision changes station extent"));
+            }
         }
     }
     Ok(out)

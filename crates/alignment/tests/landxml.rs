@@ -363,3 +363,48 @@ fn high_coordinate_spiral_export_does_not_claim_a_failed_exchange() {
         }
     }
 }
+
+#[test]
+fn review_spiral_precision_and_mixed_file_regressions() {
+    let make = |name: &str, start, direction, length, kind| Alignment {
+        name: name.into(),
+        start_station: 0.,
+        format: StationFormat::Thousands,
+        elements: vec![Element { start, direction, length, kind }],
+    };
+    let kind = Kind::Spiral { radius_start: Some(100.), radius_end: Some(200.), turn: Turn::Left };
+    let spiral = make("spiral", [0., 0.], 0., 10., kind);
+    let line = make("line", [1e8, 1e8], 0.3, 0.001, Kind::Line);
+    assert!(landxml::export(&[line, spiral], Unit::Meter).is_ok());
+
+    let mut joined = make("joined", [0., 0.], 0., 1000., Kind::Line);
+    joined.elements.push(Element { start: [1000., 0.], direction: 0., length: 4. * std::f64::consts::PI / 0.015, kind });
+    assert_eq!(landxml::export(&[joined], Unit::Meter).unwrap_err().code, "UNREPRESENTABLE_SPIRAL");
+
+    let outside_pi = make(
+        "outside PI",
+        [999899990., 0.],
+        0.,
+        (2. * std::f64::consts::PI / 3.) * 2. / (1. / 100000. + 1. / 99999.),
+        Kind::Spiral { radius_start: Some(100000.), radius_end: Some(99999.), turn: Turn::Left },
+    );
+    assert!(landxml::export(&[outside_pi], Unit::Meter).is_ok());
+
+    let rounded = make(
+        "rounded PI",
+        [1e8, 1e8],
+        0.3,
+        628418.4050142319,
+        Kind::Spiral { radius_start: Some(100000.), radius_end: Some(99999.9599936363), turn: Turn::Left },
+    );
+    if let Ok(xml) = landxml::export(std::slice::from_ref(&rounded), Unit::Meter) {
+        let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        let restored = &result.alignments[0].definition;
+        for fraction in [0.25, 0.5, 0.75, 1.] {
+            let station = rounded.length().unwrap() * fraction;
+            let a = rounded.at(station, 0.).unwrap().point;
+            let b = restored.at(station, 0.).unwrap().point;
+            assert!((a[0] - b[0]).hypot(a[1] - b[1]) < 1e-6);
+        }
+    }
+}
