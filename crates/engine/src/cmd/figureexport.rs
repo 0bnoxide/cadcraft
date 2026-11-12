@@ -6,7 +6,7 @@ use serde_json::{Value, json};
 pub fn specs() -> Vec<CommandSpec> {
     vec![CommandSpec::new("figureexport", "Export Figures", run)
         .menu(&["File", "Export Figures"])
-        .params("{action:plan|preview|execute,spec_paths:[path],sites:[label],events:[label],mode:per_site|per_map_type|historical|combined_appendix,format:pdf|png,output_folder,approved_hash?}")
+        .params("{action:plan|preview|execute|create (alias for execute),spec_paths:[path],sites:[label],events:[label],mode:per_site|per_map_type|historical|combined_appendix,format:pdf|png,output_folder,approved_hash?}")
         .noundo().interactive(|_| Ok(prompt("figureexport")))]
 }
 
@@ -16,6 +16,18 @@ mod tests {
     use cadcraft_doc::{Drawing, EntityKind, Layer, Layout, Space, Viewport};
     use cadcraft_geom::Vec3;
     use cadcraft_proposal::figures::FigureSpec;
+
+    #[test]
+    fn create_alias_is_documented_for_both_export_commands() {
+        assert!(super::specs()[0].params.contains("create"));
+        assert!(super::super::packagedeliverables::specs()[0].params.contains("create"));
+        let figure = json!({"action":"invalid","spec_paths":[],"sites":[],"events":[],"mode":"per_site","format":"pdf","output_folder":"unused"});
+        let package = json!({"action":"invalid","proposal_root":"unused","manifest_path":"unused","profile_path":"unused"});
+        let figure_error = native::run(&figure, &super::super::proposal::files::rename_no_replace).unwrap_err();
+        let package_error = super::super::packagedeliverables::run_with_move(&package, &super::super::proposal::files::rename_no_replace);
+        assert!(figure_error.contains("create"), "{figure_error}");
+        assert!(package_error["issues"][0]["message"].as_str().is_some_and(|m| m.contains("create")), "{package_error}");
+    }
 
     #[test]
     fn preparation_replaces_text_attributes_and_only_largest_viewport() {
@@ -70,12 +82,118 @@ mod tests {
     }
 
     #[test]
+    fn preparation_replaces_escaped_mtext_and_warns_for_unknown_keys() {
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        let source = format!("{{\\C1;{}}}", cadcraft_doc::mtext_literal("α {{Site}} {{Custom}} {{Missing}}"));
+        let t = serde_json::from_value(json!({"insert":[0,0,0],"height":3,"contents":source})).unwrap();
+        let handle = d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::MText(t)).unwrap();
+        let spec = FigureSpec::parse(br#"{"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","text":{"Custom":"C:\\notes {raw}"}}"#).unwrap();
+        let original = d.clone();
+        let mut qa = Vec::new();
+        native::prepare(&mut d, &spec, "Site {A}", "E", &mut qa).unwrap();
+        let expected = format!("{{\\C1;{}}}", cadcraft_doc::mtext_literal("α Site {A} C:\\notes {raw} {{Missing}}"));
+        assert!(matches!(&d.layout("Figure").unwrap().entities.get(handle).unwrap().kind, EntityKind::MText(t) if t.contents == expected));
+        assert_eq!(qa.len(), 1, "{qa:?}");
+        assert_eq!(qa[0].code, "unresolved_placeholder");
+        assert!(qa[0].subject.ends_with(": Missing"));
+        assert!(matches!(&original.layout("Figure").unwrap().entities.get(handle).unwrap().kind, EntityKind::MText(t) if t.contents == source));
+    }
+
+    #[test]
+    fn preparation_preserves_mtext_escape_boundaries_and_format_arguments() {
+        let site = "α {value} \\path\n{{Event}}";
+        let replacement = cadcraft_doc::mtext_literal(site);
+        let cases = [
+            (r"\{\{Missing\fArial\}\}\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\{{\{{Missing\fArial\}}\}}\{{\{{Site\}}\}};{replacement}"), 1),
+            (r"\f{{Missing;}}\{\{Site\}\}".to_string(), format!(r"\f{{{{Missing;}}}}{replacement}"), 1),
+            (r"\{\{unfinished {{Event}}".to_string(), r"\{\{unfinished E".to_string(), 0),
+            (r"\{\{Site\}\}/{{Event}}".to_string(), format!("{replacement}/E"), 0),
+            (r"{\C1;\{\{Site\}\}}".to_string(), format!("{{\\C1;{replacement}}}"), 0),
+            (r"\\{\{Site\}\}".to_string(), r"\\{\{Site\}\}".to_string(), 0),
+            (r"\\\{\{Site\}\}".to_string(), format!(r"\\{replacement}"), 0),
+            (r"\{\{Site\\}\}".to_string(), r"\{\{Site\\}\}".to_string(), 0),
+            (r"\{\{Missing\}\}".to_string(), r"\{\{Missing\}\}".to_string(), 1),
+            (r"\{\{Site".to_string(), r"\{\{Site".to_string(), 0),
+            (r"\fName\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\fName\{{\{{Site\}}\}};{replacement}"), 0),
+            (r"\S1\;\{\{Site\}\};\{\{Site\}\}".to_string(), format!(r"\S1\;\{{\{{Site\}}\}};{replacement}"), 0),
+            (r"\f{{Event}};\{\{Site\}\}".to_string(), format!(r"\fE;{replacement}"), 0),
+            (cadcraft_doc::mtext_literal("{{K\\Key}} {{é}} {{New\nLine}}"), "backslash unicode newline".to_string(), 0),
+        ];
+        for (source, expected, warnings) in cases {
+            let mut d = Drawing::new_metric();
+            d.layouts.push(Layout::new("Figure", 1));
+            let t = serde_json::from_value(json!({"insert":[0,0,0],"height":3,"contents":source})).unwrap();
+            let handle = d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::MText(t)).unwrap();
+            let spec = FigureSpec::parse(&serde_json::to_vec(&json!({"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","text":{"K\\Key":"backslash","é":"unicode","New\nLine":"newline"}})).unwrap()).unwrap();
+            let mut qa = Vec::new();
+            native::prepare(&mut d, &spec, site, "E", &mut qa).unwrap();
+            let EntityKind::MText(actual) = &d.layout("Figure").unwrap().entities.get(handle).unwrap().kind else {
+                panic!("expected MTEXT");
+            };
+            assert_eq!(actual.contents, expected, "source: {source:?}");
+            assert_eq!(qa.len(), warnings, "source: {source:?}; QA: {qa:?}");
+        }
+    }
+
+    #[test]
+    fn preparation_thaws_visible_layers_in_each_requested_layout_viewport() {
+        let mut d = Drawing::new_metric();
+        let mut visible = Layer::new("Visible");
+        visible.on = false;
+        visible.frozen = true;
+        d.layers.push(visible);
+        d.layers.push(Layer::new("KeepFrozen"));
+        d.layouts.push(Layout::new("Figure", 1));
+        d.layouts.push(Layout::new("Other", 2));
+        for (layout, id, width) in [("Figure", 1, 1000.), ("Figure", 2, 10.), ("Figure", 3, 100.), ("Other", 2, 40.)] {
+            d.add(
+                &Space::Paper(layout.into()),
+                Default::default(),
+                EntityKind::Viewport(Viewport {
+                    id,
+                    width,
+                    height: 10.,
+                    frozen_layers: vec!["vIsIbLe".into(), "KeepFrozen".into()],
+                    ..Default::default()
+                }),
+            )
+            .unwrap();
+        }
+        let original = d.clone();
+        let spec = FigureSpec::parse(br#"{"figure_id":"F","source_drawing":"a.dxf","layout":"Figure","visible_layers":["VISIBLE"]}"#).unwrap();
+        native::prepare(&mut d, &spec, "S", "E", &mut Vec::new()).unwrap();
+        assert!(d.layer("Visible").unwrap().on);
+        assert!(!d.layer("Visible").unwrap().frozen);
+        for e in d.layout("Figure").unwrap().entities.iter() {
+            let EntityKind::Viewport(v) = &e.kind else {
+                panic!("expected viewport");
+            };
+            if v.id == 1 {
+                assert_eq!(original.layout("Figure").unwrap().entities.get(e.handle), Some(e));
+                continue;
+            }
+            assert_eq!(v.frozen_layers, ["KeepFrozen"]);
+            let EntityKind::Viewport(before) = &original.layout("Figure").unwrap().entities.get(e.handle).unwrap().kind else {
+                panic!("expected viewport");
+            };
+            let mut expected = before.clone();
+            expected.frozen_layers = vec!["KeepFrozen".into()];
+            assert_eq!(v, &expected);
+        }
+        assert_eq!(d.layout("Other"), original.layout("Other"));
+        for e in original.layout("Figure").unwrap().entities.iter() {
+            assert!(matches!(&e.kind, EntityKind::Viewport(v) if v.frozen_layers.len() == 2));
+        }
+    }
+
+    #[test]
     fn failed_second_publish_removes_first_output_and_success_receipt() {
-        file::set_io(file::IoHooks {
+        let hooks = file::IoHooks {
             read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
             write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
             plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
-        });
+        };
         let root = std::env::temp_dir().join(format!("cadcraft-figure-publish-{}", super::super::proposal::files::run_id()));
         std::fs::create_dir(&root).unwrap();
         let mut d = Drawing::new_metric();
@@ -83,7 +201,7 @@ mod tests {
         std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
         std::fs::write(root.join("spec.json"), br#"{"figure_id":"F","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
         let mut p = json!({"action":"plan","spec_paths":[root.join("spec.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
-        let planned = native::run(&p, &super::super::proposal::files::rename_no_replace).unwrap();
+        let planned = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace).unwrap();
         p["action"] = json!("execute");
         p["approved_hash"] = planned["hash"].clone();
         let count = std::cell::Cell::new(0);
@@ -91,12 +209,118 @@ mod tests {
             count.set(count.get() + 1);
             if count.get() == 2 { Err("forced second publish failure".into()) } else { super::super::proposal::files::rename_no_replace(from, to) }
         };
-        let result = native::run(&p, &failure).unwrap();
+        let result = native::run_with_hooks(&p, &hooks, &failure).unwrap();
         assert_eq!(result["receipt"]["outcome"], "Failed", "{result}");
         assert_eq!(count.get(), 2);
         let files: Vec<_> = std::fs::read_dir(root.join("out")).unwrap().map(|e| e.unwrap().path()).collect();
         assert_eq!(files.len(), 1);
         assert_eq!(serde_json::from_slice::<serde_json::Value>(&std::fs::read(&files[0]).unwrap()).unwrap()["outcome"], "Failed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn panicking_second_plot_keeps_only_failed_receipt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PLOTS: AtomicUsize = AtomicUsize::new(0);
+        fn plot_then_panic(d: &Drawing, s: &cadcraft_doc::Space, p: &serde_json::Value) -> std::result::Result<Vec<u8>, String> {
+            if PLOTS.fetch_add(1, Ordering::Relaxed) == 1 {
+                panic!("forced second plot panic");
+            }
+            cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())
+        }
+        let hooks = file::IoHooks {
+            read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(plot_then_panic),
+        };
+        let root = std::env::temp_dir().join(format!("cadcraft-figure-plot-panic-{}", super::super::proposal::files::run_id()));
+        std::fs::create_dir(&root).unwrap();
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+        std::fs::write(root.join("spec.json"), br#"{"figure_id":"F","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
+        let mut p = json!({"action":"plan","spec_paths":[root.join("spec.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
+        let planned = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace).unwrap();
+        p["action"] = json!("execute");
+        p["approved_hash"] = planned["hash"].clone();
+        PLOTS.store(0, Ordering::Relaxed);
+        let result = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace).unwrap();
+        assert_eq!(PLOTS.load(Ordering::Relaxed), 2);
+        assert_eq!(result["receipt"]["outcome"], "Failed", "{result}");
+        assert!(result["receipt"]["failed_checks"][0]["message"].as_str().is_some_and(|m| m.contains("forced second plot panic")), "{result}");
+        let output = root.join("out");
+        let entries: Vec<_> = std::fs::read_dir(&output).unwrap().map(|e| e.unwrap().path()).collect();
+        assert_eq!(entries.len(), 1, "only the Failed receipt remains");
+        assert_eq!(std::fs::read(&entries[0]).ok().and_then(|b| serde_json::from_slice::<serde_json::Value>(&b).ok()).unwrap()["outcome"], "Failed");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn planning_reads_each_source_once_for_multiple_jobs() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        fn counted_read(bytes: &[u8], name: &str) -> std::result::Result<Drawing, String> {
+            READS.fetch_add(1, Ordering::Relaxed);
+            cadcraft_io::read(bytes, name).map_err(|e| e.to_string())
+        }
+        let hooks = file::IoHooks {
+            read: counted_read,
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
+        };
+        let root = std::env::temp_dir().join(format!("cadcraft-figure-reads-{}", super::super::proposal::files::run_id()));
+        std::fs::create_dir(&root).unwrap();
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+        std::fs::write(root.join("spec.json"), br#"{"figure_id":"F","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
+        let p = json!({"action":"plan","spec_paths":[root.join("spec.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
+        READS.store(0, Ordering::Relaxed);
+        let plan = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace).unwrap();
+        assert_eq!(plan["plan"]["jobs"].as_array().unwrap().len(), 2);
+        assert_eq!(READS.load(Ordering::Relaxed), 1);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn planning_interleaved_specs_preserves_order_without_retaining_decoded_drawings() {
+        use std::sync::{
+            Arc, OnceLock,
+            atomic::{AtomicUsize, Ordering},
+        };
+        static RASTER: OnceLock<Arc<cadcraft_doc::Raster>> = OnceLock::new();
+        static READS: AtomicUsize = AtomicUsize::new(0);
+        static MAX_RESIDENT: AtomicUsize = AtomicUsize::new(0);
+        fn counted_read(bytes: &[u8], name: &str) -> std::result::Result<Drawing, String> {
+            let raster = RASTER.get_or_init(|| Arc::new(cadcraft_doc::Raster::new(1, 1, vec![1, 2, 3, 255]).unwrap()));
+            MAX_RESIDENT.fetch_max(Arc::strong_count(raster), Ordering::Relaxed);
+            READS.fetch_add(1, Ordering::Relaxed);
+            let mut drawing = cadcraft_io::read(bytes, name).map_err(|e| e.to_string())?;
+            drawing.rasters.insert("synthetic-test-image", raster.clone());
+            Ok(drawing)
+        }
+        let hooks = file::IoHooks {
+            read: counted_read,
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
+        };
+        let root = std::env::temp_dir().join(format!("cadcraft-figure-interleaved-{}", super::super::proposal::files::run_id()));
+        std::fs::create_dir(&root).unwrap();
+        let mut d = Drawing::new_metric();
+        d.layouts.push(Layout::new("Figure", 1));
+        std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+        for id in ["F1", "F2", "F3"] {
+            std::fs::write(root.join(format!("{id}.json")), format!(r#"{{"figure_id":"{id}","source_drawing":"source.dxf","layout":"Figure"}}"#))
+                .unwrap();
+        }
+        let p = json!({"action":"plan","spec_paths":[root.join("F1.json"),root.join("F2.json"),root.join("F3.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
+        READS.store(0, Ordering::Relaxed);
+        MAX_RESIDENT.store(0, Ordering::Relaxed);
+        let plan = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace).unwrap();
+        let names: Vec<_> = plan["plan"]["jobs"].as_array().unwrap().iter().map(|j| j["filename"].as_str().unwrap()).collect();
+        assert_eq!(names, ["A_E_F1.pdf", "A_E_F2.pdf", "A_E_F3.pdf", "B_E_F1.pdf", "B_E_F2.pdf", "B_E_F3.pdf"]);
+        assert_eq!(READS.load(Ordering::Relaxed), 3);
+        assert!(MAX_RESIDENT.load(Ordering::Relaxed) <= 1, "prior decoded drawings were still resident");
         std::fs::remove_dir_all(root).unwrap();
     }
     #[cfg(windows)]
@@ -113,11 +337,11 @@ mod tests {
 
     #[cfg(windows)]
     fn check_retained_stream(contents: &[u8]) -> std::result::Result<(), Box<dyn std::error::Error>> {
-        file::set_io(file::IoHooks {
+        let hooks = file::IoHooks {
             read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
             write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
             plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
-        });
+        };
         let root = std::env::temp_dir().join(format!("cadcraft-figure-stream-{}", super::super::proposal::files::run_id()));
         std::fs::create_dir(&root)?;
         let mut d = Drawing::new_metric();
@@ -125,7 +349,7 @@ mod tests {
         std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf")?)?;
         std::fs::write(root.join("spec.json"), br#"{"figure_id":"F","source_drawing":"source.dxf","layout":"Figure"}"#)?;
         let mut p = json!({"action":"plan","spec_paths":[root.join("spec.json")],"sites":["A","B"],"events":["E"],"mode":"per_site","format":"pdf","output_folder":root.join("out")});
-        let planned = native::run(&p, &super::super::proposal::files::rename_no_replace)?;
+        let planned = native::run_with_hooks(&p, &hooks, &super::super::proposal::files::rename_no_replace)?;
         p["action"] = json!("execute");
         p["approved_hash"] = planned["hash"].clone();
         let count = std::cell::Cell::new(0);
@@ -142,7 +366,7 @@ mod tests {
             std::fs::write(stream, contents).map_err(|e| e.to_string())?;
             Ok(())
         };
-        let result = native::run(&p, &failure)?;
+        let result = native::run_with_hooks(&p, &hooks, &failure)?;
         let first = root.join("out/A_E_F.pdf");
         let actual = std::fs::read(&first);
         let mut stream = first.as_os_str().to_os_string();
@@ -232,7 +456,7 @@ impl Interactive for ExportPrompt {
 pub(super) mod native {
     use super::super::{
         file,
-        proposal::files::{self, Checked, Mover},
+        proposal::files::{self, Checked, Mover, no_named_streams},
     };
     use super::{Session, Value, json};
     use cadcraft_doc::{Drawing, EntityKind, XrefStatus};
@@ -394,32 +618,120 @@ pub(super) mod native {
         }
         Err("output_limit: no available versioned name".into())
     }
+    // Escaped braces are literal MTEXT characters, not formatting groups. Scan escape
+    // pairs at both delimiters so a literal backslash cannot masquerade as a brace.
+    fn escaped_placeholder_end(value: &str) -> Option<usize> {
+        let mut at = 0;
+        while let Some(rest) = value.get(at..).filter(|s| !s.is_empty()) {
+            if rest.starts_with(r"\}\}") {
+                return Some(at);
+            }
+            let mut chars = rest.chars();
+            let first = chars.next()?;
+            at += first.len_utf8();
+            if first == '\\' {
+                at += chars.next().map_or(0, char::len_utf8);
+            }
+        }
+        None
+    }
+    fn literal_placeholder_key(value: &str) -> String {
+        let mut key = String::new();
+        let mut chars = value.chars();
+        while let Some(c) = chars.next() {
+            if c != '\\' {
+                key.push(c);
+            } else {
+                match chars.next() {
+                    Some('\\') => key.push('\\'),
+                    Some('P') => key.push('\n'),
+                    Some(c) => {
+                        key.push('\\');
+                        key.push(c);
+                    }
+                    None => key.push('\\'),
+                }
+            }
+        }
+        key
+    }
+    // Advance one source token, preserving whether we are inside an opaque formatting
+    // argument. Stacks escape semicolons; ordinary formatting arguments do not.
+    fn mtext_source_step(value: &str, argument: &mut Option<bool>) -> usize {
+        let mut chars = value.chars();
+        let Some(first) = chars.next() else {
+            return 0;
+        };
+        let mut count = first.len_utf8();
+        if first == ';' && argument.is_some() {
+            *argument = None;
+        } else if first == '\\'
+            && *argument != Some(false)
+            && let Some(code) = chars.next()
+        {
+            count += code.len_utf8();
+            if argument.is_none() && matches!(code, 'f' | 'F' | 'H' | 'W' | 'Q' | 'T' | 'A' | 'C' | 'c' | 'p' | 'S') {
+                *argument = Some(code == 'S');
+            }
+        }
+        count
+    }
     fn substitute(value: &str, values: &BTreeMap<String, String>, qa: &mut Vec<Qa>, subject: &str, mtext: bool) -> Checked<String> {
         let mut out = String::new();
-        let mut rest = value;
-        while let Some(at) = rest.find("{{") {
-            let (head, tail) = rest.split_at(at);
-            out.push_str(head);
-            let Some(end) = tail.find("}}") else {
-                rest = tail;
-                break;
-            };
-            let key = tail.get(2..end).unwrap_or_default();
-            if let Some(v) = values.get(key) {
-                let replaced = if mtext { cadcraft_doc::mtext_literal(v) } else { v.clone() };
-                if out.len().saturating_add(replaced.len()) > 1 << 20 {
+        let mut at = 0;
+        let mut copied = 0;
+        // Formatting arguments are not literal text. Keep legacy raw placeholders there,
+        // but do not interpret escaped markers inside font/format/stack arguments.
+        let mut argument = None;
+        let mut escaped_possible = true;
+        while let Some(rest) = value.get(at..).filter(|s| !s.is_empty()) {
+            let escaped = mtext && escaped_possible && argument.is_none() && rest.starts_with(r"\{\{");
+            let raw = rest.starts_with("{{");
+            if raw || escaped {
+                let width = if escaped { 4 } else { 2 };
+                let body = rest.get(width..).unwrap_or_default();
+                let end = if escaped { escaped_placeholder_end(body) } else { body.find("}}") };
+                let Some(end) = end else {
+                    if raw {
+                        break;
+                    }
+                    // No escaped closer remains. Continue raw markers without repeatedly
+                    // scanning the same unterminated escaped suffix.
+                    escaped_possible = false;
+                    continue;
+                };
+                let key_source = body.get(..end).unwrap_or_default();
+                let key = if escaped { literal_placeholder_key(key_source) } else { key_source.to_owned() };
+                let consumed = width + end + width;
+                let prefix = value.get(copied..at).unwrap_or_default();
+                let replacement = values.get(&key).map(|v| if mtext { cadcraft_doc::mtext_literal(v) } else { v.clone() });
+                let original = rest.get(..consumed).unwrap_or_default();
+                let replaced = replacement.as_deref().unwrap_or(original);
+                if out.len().saturating_add(prefix.len()).saturating_add(replaced.len()) > 1 << 20 {
                     return Err("text_limit: expanded text exceeds 1 MiB".into());
                 }
-                out.push_str(&replaced);
-            } else {
-                if qa.len() >= 10_000 {
-                    return Err("qa_limit: too many QA records".into());
+                out.push_str(prefix);
+                out.push_str(replaced);
+                if replacement.is_none() {
+                    if qa.len() >= 10_000 {
+                        return Err("qa_limit: too many QA records".into());
+                    }
+                    qa.push(Qa::new(Severity::Warning, "unresolved_placeholder", format!("{subject}: {key}"), "Placeholder has no value"));
                 }
-                qa.push(Qa::new(Severity::Warning, "unresolved_placeholder", format!("{subject}: {key}"), "Placeholder has no value"));
-                out.push_str(tail.get(..end + 2).unwrap_or_default());
+                if mtext {
+                    let mut source = original;
+                    while !source.is_empty() {
+                        let count = mtext_source_step(source, &mut argument);
+                        source = source.get(count..).unwrap_or_default();
+                    }
+                }
+                at += consumed;
+                copied = at;
+                continue;
             }
-            rest = tail.get(end + 2..).unwrap_or_default();
+            at += if mtext { mtext_source_step(rest, &mut argument) } else { rest.chars().next().map_or(0, char::len_utf8) };
         }
+        let rest = value.get(copied..).unwrap_or_default();
         if out.len().saturating_add(rest.len()) > 1 << 20 {
             return Err("text_limit: expanded text exceeds 1 MiB".into());
         }
@@ -499,8 +811,9 @@ pub(super) mod native {
                         a.text.value = substitute(&a.text.value, &values, qa, &subject, false)?;
                     }
                 }
-                EntityKind::Viewport(v) if Some(handle) == selected => {
-                    if let Some(b) = bounds.filter(|b| !b.is_empty()) {
+                EntityKind::Viewport(v) if v.id != 1 => {
+                    v.frozen_layers.retain(|name| !spec.visible_layers.iter().any(|visible| visible.eq_ignore_ascii_case(name)));
+                    if let Some(b) = bounds.filter(|b| Some(handle) == selected && !b.is_empty()) {
                         let pad = 1. + 2. * spec.extent_buffer_pct / 100.;
                         let (_, w, h) = crate::View::twisted_box(b, v.view_twist());
                         let height = (h.max(w * v.height / v.width) * pad).max(1e-9);
@@ -528,8 +841,8 @@ pub(super) mod native {
         }
         Ok(changed)
     }
-    pub fn plot_session(mut d: Drawing, path: &Path, qa: &mut Vec<Qa>) -> Checked<Session> {
-        for outcome in super::super::blocks::xref::load::load_all(&mut d, Some(&path.to_string_lossy())) {
+    pub fn plot_session(mut d: Drawing, path: &Path, h: &file::IoHooks, qa: &mut Vec<Qa>) -> Checked<Session> {
+        for outcome in super::super::blocks::xref::load::load_all_with_hooks(&mut d, Some(&path.to_string_lossy()), h) {
             if outcome.status != XrefStatus::Loaded {
                 qa.push(Qa::new(Severity::Error, "broken_reference", outcome.name, &outcome.detail));
             }
@@ -542,13 +855,18 @@ pub(super) mod native {
                 "Source contains content the reader could not fully inspect",
             ));
         }
-        let mut session = Session::new();
-        let i = session.open_drawing(d, "Outgoing", Some(path.to_string_lossy().into_owned()));
+        let mut session = opened_session(d, path);
+        let i = session.active;
         super::super::image::after_open(&mut session, i);
         for note in session.log.iter().filter(|n| n.starts_with("Image") || n.starts_with("Images:")) {
             qa.push(Qa::new(Severity::Warning, "check_unavailable", path.to_string_lossy(), note));
         }
         Ok(session)
+    }
+    fn opened_session(d: Drawing, path: &Path) -> Session {
+        let mut session = Session::new();
+        session.open_drawing(d, "Outgoing", Some(path.to_string_lossy().into_owned()));
+        session
     }
     pub fn plot_options(s: &Session, layout: &str, format: &str) -> Checked<Value> {
         super::super::plotters::plot_options(
@@ -558,10 +876,20 @@ pub(super) mod native {
         )
         .map_err(|e| e.to_string())
     }
-    pub fn plot(s: &mut Session, options: &Value, path: &Path) -> Checked<()> {
+    pub fn plot(s: &mut Session, options: &Value, path: &Path, h: &file::IoHooks) -> Checked<()> {
         let mut p = options.clone();
         p["path"] = json!(path);
-        s.execute("plot", &p).map_err(|e| e.to_string())?;
+        let hook = h.plot.ok_or("plot_unavailable: plotting is not available in this build")?;
+        // The ordinary PLOT command runs inside Session::execute's panic guard. This
+        // explicit-hook path must catch the same failure here, before export cleanup.
+        let plotted = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let normalized = super::super::plotters::plot_options(s, &p, "plot")?;
+            super::super::layout::run_plot_with_hook(s, &normalized, "plot", hook)
+        }));
+        match plotted {
+            Ok(result) => result.map_err(|e| e.to_string())?,
+            Err(panic) => return Err(crate::EngineError::Internal("plot".into(), crate::guard::message(&*panic)).to_string()),
+        };
         let file = fs::File::open(path).map_err(|e| e.to_string())?;
         use std::io::Read;
         let mut prefix = [0u8; 8];
@@ -598,35 +926,66 @@ pub(super) mod native {
         let jobs = figures::series(&specs, &r.sites, &r.events, &r.mode, &r.format).map_err(|e| format!("{}: {}", e.code, e.message))?;
         let disk = existing(&root)?;
         let mut reserved = disk.clone();
-        let mut rows = Vec::new();
-        for job in jobs {
-            let input = loaded.get(job.spec_index).ok_or("invalid_spec: missing spec")?;
-            let d = read_drawing(&input.source, h)?;
-            let mut qa = Vec::new();
-            refs.walk(&d, &input.source, h, 0, &mut BTreeSet::from([input.source.clone()]), &mut qa)?;
-            let mut session = plot_session(d, &input.source, &mut qa)?;
-            let viewport = prepare(session.doc_mut().map_err(|e| e.to_string())?, &input.spec, &job.site, &job.event, &mut qa)?;
-            let opts = plot_options(&session, &input.spec.layout, &r.format)?;
+        let mut per_spec = vec![Vec::new(); loaded.len()];
+        let mut filenames = Vec::with_capacity(jobs.len());
+        for (index, job) in jobs.iter().enumerate() {
+            per_spec.get_mut(job.spec_index).ok_or("invalid_spec: missing spec")?.push(index);
             let filename = versioned(&job.filename, &disk)?;
             if !reserved.insert(paths::case_fold(&filename)) {
                 return Err("output_collision: versioned outputs collide within batch".into());
             }
-            rows.push(json!({"spec_index":job.spec_index,"site":job.site,"event":job.event,"figure_id":input.spec.figure_id,"source_drawing":input.source,"layout":input.spec.layout,"filename":filename,"qa":qa,"viewport":viewport,"plot_options":opts}));
+            filenames.push(filename);
+        }
+        let mut rows = vec![None; jobs.len()];
+        // Decode and load references for one spec at a time. Releasing it before the next
+        // spec bounds resident decoded raster data even when many specs share one source.
+        for (spec_index, input) in loaded.iter().enumerate() {
+            let d = read_drawing(&input.source, h)?;
+            let mut baseline_qa = Vec::new();
+            refs.walk(&d, &input.source, h, 0, &mut BTreeSet::from([input.source.clone()]), &mut baseline_qa)?;
+            let session = plot_session(d, &input.source, h, &mut baseline_qa)?;
+            let base = session.doc().map_err(|e| e.to_string())?.clone();
+            drop(session);
+            for &index in per_spec.get(spec_index).ok_or("invalid_spec: missing spec jobs")? {
+                let job = jobs.get(index).ok_or("invalid_spec: missing job")?;
+                let mut qa = baseline_qa.clone();
+                let mut session = opened_session(base.clone(), &input.source);
+                let viewport = prepare(session.doc_mut().map_err(|e| e.to_string())?, &input.spec, &job.site, &job.event, &mut qa)?;
+                let opts = plot_options(&session, &input.spec.layout, &r.format)?;
+                let filename = filenames.get(index).ok_or("invalid_spec: missing filename")?;
+                rows[index] = Some(
+                    json!({"spec_index":job.spec_index,"site":job.site,"event":job.event,"figure_id":input.spec.figure_id,"source_drawing":input.source,"layout":input.spec.layout,"filename":filename,"qa":qa,"viewport":viewport,"plot_options":opts}),
+                );
+            }
         }
         refs.check()?;
+        let rows: Vec<Value> =
+            rows.into_iter().map(|row| row.ok_or_else(|| "invalid_spec: missing planned job".to_string())).collect::<Checked<_>>()?;
         let plan = json!({"version":1,"command":"figureexport","output_folder":root,"mode":r.mode,"format":r.format,"jobs":rows,"fingerprints":refs.fingerprints});
         Ok((plan, loaded, refs))
     }
     pub fn run(p: &Value, mover: &Mover<'_>) -> Checked<Value> {
+        let r = request(p)?;
+        let h = file::io().ok_or("plot_unavailable: drawing formats unavailable")?;
+        run_request(&r, h, mover)
+    }
+    #[cfg(test)]
+    pub fn run_with_hooks(p: &Value, h: &file::IoHooks, mover: &Mover<'_>) -> Checked<Value> {
+        let r = request(p)?;
+        run_request(&r, h, mover)
+    }
+    fn request(p: &Value) -> Checked<Request> {
         if serde_json::to_vec(p).map_err(|e| e.to_string())?.len() > 4 << 20 {
             return Err("invalid_input: inputs exceed 4 MiB".into());
         }
         let r: Request = serde_json::from_value(p.clone()).map_err(|e| format!("invalid_input: {e}"))?;
         if !["plan", "preview", "execute", "create"].contains(&r.action.as_str()) {
-            return Err("invalid_input: action must be plan, preview or execute".into());
+            return Err("invalid_input: action must be plan, preview, execute or create (alias for execute)".into());
         }
-        let h = file::io().ok_or("plot_unavailable: drawing formats unavailable")?;
-        let (plan, loaded, refs) = build(&r, h)?;
+        Ok(r)
+    }
+    fn run_request(r: &Request, h: &file::IoHooks, mover: &Mover<'_>) -> Checked<Value> {
+        let (plan, loaded, refs) = build(r, h)?;
         let blocked = plan.get("jobs").and_then(Value::as_array).is_some_and(|jobs| {
             jobs.iter().any(|j| {
                 j.get("qa").and_then(Value::as_array).is_some_and(|qa| qa.iter().any(|q| q.get("severity").and_then(Value::as_str) == Some("error")))
@@ -658,32 +1017,6 @@ pub(super) mod native {
         if no_named_streams(root).is_ok() {
             let _ = fs::remove_dir(root);
         }
-    }
-    fn no_named_streams(path: &Path) -> Checked<()> {
-        #[cfg(windows)]
-        {
-            use std::os::windows::ffi::OsStrExt;
-            // Bound the dependency's UTF-16 allocation and prevent Win32 NUL truncation.
-            if path.as_os_str().encode_wide().take(32_768).count() >= 32_768 || path.as_os_str().encode_wide().any(|c| c == 0) {
-                return Err("stream_inspection_failed: path is invalid or too long".into());
-            }
-            let failed = |e| format!("stream_inspection_failed: cannot inspect {}: {e}", path.display());
-            // Rollback must not delete caller-added streams that primary-byte hashes omit.
-            // The lazy iterator detects even empty named streams and skips only unnamed $DATA.
-            let mut streams = match fsquirrel::list(path) {
-                Ok(streams) => streams,
-                // An ordinary directory has no unnamed $DATA stream. Only its documented
-                // ERROR_HANDLE_EOF result is empty; all other inspection failures retain it.
-                Err(e) if e.raw_os_error() == Some(0x8007_0026_u32.cast_signed()) && path.is_dir() => return Ok(()),
-                Err(e) => return Err(failed(e)),
-            };
-            if streams.next().transpose().map_err(failed)?.is_some() {
-                return Err(format!("named_stream: {} has a named stream not covered by the primary-byte hash", path.display()));
-            }
-        }
-        #[cfg(not(windows))]
-        let _ = path;
-        Ok(())
     }
     #[cfg(all(test, windows))]
     mod stream_tests {
@@ -753,7 +1086,7 @@ pub(super) mod native {
                 let input = loaded.get(i).ok_or("invalid_plan: spec missing")?;
                 let d = read_drawing(&input.source, h)?;
                 let mut qa = Vec::new();
-                let mut session = plot_session(d, &input.source, &mut qa)?;
+                let mut session = plot_session(d, &input.source, h, &mut qa)?;
                 prepare(
                     session.doc_mut().map_err(|e| e.to_string())?,
                     &input.spec,
@@ -766,7 +1099,7 @@ pub(super) mod native {
                 }
                 let name = job.get("filename").and_then(Value::as_str).ok_or("invalid_plan: filename missing")?;
                 let path = files::child(&stage, name)?;
-                plot(&mut session, job.get("plot_options").ok_or("invalid_plan: plot options missing")?, &path)?;
+                plot(&mut session, job.get("plot_options").ok_or("invalid_plan: plot options missing")?, &path, h)?;
                 let digest = files::fingerprint(&path)?;
                 artifacts.push(json!({"path":root.join(name),"sha256":digest,"qa":job.get("qa"),"site":job.get("site"),"event":job.get("event"),"figure_id":job.get("figure_id")}));
             }

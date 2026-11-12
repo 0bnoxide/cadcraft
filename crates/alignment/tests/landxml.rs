@@ -25,7 +25,7 @@ fn exact_spiral_arc_export_reimports_and_units_scale() {
     assert!(xml.contains("radiusStart=\"INF\""));
     let imported = landxml::import(xml.as_bytes(), Unit::Foot).unwrap();
     assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
-    let b = &imported.alignments[0];
+    let b = &imported.alignments[0].definition;
     assert_eq!(b.name, a.name);
     assert_eq!(b.start_station, a.start_station);
     for s in [-123.5, -100., -63.5, 0., 36.5] {
@@ -34,7 +34,7 @@ fn exact_spiral_arc_export_reimports_and_units_scale() {
         assert!((p.point[0] - q.point[0]).hypot(p.point[1] - q.point[1]) < 1e-6);
     }
     let metric = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
-    assert!((metric.alignments[0].length().unwrap() - a.length().unwrap() * 0.3048).abs() < 1e-6);
+    assert!((metric.alignments[0].definition.length().unwrap() - a.length().unwrap() * 0.3048).abs() < 1e-6);
 }
 fn file(body: &str) -> String {
     format!(
@@ -48,7 +48,7 @@ fn unsupported_alignment_is_refused_without_losing_other_alignment() {
     assert_eq!(r.alignments.len(), 1);
     assert_eq!(r.refusals[0].code, "UNSUPPORTED_SPIRAL");
     assert!(r.warnings.iter().any(|w| w.code == "STATION_EQUATIONS_IGNORED"));
-    assert!(r.warnings.iter().any(|w| w.code == "PROFILES_NOT_SUPPORTED"));
+    assert!(!r.warnings.iter().any(|w| w.code == "PROFILES_NOT_SUPPORTED"));
 }
 #[test]
 fn hostile_xml_limits_and_nonfinite_values_are_refused() {
@@ -113,7 +113,7 @@ fn shallow_arc_roundtrip_preserves_small_sweep_precision() {
         let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
         assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
         assert_eq!(imported.alignments.len(), 1);
-        let b = &imported.alignments[0];
+        let b = &imported.alignments[0].definition;
         assert!((b.length().unwrap() - length).abs() < 1e-6);
         assert_eq!(b.elements[0].kind, Kind::Arc { radius: 1e12, turn });
         let end = b.elements[0].at(b.elements[0].length).unwrap();
@@ -146,7 +146,7 @@ fn arc_exchange_and_projection_keep_major_sweeps_and_rotation() {
         let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
         let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
         assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
-        let b = &imported.alignments[0];
+        let b = &imported.alignments[0].definition;
         assert!((b.length().unwrap() - 3. * std::f64::consts::PI).abs() < 1e-6);
         let endpoint = b.at(b.length().unwrap(), 0.).unwrap().point;
         assert!((endpoint[0] - side * 2.).abs() < 1e-6);
@@ -199,7 +199,7 @@ fn full_turn_bounded_clothoid_exports_as_exact_forward_pi_spirals() {
     let xml = landxml::export(std::slice::from_ref(&original), Unit::Meter).unwrap();
     let imported = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
     assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
-    let restored = &imported.alignments[0];
+    let restored = &imported.alignments[0].definition;
     assert!(restored.elements.len() > 1);
     assert!(restored.elements.iter().all(|e| matches!(e.kind, Kind::Spiral { .. })));
     for fraction in [0., 0.01, 0.1, 0.25, 0.5, 0.8, 0.99, 1.] {
@@ -238,7 +238,7 @@ fn divided_spirals_preserve_entrance_exit_turn_and_endpoint_curvature() {
         let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
         let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
         assert!(result.refusals.is_empty(), "{:?}", result.refusals);
-        let b = &result.alignments[0];
+        let b = &result.alignments[0].definition;
         assert!(b.elements.len() > 1);
         assert!(matches!(b.elements.first().unwrap().kind, Kind::Spiral { radius_start: r, turn: t, .. } if r == radius_start && t == turn));
         assert!(matches!(b.elements.last().unwrap().kind, Kind::Spiral { radius_end: r, turn: t, .. } if r == radius_end && t == turn));
@@ -301,7 +301,7 @@ fn nearly_full_turn_spiral_avoids_an_ill_conditioned_pi() {
     let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
     let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
     assert!(result.refusals.is_empty(), "{:?}", result.refusals);
-    let b = &result.alignments[0];
+    let b = &result.alignments[0].definition;
     assert!(b.elements.len() > 1);
     for fraction in [0., 0.5, 1.] {
         let station = 100. + fraction * length;
@@ -328,7 +328,7 @@ fn maximum_allowed_turn_is_exchanged_without_approximation() {
     let xml = landxml::export(std::slice::from_ref(&a), Unit::Meter).unwrap();
     let result = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
     assert!(result.refusals.is_empty(), "{:?}", result.refusals);
-    let b = &result.alignments[0];
+    let b = &result.alignments[0].definition;
     assert!(b.elements.len() > 32);
     for fraction in [0., 0.01, 0.125, 0.249, 0.5, 0.751, 0.99, 1.] {
         let station = -50. + fraction * length;

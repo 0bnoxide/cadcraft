@@ -1,6 +1,6 @@
 //! Standard entity extension dictionaries keep exact route definitions with their carrier.
 use crate::Result;
-use cadcraft_alignment::{Alignment, MAX_ELEMENTS};
+use cadcraft_alignment::{Alignment, MAX_ELEMENTS, ValidatedAlignment};
 use cadcraft_doc::foreign::ForeignObject;
 use cadcraft_doc::{Drawing, Handle, RawTag};
 use cadcraft_doc::{EntityKind, LwPolyline};
@@ -14,28 +14,54 @@ pub(super) struct Stored {
     pub version: u32,
     pub definition: Alignment,
     pub chord_tolerance: f64,
+    #[serde(default)]
+    pub profiles: cadcraft_alignment::profile::Profiles,
 }
 pub(super) fn carrier(data: &Stored) -> Result<LwPolyline> {
-    let vertices = data
-        .definition
-        .polyline(data.chord_tolerance)
+    let view = data.definition.validated().map_err(|e| super::bad("alignment", e.to_string()))?;
+    carrier_from_view(&view, data.chord_tolerance)
+}
+fn carrier_from_view(view: &ValidatedAlignment<'_>, tolerance: f64) -> Result<LwPolyline> {
+    let vertices = view
+        .carrier_vertices(tolerance)
         .map_err(|e| super::bad("alignment", e.to_string()))?
         .into_iter()
-        .map(|p| PolyVertex::new(Vec2::new(p[0], p[1])))
+        .map(|v| PolyVertex::with_bulge(Vec2::new(v.point[0], v.point[1]), v.bulge))
         .collect();
     Ok(LwPolyline { vertices, closed: false, const_width: 0., elevation: 0., plinegen: false })
 }
 pub(super) fn load(d: &Drawing, handle: Handle) -> Result<Stored> {
+    let data = load_data(d, handle)?;
+    validated(d, handle, &data)?;
+    Ok(data)
+}
+pub(super) fn load_data(d: &Drawing, handle: Handle) -> Result<Stored> {
     let raw = read_data(d, handle)?;
     let value: serde_json::Value = serde_json::from_str(&raw).map_err(|_| invalid("malformed JSON"))?;
     if value.get("definition").and_then(|v| v.get("elements")).and_then(|v| v.as_array()).is_none_or(|v| v.len() > MAX_ELEMENTS) {
         return Err(invalid("element count limit"));
     }
+    if let Some(profiles) = value.get("profiles") {
+        if profiles.get("design").and_then(|d| d.get("pvis")).and_then(|v| v.as_array()).is_some_and(|p| p.len() > MAX_ELEMENTS) {
+            return Err(invalid("too many PVIs"));
+        }
+        if let Some(segments) = profiles.get("ground").and_then(|g| g.get("segments")).and_then(|v| v.as_array()) {
+            let total = segments.iter().try_fold(0usize, |n, v| n.checked_add(v.as_array().map_or(0, Vec::len)));
+            if segments.len() > cadcraft_alignment::MAX_POINTS || total.is_none_or(|n| n > cadcraft_alignment::MAX_POINTS) {
+                return Err(invalid("too many ground samples"));
+            }
+        }
+    }
     let data: Stored = serde_json::from_value(value).map_err(|_| invalid("invalid definition fields"))?;
     if data.version != 1 {
         return Err(invalid("unsupported storage version"));
     }
-    let expected = carrier(&data)?;
+    Ok(data)
+}
+pub(super) fn validated<'a>(d: &Drawing, handle: Handle, data: &'a Stored) -> Result<ValidatedAlignment<'a>> {
+    let view = data.definition.validated().map_err(|e| invalid(&e.to_string()))?;
+    data.profiles.validate_on(&view).map_err(|e| invalid(&e.to_string()))?;
+    let expected = carrier_from_view(&view, data.chord_tolerance)?;
     let e = d.entity(handle).ok_or_else(|| invalid("carrier missing"))?;
     let EntityKind::LwPolyline(actual) = &e.kind else { return Err(invalid("carrier is not a lightweight polyline")) };
     let equal = actual.vertices.len() == expected.vertices.len()
@@ -44,14 +70,34 @@ pub(super) fn load(d: &Drawing, handle: Handle) -> Result<Stored> {
         && actual.const_width == 0.
         && e.common.extrusion == Vec3::Z
         && actual.vertices.iter().zip(&expected.vertices).all(|(a, b)| {
-            a.bulge == 0. && a.start_width == 0. && a.end_width == 0. && (a.p.x - b.p.x).abs() <= 1e-7 && (a.p.y - b.p.y).abs() <= 1e-7
+            (a.bulge - b.bulge).abs() <= 1e-9
+                && a.start_width == 0.
+                && a.end_width == 0.
+                && (a.p.x - b.p.x).abs() <= 1e-7
+                && (a.p.y - b.p.y).abs() <= 1e-7
         });
     if !equal {
         return Err(super::bad("alignment", "STALE_ALIGNMENT: carrier geometry differs from its exact definition"));
     }
-    Ok(data)
+    Ok(view)
+}
+/// Validate an alignment carrier before COPY, then translate its authoritative geometry.
+/// A plain entity (including one with another application's dictionary) has no definition.
+pub(super) fn translated_if_present(d: &Drawing, handle: Handle, delta: Vec2) -> Result<Option<Stored>> {
+    if record_handle(d, handle)?.is_none() {
+        return Ok(None);
+    }
+    let mut data = load(d, handle)?;
+    for element in &mut data.definition.elements {
+        element.start[0] += delta.x;
+        element.start[1] += delta.y;
+    }
+    // Reject non-finite or out-of-range positions before changing the staged drawing.
+    carrier(&data)?;
+    Ok(Some(data))
 }
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
+    data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;
     // Serialization is capped while writing, before an input-sized string can be allocated.
     struct Capped(Vec<u8>);
     impl std::io::Write for Capped {
@@ -100,11 +146,9 @@ fn record_handle(d: &Drawing, handle: Handle) -> Result<Option<Handle>> {
     let dict =
         d.foreign.objects.iter().find(|o| o.handle == dict && o.kind == "DICTIONARY").ok_or_else(|| invalid("missing extension dictionary"))?;
     let mut out = None;
-    for pair in dict.tags.windows(2) {
-        if let [key, value] = pair
-            && key.code == 3
-            && key.value == KEY
-        {
+    for (index, key) in dict.tags.iter().enumerate() {
+        if key.code == 3 && key.value == KEY {
+            let value = dict.tags.get(index + 1).ok_or_else(|| invalid("duplicate or malformed alignment entry"))?;
             if out.is_some() || !matches!(value.code, 350 | 360) {
                 return Err(invalid("duplicate or malformed alignment entry"));
             }

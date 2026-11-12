@@ -82,16 +82,17 @@ fn create(s: &mut Session, p: &Value) -> Result<Value> {
     };
     let data = Stored {
         version: 1,
+        profiles: Default::default(),
         definition: Alignment { name: name.into(), start_station: scalar(p, "start_station", 0., CMD)?, format: format(p)?, elements },
         chord_tolerance: scalar(p, "chord_tolerance", 0.01, CMD)?,
     };
-    data.definition.length().map_err(|e| bad(CMD, e.to_string()))?;
     // Ordinary command errors do not restore Session's snapshot. Stage fallible additions.
     let mut d = s.doc()?.clone();
     let handle = add(&mut d, &s.space(), s.current_common(), &data)?;
     *s.doc_mut()? = d;
     s.set_selection(vec![handle]);
-    Ok(json!({"handle":handle.hex(),"length":data.definition.length().map_err(|e|bad(CMD,e.to_string()))?,"elements":data.definition.elements.len()}))
+    let length: f64 = data.definition.elements.iter().map(|e| e.length).sum();
+    Ok(json!({"handle":handle.hex(),"length":length,"elements":data.definition.elements.len()}))
 }
 fn from_polyline(p: &LwPolyline) -> Result<Vec<Element>> {
     const CMD: &str = "alignmentcreate";
@@ -133,19 +134,20 @@ pub(super) fn list<'a>(p: &'a Value, key: &str, cmd: &str) -> Result<&'a [Value]
 fn report(s: &mut Session, p: &Value) -> Result<Value> {
     const CMD: &str = "alignmentreport";
     let h = selected(s, p, "alignment", CMD)?;
-    let data = alignment_store::load(s.doc()?, h)?;
+    let data = alignment_store::load_data(s.doc()?, h)?;
+    let view = alignment_store::validated(s.doc()?, h, &data)?;
     let a = &data.definition;
     let mut points = Vec::new();
     for v in list(p, "stations", CMD)? {
         let station = if v.is_number() { v.as_f64().ok_or_else(|| bad(CMD, "invalid station"))? } else { scalar(v, "station", f64::NAN, CMD)? };
         let offset = if v.is_object() { scalar(v, "offset", 0., CMD)? } else { 0. };
-        let pose = a.at(station, offset).map_err(|e| bad(CMD, e.to_string()))?;
+        let pose = view.at(station, offset).map_err(|e| bad(CMD, e.to_string()))?;
         points.push(json!({"station":station,"offset":offset,"point":pose.point,"direction":pose.direction,"display":a.format.display(station).map_err(|e|bad(CMD,e.to_string()))?}));
     }
     let mut projections = Vec::new();
     for v in list(p, "points", CMD)? {
         let point = super::subsurface_draw::point(&json!({"point":v}), "point", None, CMD)?;
-        projections.push(a.project(point).map_err(|e| bad(CMD, e.to_string()))?);
+        projections.push(view.project(point).map_err(|e| bad(CMD, e.to_string()))?);
     }
     // Use the same local length sum as station queries, adding the origin only once.
     let mut distance_along = 0.;
@@ -154,9 +156,7 @@ fn report(s: &mut Session, p: &Value) -> Result<Value> {
         elements.push(json!({"index":index,"start_station":a.start_station+distance_along,"end_station":a.start_station+(distance_along+e.length),"element":e,"end":e.at(e.length).map_err(|e|bad(CMD,e.to_string()))?}));
         distance_along += e.length;
     }
-    Ok(
-        json!({"handle":h.hex(),"definition":a,"length":a.length().map_err(|e|bad(CMD,e.to_string()))?,"elements":elements,"points_at_stations":points,"projections":projections}),
-    )
+    Ok(json!({"handle":h.hex(),"definition":a,"length":view.length(),"elements":elements,"points_at_stations":points,"projections":projections}))
 }
 fn unit(p: &Value, cmd: &str) -> Result<Unit> {
     match p.get("unit") {
@@ -180,7 +180,7 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
     let mut d = s.doc()?.clone();
     let mut handles = Vec::new();
     for a in result.alignments {
-        let data = Stored { version: 1, definition: a, chord_tolerance: tolerance };
+        let data = Stored { version: 1, definition: a.definition, profiles: a.profiles, chord_tolerance: tolerance };
         handles.push(add(&mut d, &s.space(), s.current_common(), &data)?);
     }
     if !handles.is_empty() {
@@ -215,8 +215,11 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
     if handles.is_empty() || handles.len() > 128 {
         return Err(bad(CMD, "select 1..128 alignments"));
     }
-    let definitions = handles.into_iter().map(|h| alignment_store::load(s.doc()?, h).map(|d| d.definition)).collect::<Result<Vec<_>>>()?;
-    let xml = landxml::export(&definitions, unit(p, CMD)?).map_err(|e| bad(CMD, e.to_string()))?;
+    let definitions = handles
+        .into_iter()
+        .map(|h| alignment_store::load(s.doc()?, h).map(|d| landxml::Route { definition: d.definition, profiles: d.profiles }))
+        .collect::<Result<Vec<_>>>()?;
+    let xml = landxml::export_routes(&definitions, unit(p, CMD)?).map_err(|e| bad(CMD, e.to_string()))?;
     match p.get("path") {
         None => Ok(json!({"xml":xml})),
         Some(Value::String(path)) => {
@@ -237,7 +240,355 @@ fn export(s: &mut Session, p: &Value) -> Result<Value> {
 #[cfg(test)]
 mod tests {
     use crate::Session;
+    use cadcraft_doc::{EntityKind, Handle, RawTag, foreign::ForeignObject};
     use serde_json::json;
+    use std::sync::Arc;
+
+    fn line(s: &mut Session, name: &str) -> Handle {
+        let r = s.execute("alignmentcreate", &json!({"name":name,"elements":[{"start":[0,0],"direction":0,"length":10,"type":"line"}]})).unwrap();
+        Handle::parse_hex(r["handle"].as_str().unwrap()).unwrap()
+    }
+
+    #[test]
+    fn copy_translates_exact_definition_and_duplicates_owned_extension_tree() {
+        let mut s = Session::new();
+        let h = line(&mut s, "route");
+        let external = s.add_entity(cadcraft_doc::EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3::ZERO, angle: 0. })).unwrap();
+        let dict = s.doc().unwrap().foreign.entities.get(&h).unwrap().xdict.unwrap();
+        let other = s.doc_mut().unwrap().new_handle();
+        let tag = |code, value: String| RawTag { code, value };
+        let f = Arc::make_mut(&mut s.doc_mut().unwrap().foreign);
+        f.objects.iter_mut().find(|o| o.handle == dict).unwrap().tags.extend([tag(3, "OTHER_APP".into()), tag(360, other.hex())]);
+        f.objects.push(ForeignObject {
+            handle: other,
+            kind: "XRECORD".into(),
+            tags: vec![
+                tag(5, other.hex()),
+                tag(330, dict.hex()),
+                tag(100, "AcDbXrecord".into()),
+                tag(340, external.hex()),
+                tag(1, "untouched".into()),
+            ],
+        });
+        let original = s.doc().unwrap().clone();
+        let r = s.execute("copy", &json!({"handles":[h.hex()],"delta":[3,4],"count":2})).unwrap();
+        let copies: Vec<_> = r["handles"].as_array().unwrap().iter().map(|v| Handle::parse_hex(v.as_str().unwrap()).unwrap()).collect();
+        assert_eq!(copies.len(), 2);
+        for (i, copy) in copies.iter().enumerate() {
+            let d = s.doc().unwrap();
+            let data = super::super::alignment_store::load(d, *copy).unwrap();
+            assert_eq!(data.definition.elements[0].start, [3. * (i + 1) as f64, 4. * (i + 1) as f64]);
+            let cd = d.foreign.entities.get(copy).unwrap().xdict.unwrap();
+            assert_ne!(cd, dict);
+            let owned = d.foreign.objects.iter().find(|o| o.handle == cd).unwrap();
+            let foreign = owned.tags.windows(2).find(|p| p[0].code == 3 && p[0].value == "OTHER_APP").unwrap();
+            let child = Handle::parse_hex(&foreign[1].value).unwrap();
+            assert_ne!(child, other);
+            assert!(d.foreign.objects.iter().any(|o| o.handle == child
+                && o.tags.iter().any(|t| t.code == 1 && t.value == "untouched")
+                && o.tags.iter().any(|t| t.code == 340 && t.value == external.hex())));
+        }
+        assert_eq!(super::super::alignment_store::load(s.doc().unwrap(), h).unwrap().definition.elements[0].start, [0., 0.]);
+        for file in ["route.dxf", "route.dwg"] {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+            let reopened = cadcraft_io::read(&bytes, file).unwrap();
+            for copy in &copies {
+                assert!(super::super::alignment_store::load(&reopened, *copy).is_ok(), "{file}");
+                let cd = reopened.foreign.entities.get(copy).unwrap().xdict.unwrap();
+                let owned = reopened.foreign.objects.iter().find(|o| o.handle == cd).unwrap();
+                let foreign = owned.tags.windows(2).find(|p| p[0].code == 3 && p[0].value == "OTHER_APP").unwrap();
+                let child = Handle::parse_hex(&foreign[1].value).unwrap();
+                assert!(
+                    reopened.foreign.objects.iter().any(|o| o.handle == child
+                        && o.tags.iter().any(|t| t.code == 1 && t.value == "untouched")
+                        && o.tags.iter().any(|t| t.code == 340 && t.value == external.hex())),
+                    "{file}"
+                );
+            }
+        }
+        s.undo().unwrap();
+        assert_eq!(*s.doc().unwrap(), original);
+        s.redo().unwrap();
+        for copy in &copies {
+            assert!(super::super::alignment_store::load(s.doc().unwrap(), *copy).is_ok());
+        }
+        assert_eq!(
+            s.doc().unwrap().foreign.objects.iter().find(|o| o.handle == other).unwrap(),
+            original.foreign.objects.iter().find(|o| o.handle == other).unwrap()
+        );
+    }
+
+    #[test]
+    fn copy_keeps_reactors_distinct_from_the_extension_dictionary_owner() {
+        fn owner_and_reactors(tags: &[RawTag]) -> (Option<Handle>, Vec<Handle>) {
+            let mut group = None;
+            let mut owner = None;
+            let mut reactors = Vec::new();
+            for tag in tags.iter().take_while(|tag| tag.code < 1000) {
+                if tag.code == 102 {
+                    group = tag.value.trim().strip_prefix('{');
+                } else if tag.code == 330 {
+                    let handle = Handle::parse_hex(tag.value.trim());
+                    if group == Some("ACAD_REACTORS") {
+                        reactors.extend(handle);
+                    } else if group.is_none() && owner.is_none() {
+                        owner = handle;
+                    }
+                }
+            }
+            (owner, reactors)
+        }
+
+        let mut s = Session::new();
+        let source = line(&mut s, "reactors");
+        let external = s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3::ZERO, angle: 0. })).unwrap();
+        let dict = s.doc().unwrap().foreign.entities.get(&source).unwrap().xdict.unwrap();
+        let record = {
+            let root = s.doc().unwrap().foreign.objects.iter().find(|o| o.handle == dict).unwrap();
+            let entry = root.tags.windows(2).find(|pair| pair[0].code == 3 && pair[0].value == "CADCRAFT_ALIGNMENT").unwrap();
+            Handle::parse_hex(&entry[1].value).unwrap()
+        };
+        let root = Arc::make_mut(&mut s.doc_mut().unwrap().foreign).objects.iter_mut().find(|o| o.handle == dict).unwrap();
+        root.tags.splice(
+            1..1,
+            [
+                RawTag { code: 102, value: "{ACAD_REACTORS".into() },
+                RawTag { code: 330, value: external.hex() },
+                RawTag { code: 330, value: record.hex() },
+                RawTag { code: 102, value: "}".into() },
+            ],
+        );
+        let before = s.doc().unwrap().clone();
+        let result = s.execute("copy", &json!({"handles":[source.hex()],"delta":[3,4]})).unwrap();
+        let copy = Handle::parse_hex(result["handles"][0].as_str().unwrap()).unwrap();
+        for (label, drawing) in std::iter::once(("memory", s.doc().unwrap().clone())).chain(["reactors.dxf", "reactors.dwg"].map(|file| {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+            (file, cadcraft_io::read(&bytes, file).unwrap())
+        })) {
+            let source_dict = drawing.foreign.entities.get(&source).unwrap().xdict.unwrap();
+            let copy_dict = drawing.foreign.entities.get(&copy).unwrap().xdict.unwrap();
+            assert_ne!(source_dict, copy_dict, "{label}");
+            for (carrier, dict) in [(source, source_dict), (copy, copy_dict)] {
+                let root = drawing.foreign.objects.iter().find(|o| o.handle == dict).unwrap();
+                let entry = root.tags.windows(2).find(|pair| pair[0].code == 3 && pair[0].value == "CADCRAFT_ALIGNMENT").unwrap();
+                let expected_record = Handle::parse_hex(&entry[1].value).unwrap();
+                let (owner, reactors) = owner_and_reactors(&root.tags);
+                assert_eq!(owner, Some(carrier), "{label}");
+                assert!(reactors.contains(&external), "{label}: external reactor missing");
+                assert!(reactors.contains(&expected_record), "{label}: owned reactor missing");
+                assert_eq!(reactors.len(), 2, "{label}");
+                super::super::alignment_store::load(&drawing, carrier).unwrap();
+            }
+        }
+        assert_eq!(
+            *before.foreign.objects.iter().find(|o| o.handle == dict).unwrap(),
+            *s.doc().unwrap().foreign.objects.iter().find(|o| o.handle == dict).unwrap()
+        );
+    }
+
+    #[test]
+    fn copy_refuses_capped_owned_tree_without_partial_batch() {
+        let mut s = Session::new();
+        let h = line(&mut s, "large");
+        let dict = s.doc().unwrap().foreign.entities.get(&h).unwrap().xdict.unwrap();
+        let children: Vec<_> = (0..4095).map(|_| s.doc_mut().unwrap().new_handle()).collect();
+        let f = Arc::make_mut(&mut s.doc_mut().unwrap().foreign);
+        let owned = f.objects.iter_mut().find(|o| o.handle == dict).unwrap();
+        for (i, child) in children.iter().enumerate() {
+            owned.tags.push(RawTag { code: 3, value: format!("OTHER_{i}") });
+            owned.tags.push(RawTag { code: 360, value: child.hex() });
+        }
+        for child in &children {
+            f.objects.push(ForeignObject {
+                handle: *child,
+                kind: "XRECORD".into(),
+                tags: vec![RawTag { code: 5, value: child.hex() }, RawTag { code: 330, value: dict.hex() }],
+            });
+        }
+        s.set_selection(vec![h]);
+        let before = s.doc().unwrap().clone();
+        let undo = s.state().unwrap().undo.len();
+        let err = s.execute("copy", &json!({"handles":[h.hex()],"delta":[0,0],"count":2})).unwrap_err();
+        assert!(err.to_string().contains("dictionary"), "{err}");
+        assert_eq!(*s.doc().unwrap(), before);
+        assert_eq!(s.selection(), vec![h]);
+        assert_eq!(s.state().unwrap().undo.len(), undo);
+    }
+
+    #[test]
+    fn copy_refuses_trailing_alignment_dictionary_marker_without_mutation() {
+        let mut s = Session::new();
+        let h = line(&mut s, "malformed");
+        let dict = s.doc().unwrap().foreign.entities.get(&h).unwrap().xdict.unwrap();
+        Arc::make_mut(&mut s.doc_mut().unwrap().foreign)
+            .objects
+            .iter_mut()
+            .find(|o| o.handle == dict)
+            .unwrap()
+            .tags
+            .push(RawTag { code: 3, value: "CADCRAFT_ALIGNMENT".into() });
+        s.set_selection(vec![h]);
+        let before = s.doc().unwrap().clone();
+        let undo = s.state().unwrap().undo.len();
+        let err = s.execute("copy", &json!({"handles":[h.hex()],"delta":[0,0]})).unwrap_err();
+        assert!(err.to_string().contains("alignment entry"), "{err}");
+        assert_eq!(*s.doc().unwrap(), before);
+        assert_eq!(s.selection(), vec![h]);
+        assert_eq!(s.state().unwrap().undo.len(), undo);
+    }
+
+    #[test]
+    fn copy_refuses_missing_owned_extension_child_without_mutation() {
+        let mut s = Session::new();
+        let h = line(&mut s, "missing child");
+        let dict = s.doc().unwrap().foreign.entities.get(&h).unwrap().xdict.unwrap();
+        let missing = s.doc_mut().unwrap().new_handle();
+        Arc::make_mut(&mut s.doc_mut().unwrap().foreign)
+            .objects
+            .iter_mut()
+            .find(|o| o.handle == dict)
+            .unwrap()
+            .tags
+            .extend([RawTag { code: 3, value: "OTHER_APP".into() }, RawTag { code: 360, value: missing.hex() }]);
+        s.set_selection(vec![h]);
+        let before = s.doc().unwrap().clone();
+        let undo = s.state().unwrap().undo.len();
+        let err = s.execute("copy", &json!({"handles":[h.hex()],"delta":[0,0]})).unwrap_err();
+        assert!(err.to_string().contains("dictionary"), "{err}");
+        assert_eq!(*s.doc().unwrap(), before);
+        assert_eq!(s.selection(), vec![h]);
+        assert_eq!(s.state().unwrap().undo.len(), undo);
+    }
+
+    #[test]
+    fn copy_refuses_stale_source_without_partial_batch_or_selection_change() {
+        let mut s = Session::new();
+        let good = line(&mut s, "good");
+        let stale = line(&mut s, "stale");
+        s.doc_mut()
+            .unwrap()
+            .modify_entity(stale, |e| {
+                if let cadcraft_doc::EntityKind::LwPolyline(p) = &mut e.kind {
+                    p.vertices[0].p.x += 1.;
+                }
+            })
+            .unwrap();
+        s.set_selection(vec![good, stale]);
+        let before = s.doc().unwrap().clone();
+        let selected = s.selection();
+        let err = s.execute("copy", &json!({"handles":[good.hex(),stale.hex()],"delta":[2,0],"count":2})).unwrap_err();
+        assert!(err.to_string().contains("STALE_ALIGNMENT"), "{err}");
+        assert_eq!(*s.doc().unwrap(), before);
+        assert_eq!(s.selection(), selected);
+    }
+
+    #[test]
+    fn copy_refuses_later_out_of_range_translation_atomically() {
+        let mut s = Session::new();
+        let r = s
+            .execute("alignmentcreate", &json!({"name":"edge","elements":[{"start":[999999990,0],"direction":0,"length":1,"type":"line"}]}))
+            .unwrap();
+        let before = s.doc().unwrap().clone();
+        let err = s.execute("copy", &json!({"handles":[r["handle"]],"delta":[5,0],"count":3})).unwrap_err();
+        assert!(err.to_string().contains("1e9"), "{err}");
+        assert_eq!(*s.doc().unwrap(), before);
+    }
+
+    #[test]
+    fn interactive_copy_repeats_valid_alignment_then_cancel_keeps_placed_copies() {
+        use crate::Input;
+        use cadcraft_geom::Vec2;
+        let mut s = Session::new();
+        let h = line(&mut s, "interactive");
+        s.set_selection(vec![h]);
+        s.start("copy").unwrap();
+        s.input(Input::Point(Vec2::ZERO)).unwrap();
+        s.input(Input::Point(Vec2::new(5., 0.))).unwrap();
+        s.input(Input::Point(Vec2::new(0., 7.))).unwrap();
+        s.input(Input::Cancel).unwrap();
+        let starts: Vec<_> = s
+            .doc()
+            .unwrap()
+            .model
+            .iter()
+            .map(|e| super::super::alignment_store::load(s.doc().unwrap(), e.handle).unwrap().definition.elements[0].start)
+            .collect();
+        assert_eq!(starts, [[0., 0.], [5., 0.], [0., 7.]]);
+    }
+
+    #[test]
+    fn copy_preserves_both_signed_major_arc_carriers_through_reopen() {
+        use super::super::alignment_store;
+        for (turn, sign) in [("left", 1.), ("right", -1.)] {
+            let mut s = Session::new();
+            let created = s
+                .execute(
+                    "alignmentcreate",
+                    &json!({"name":"major arc","elements":[{"start":[0,0],"direction":0,"length":15. * std::f64::consts::PI,"type":"arc","radius":10,"turn":turn}]}),
+                )
+                .unwrap();
+            let source = Handle::parse_hex(created["handle"].as_str().unwrap()).unwrap();
+            let original = alignment_store::load(s.doc().unwrap(), source).unwrap();
+            let zero = s.execute("copy", &json!({"handles":[source.hex()],"delta":[0,0]})).unwrap();
+            let translated = s.execute("copy", &json!({"handles":[source.hex()],"delta":[7,3]})).unwrap();
+            let copies = [
+                (Handle::parse_hex(zero["handles"][0].as_str().unwrap()).unwrap(), [0., 0.]),
+                (Handle::parse_hex(translated["handles"][0].as_str().unwrap()).unwrap(), [7., 3.]),
+            ];
+            assert_eq!(alignment_store::load(s.doc().unwrap(), source).unwrap().definition.elements[0].start, [0., 0.]);
+            for drawing in std::iter::once(s.doc().unwrap().clone()).chain(["arc.dxf", "arc.dwg"].map(|file| {
+                let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+                cadcraft_io::read(&bytes, file).unwrap()
+            })) {
+                let EntityKind::LwPolyline(source_poly) = &drawing.entity(source).unwrap().kind else { panic!("source carrier") };
+                assert_eq!(source_poly.vertices.len(), 2);
+                for (copy, offset) in &copies {
+                    let data = alignment_store::load(&drawing, *copy).unwrap();
+                    assert_eq!(data.definition.name, original.definition.name);
+                    assert_eq!(data.definition.elements[0].start, *offset);
+                    assert_ne!(drawing.foreign.entities.get(&source).unwrap().xdict, drawing.foreign.entities.get(copy).unwrap().xdict);
+                    let EntityKind::LwPolyline(poly) = &drawing.entity(*copy).unwrap().kind else { panic!("copied carrier") };
+                    assert_eq!(poly.vertices.len(), 2);
+                    assert!((poly.vertices[0].bulge - sign * (3. * std::f64::consts::PI / 8.).tan()).abs() < 1e-9);
+                    for (actual, before) in poly.vertices.iter().zip(&source_poly.vertices) {
+                        assert!((actual.p.x - before.p.x - offset[0]).abs() < 1e-7);
+                        assert!((actual.p.y - before.p.y - offset[1]).abs() < 1e-7);
+                    }
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn copy_of_spiral_preserves_exact_definition_and_chorded_carrier() {
+        use super::super::alignment_store;
+        let mut s = Session::new();
+        let created = s
+            .execute(
+                "alignmentcreate",
+                &json!({"name":"spiral","elements":[{"start":[0,0],"direction":0,"length":60,"type":"spiral","radius_start":null,"radius_end":300,"turn":"left"}]}),
+            )
+            .unwrap();
+        let source = Handle::parse_hex(created["handle"].as_str().unwrap()).unwrap();
+        let result = s.execute("copy", &json!({"handles":[source.hex()],"delta":[7,3]})).unwrap();
+        let copy = Handle::parse_hex(result["handles"][0].as_str().unwrap()).unwrap();
+        for drawing in std::iter::once(s.doc().unwrap().clone()).chain(["spiral.dxf", "spiral.dwg"].map(|file| {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+            cadcraft_io::read(&bytes, file).unwrap()
+        })) {
+            let data = alignment_store::load(&drawing, copy).unwrap();
+            assert_eq!(data.definition.elements[0].start, [7., 3.]);
+            let EntityKind::LwPolyline(before) = &drawing.entity(source).unwrap().kind else { panic!("source carrier") };
+            let EntityKind::LwPolyline(after) = &drawing.entity(copy).unwrap().kind else { panic!("copied carrier") };
+            assert!(before.vertices.len() > 2);
+            assert_eq!(after.vertices.len(), before.vertices.len());
+            for (a, b) in after.vertices.iter().zip(&before.vertices) {
+                assert_eq!(a.bulge, 0.);
+                assert!((a.p.x - b.p.x - 7.).abs() < 1e-7);
+                assert!((a.p.y - b.p.y - 3.).abs() < 1e-7);
+            }
+        }
+    }
     #[test]
     fn reported_endpoint_is_usable_as_an_exact_station_query() {
         let mut s = Session::new();
@@ -289,8 +640,9 @@ mod tests {
         assert_eq!(s.doc().unwrap().model.len(), before + 1);
         let original = cadcraft_doc::Handle::parse_hex(h).unwrap();
         let copied = s.doc().unwrap().model.iter().find(|e| e.handle != original && e.handle != source).unwrap().handle;
-        // COPY currently copies Common/kind but does not copy foreign extension dictionaries.
-        assert!(super::super::alignment_store::load(s.doc().unwrap(), copied).is_err());
+        let copied_data = super::super::alignment_store::load(s.doc().unwrap(), copied).unwrap();
+        assert_eq!(copied_data.definition.name, "from polyline");
+        assert_eq!(copied_data.definition.elements[0].start, [0., 0.]);
         s.execute("move", &json!({"handles":[h],"delta":[1,0]})).unwrap();
         assert!(s.execute("alignmentreport", &json!({"alignment":h})).unwrap_err().to_string().contains("STALE_ALIGNMENT"));
         s.undo().unwrap();
@@ -346,5 +698,51 @@ mod tests {
         assert!(s.doc().unwrap().model.len() > before.model.len());
         s.undo().unwrap();
         assert_eq!(*s.doc().unwrap(), before);
+    }
+
+    #[test]
+    fn major_arc_carrier_survives_both_formats_and_checks_bulge_edits() {
+        use super::super::alignment_store;
+        use cadcraft_doc::EntityKind;
+        for turn in ["left", "right"] {
+            let mut s = Session::new();
+            let created = s
+                .execute(
+                    "alignmentcreate",
+                    &json!({
+                        "name":"major arc", "elements":[{
+                            "start":[0.,0.],"direction":0.,"length":15.*std::f64::consts::PI,
+                            "type":"arc","radius":10.,"turn":turn
+                        }]
+                    }),
+                )
+                .unwrap();
+            let h = cadcraft_doc::Handle::parse_hex(created["handle"].as_str().unwrap()).unwrap();
+            let sign = if turn == "left" { 1. } else { -1. };
+            let expected = sign * (1. + 2f64.sqrt());
+            for file in ["major.dxf", "major.dwg"] {
+                let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+                let mut d = cadcraft_io::read(&bytes, file).unwrap();
+                let e = d.entity(h).unwrap();
+                let EntityKind::LwPolyline(p) = &e.kind else { panic!("carrier is not a polyline") };
+                assert_eq!(p.vertices.len(), 2);
+                assert!((p.vertices[0].bulge - expected).abs() < 1e-9);
+                alignment_store::load(&d, h).unwrap();
+                d.modify_entity(h, |e| {
+                    if let EntityKind::LwPolyline(p) = &mut e.kind {
+                        p.vertices[0].bulge += 5e-10;
+                    }
+                })
+                .unwrap();
+                alignment_store::load(&d, h).unwrap();
+                d.modify_entity(h, |e| {
+                    if let EntityKind::LwPolyline(p) = &mut e.kind {
+                        p.vertices[0].bulge += 1e-6;
+                    }
+                })
+                .unwrap();
+                assert!(alignment_store::load(&d, h).unwrap_err().to_string().contains("STALE_ALIGNMENT"));
+            }
+        }
     }
 }

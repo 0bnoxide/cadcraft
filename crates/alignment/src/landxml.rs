@@ -1,5 +1,7 @@
 //! Public LandXML 1.2 alignment exchange; deliberately independent of the frozen handoff contract.
 use crate::geometry::{angle_delta, cross, distance, dot, sub};
+use crate::profile::Profiles;
+mod profiles;
 use crate::{Alignment, DIRECTION_TOLERANCE, Element, Kind, MAX_ELEMENTS, POSITION_TOLERANCE, Result, StationFormat, Turn, error};
 use quick_xml::{
     NsReader, XmlVersion,
@@ -43,9 +45,14 @@ impl Unit {
 }
 #[derive(Debug, Default)]
 pub struct Import {
-    pub alignments: Vec<Alignment>,
+    pub alignments: Vec<Route>,
     pub refusals: Vec<Finding>,
     pub warnings: Vec<Finding>,
+}
+#[derive(Clone, Debug)]
+pub struct Route {
+    pub definition: Alignment,
+    pub profiles: Profiles,
 }
 #[derive(Debug, serde::Serialize)]
 pub struct Finding {
@@ -238,7 +245,7 @@ pub fn import(bytes: &[u8], unit: Unit) -> Result<Import> {
                 return Err(error("ALIGNMENT_LIMIT", "at most 128 alignments per file"));
             }
             let name = n.attrs.get("name").cloned().unwrap_or_default();
-            match alignment(n, scale) {
+            match alignment(n, scale).and_then(|definition| profiles::parse(n, &definition, scale).map(|profiles| Route { definition, profiles })) {
                 Ok(a) => {
                     warnings(n, &name, &mut out.warnings);
                     out.alignments.push(a);
@@ -259,13 +266,6 @@ fn warnings(n: &Node, name: &str, out: &mut Vec<Finding>) {
                 name: name.into(),
                 code: "STATION_EQUATIONS_IGNORED".into(),
                 reason: format!("{name}: StaEquation {:?}; plain stationing retained", c.attrs),
-            });
-        }
-        if c.name == "Profile" {
-            out.push(Finding {
-                name: name.into(),
-                code: "PROFILES_NOT_SUPPORTED".into(),
-                reason: "horizontal geometry imported; profile support follows in the stacked change".into(),
             });
         }
     }
@@ -317,7 +317,7 @@ fn element(n: &Node, scale: f64) -> Result<Element> {
     }
     let start = point(n.child("Start")?, scale)?;
     let end = point(n.child("End")?, scale)?;
-    let e = match n.name.as_str() {
+    let mut e = match n.name.as_str() {
         "Line" => {
             let d = sub(end, start);
             Element { start, direction: d[1].atan2(d[0]).rem_euclid(TAU), length: distance(start, end), kind: Kind::Line }
@@ -325,6 +325,16 @@ fn element(n: &Node, scale: f64) -> Result<Element> {
         "Curve" => curve(n, start, end, scale)?,
         _ => spiral(n, start, scale)?,
     };
+    if let Some(value) = n.attrs.get("length") {
+        let declared = number(value)? * scale;
+        // Preserve exported station extents when inverse geometry differs only
+        // by floating-point roundoff. Profile bounds stay strict, and the actual
+        // endpoint, length attribute and directions are still checked below.
+        let roundoff = 4. * f64::EPSILON * declared.abs().max(e.length.abs());
+        if declared.is_finite() && e.length.is_finite() && (declared - e.length).abs() <= roundoff {
+            e.length = declared;
+        }
+    }
     e.validate()?;
     let pose = e.at(e.length)?;
     let gap = distance(pose.point, end);
@@ -408,8 +418,8 @@ fn alignment(n: &Node, scale: f64) -> Result<Alignment> {
         })?;
         out.elements.push(e);
     }
-    out.checked()?;
-    check_attr(n, "length", out.length()?, scale)?;
+    let view = out.validated()?;
+    check_attr(n, "length", view.length(), scale)?;
     Ok(out)
 }
 
@@ -531,6 +541,14 @@ fn export_spiral_parts(e: &Element) -> Result<(String, usize)> {
     Ok((out, count))
 }
 pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
+    let total = alignments.iter().try_fold(0usize, |n, a| n.checked_add(a.elements.len()));
+    if alignments.len() > 128 || total.is_none_or(|n| n > MAX_ELEMENTS) {
+        return Err(error("ELEMENT_LIMIT", "export size limit"));
+    }
+    let routes = alignments.iter().map(|a| Route { definition: a.clone(), profiles: Profiles::default() }).collect::<Vec<_>>();
+    export_routes(&routes, unit)
+}
+pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
     if alignments.is_empty() || alignments.len() > 128 {
         return Err(error("ALIGNMENT_LIMIT", "export requires 1..128 alignments"));
     }
@@ -541,14 +559,16 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
     // Fixed epoch is deterministic; no hand-written calendar conversion or clock is needed.
     write!(&mut out,"<?xml version=\"1.0\" encoding=\"UTF-8\"?><LandXML xmlns=\"{NS}\" version=\"1.2\" date=\"1970-01-01\" time=\"00:00:00\"><Units><{family} linearUnit=\"{}\" areaUnit=\"{}\" volumeUnit=\"{}\" temperatureUnit=\"{}\" pressureUnit=\"{}\" angularUnit=\"decimal degrees\" directionUnit=\"decimal degrees\"/></Units><Alignments name=\"Alignments\">",unit.name(),if unit==Unit::Meter{"squareMeter"}else{"squareFoot"},if unit==Unit::Meter{"cubicMeter"}else{"cubicFeet"},if unit==Unit::Meter{"celsius"}else{"fahrenheit"},if unit==Unit::Meter{"milliBars"}else{"inHG"}).map_err(|_|error("XML_LIMIT","formatting failed"))?;
     let mut total = 0usize;
-    for a in alignments {
-        a.checked()?;
+    for route in alignments {
+        let a = &route.definition;
+        let view = a.validated()?;
+        route.profiles.validate_on(&view)?;
         if !names.insert(&a.name) {
             return Err(error("DUPLICATE_NAME", "LandXML alignment names must be unique"));
         }
         append(
             &mut out,
-            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, a.length()?),
+            &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
         for e in &a.elements {
             has_spiral |= matches!(e.kind, Kind::Spiral { .. });
@@ -568,7 +588,9 @@ pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
             }
             append(&mut out, &encoded)?;
         }
-        append(&mut out, "</CoordGeom></Alignment>")?;
+        append(&mut out, "</CoordGeom>")?;
+        profiles::write(&mut out, a, &route.profiles)?;
+        append(&mut out, "</Alignment>")?;
     }
     append(&mut out, "</Alignments></LandXML>")?;
     // PI coordinates lose angular precision at large map coordinates. A

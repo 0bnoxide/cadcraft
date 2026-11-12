@@ -3,7 +3,10 @@
 
 mod geometry;
 pub mod landxml;
+pub mod profile;
 mod projection;
+pub mod sampling;
+pub mod view;
 pub use geometry::*;
 
 pub const MAX_ELEMENTS: usize = 4096;

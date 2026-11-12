@@ -104,6 +104,10 @@ debug = false
 opt-level = 1
 debug = "line-tables-only"
 
+# Keep the xtask driver separate from the workspace binaries it rebuilds.
+[profile.xtask]
+inherits = "dev"
+
 [profile.release]
 opt-level = 3
 lto = "thin"

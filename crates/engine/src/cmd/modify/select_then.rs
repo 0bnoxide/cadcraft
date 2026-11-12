@@ -1,6 +1,6 @@
 use super::break_join::join;
 use super::explode::explode;
-use super::transform::{at_elevation, erase, scale_entities, transform_entities};
+use super::transform::{at_elevation, copy_translated, erase, scale_entities, transform_entities};
 use super::{
     Accept, EngineError, EntityKind, Handle, Input, Interactive, Mat3, Prompt, Result, SelOutcome, SelectPhase, Session, Step, Vec2, line, number,
 };
@@ -407,7 +407,7 @@ impl Interactive for SelectThen {
             }
             (Op::Copy, _, Input::Point(p)) => {
                 let d = p - self.pts[0];
-                transform_entities(s, &self.objs, &Mat3::translate(d), true)?;
+                copy_translated(s, &self.objs, d, 1)?;
                 Ok(Step::Continue)
             }
             (Op::Copy, _, Input::Enter) => {
@@ -569,7 +569,11 @@ impl Interactive for DisplaceM {
                 _ => return Ok(Step::Continue),
             };
             if d != Vec2::ZERO {
-                transform_entities(s, &self.inner.objs, &Mat3::translate(d), self.inner.op == Op::Copy)?;
+                if self.inner.op == Op::Copy {
+                    copy_translated(s, &self.inner.objs, d, 1)?;
+                } else {
+                    transform_entities(s, &self.inner.objs, &Mat3::translate(d), false)?;
+                }
             }
             s.set_selection(Vec::new());
             return Ok(Step::Done);

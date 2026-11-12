@@ -8,7 +8,7 @@ use cadcraft_doc::{Drawing, Entity, EntityKind, EntityStore, Handle, Layout, Pag
 use cadcraft_geom::{Bounds2, Vec2};
 use serde_json::{Value, json};
 
-use super::file::{base64_encode, io};
+use super::file::{PlotHook, base64_encode, io};
 use super::{CommandSpec, bad, bool_or, find_command, point_param, point_value, str_param, targets};
 
 use crate::{Accept, Input, Interactive, Prompt, Result, Session, Step};
@@ -783,6 +783,10 @@ fn plot_sheets(cmd: &str, d: &cadcraft_doc::Drawing, v: &Value) -> Result<Vec<St
 /// are off on hidden PDF layers), `links?: [{handle, url}]` (hyperlinks) and `title?`.
 fn run_plot(s: &mut Session, p: &Value, cmd: &str) -> Result<Value> {
     let hook = io().and_then(|h| h.plot).ok_or_else(|| bad(cmd, "plotting is not available in this build"))?;
+    run_plot_with_hook(s, p, cmd, hook)
+}
+
+pub(super) fn run_plot_with_hook(s: &mut Session, p: &Value, cmd: &str, hook: PlotHook) -> Result<Value> {
     // Checked here for a clear error; the plotter resolves the names the same way.
     let sheets = p.get("layouts").map(|v| plot_sheets(cmd, s.doc()?, v)).transpose()?;
 
