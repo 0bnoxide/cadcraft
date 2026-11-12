@@ -118,6 +118,10 @@ pub(super) fn redraw_matchlines(d: &mut Drawing, g: &mut Group, a: &alignment_st
     if let Some(m) = &g.matchline {
         validate_matchline(d, m)?;
     }
+    // Keep range validation for outer endpoints even though they are no longer drawn.
+    for station in g.frames.first().map(|f| f.geometry.range[0]).into_iter().chain(g.frames.last().map(|f| f.geometry.range[1])) {
+        a.definition.at(station, 0.).map_err(|e| bad(CMD, e.to_string()))?;
+    }
     let count = g.frames.len();
     let mut previous_end: Option<f64> = None;
     for (position, f) in g.frames.iter_mut().enumerate() {
@@ -386,6 +390,21 @@ mod matchline_tests {
             .collect::<Vec<_>>();
         out.sort_by(f64::total_cmp);
         out
+    }
+    #[test]
+    fn hidden_outer_stations_still_refuse_out_of_alignment_ranges() {
+        let mut s = Session::new();
+        let a = s.execute("alignmentcreate", &json!({"name":"Road","elements":[{"start":[0,0],"direction":0,"length":1000,"type":"line"}]})).unwrap();
+        let created = s.execute("viewframecreate", &json!({"alignment":a["handle"],"paper_size":[1000,100],"scale":1,"spacing":1000})).unwrap();
+        let h = store::handle(created["group"].as_str().unwrap()).unwrap();
+        let a = alignment_store::load(s.doc().unwrap(), store::handle(a["handle"].as_str().unwrap()).unwrap()).unwrap();
+        for range in [[-1., 1000.], [0., 1001.]] {
+            let mut g = store::load(s.doc().unwrap(), h).unwrap();
+            g.frames[0].geometry.range = range;
+            let before = s.doc().unwrap().clone();
+            assert!(redraw_matchlines(s.doc_mut().unwrap(), &mut g, &a).is_err());
+            assert_eq!(*s.doc().unwrap(), before);
+        }
     }
     #[test]
     fn touching_boundaries_share_one_matchline_and_moved_neighbours_keep_both() {
