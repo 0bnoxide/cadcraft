@@ -145,14 +145,28 @@ pub fn adjust(a: &Alignment, p: &Profiles, range: [f64; 2], settings: &Adjustmen
         return Err(error("INVALID_PROFILE_VIEW", "buffer overflow"));
     }
     let range = [requested[0].max(a.start_station), requested[1].min(a.start_station + a.length()?)];
-    let profile = match settings.profile {
-        Profile::Ground => "ground",
-        Profile::Design => "design",
+    let segments = match settings.profile {
+        Profile::Ground => p.ground.as_ref().map(|g| g.segments.iter().map(|s| slice(s, range)).collect::<Vec<_>>()).unwrap_or_default(),
+        Profile::Design => {
+            let mut points = Vec::new();
+            if let Some(d) = &p.design {
+                points = d.vertices()?;
+                points.extend(d.extrema()?);
+                for station in range {
+                    if let Ok(v) = d.at(station) {
+                        points.push(Sample { station, elevation: v.elevation });
+                    }
+                }
+                points.retain(|p| p.station >= range[0] && p.station <= range[1]);
+                points.sort_by(|a, b| a.station.total_cmp(&b.station));
+                points.dedup_by(|a, b| a.station == b.station);
+            }
+            vec![points]
+        }
     };
-    let segments = lines(p, range, 0.01)?;
     let mut values = Vec::new();
     let mut covered = range[0];
-    for (_, points) in segments.iter().filter(|(name, _)| *name == profile) {
+    for points in segments.iter().filter(|p| !p.is_empty()) {
         let first = points.first().ok_or_else(|| error("NO_PROFILE", "empty profile"))?;
         if first.station > covered {
             return Err(error("PROFILE_GAP", "selected profile has a gap in the buffered range"));
