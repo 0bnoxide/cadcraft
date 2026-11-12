@@ -18,7 +18,7 @@ Plan and profile sheets along an alignment: the first consumer of the slice 11 a
 - layouts, viewports with scale and twist, and plotting (`crates/engine/src/cmd/layout.rs`, `cmd/layout/viewports.rs`);
 - the `{{Name}}` placeholder replacement of `figureexport` (slice 10).
 
-No reference repository is read. The behaviour below is the whole specification: frames tiled along an alignment with matchlines, then one layout per frame made from a template layout, each with a plan viewport and optionally a profile viewport, and an update that touches only what the command made. The sources are standard plan and profile sheet practice and the public DXF Reference. Do not read CIM-Project-Suite-REVENG. Do not read the sources of any GPL, LGPL or AGPL project. Nothing from inside an Autodesk product is read or copied; observing the installed application black-box with synthetic drawings is allowed as `AGENTS.md` describes.
+The behaviour below is the specification: frames tiled along an alignment with matchlines, then one layout per frame made from a template layout, each with a plan viewport and optionally a profile viewport, and an update that touches only what the command made. Where it is silent, use the behaviour reference, read only: the CIM-Project-Suite-REVENG repository (path in the kickoff), `docs/phase2/features/sheet_generator.md` and `tests/behavioral/cases/BT-P0-SG-*.md`. It is a clean-room behaviour record; port the behaviour, not the Civil 3D API, and where it and this brief differ, the brief wins. Other sources are standard plan and profile sheet practice and the public DXF Reference. Do not read the sources of any GPL, LGPL or AGPL project. Nothing from inside an Autodesk product is read or copied; observing the installed application black-box with synthetic drawings is allowed as `AGENTS.md` describes.
 
 ## Scope
 
@@ -75,7 +75,7 @@ The recommended answers are written into the scope above; the owner confirms or 
 1. Sheets are layouts in the current drawing. No separate sheet drawings and no sheet set file.
 2. Two arrangements: plan only, and plan with profile.
 3. Frames tile at the longest station length that fits, with matchlines on multiples of a rounding increment. A frame edited by hand is refused; rerun the command instead.
-4. No reference repository is read; this brief is the specification.
+4. The brief is the specification; the REVENG Sheet Generator record fills gaps (the owner confirmed on 2026-11-12 that REVENG is clean-room, so no licence check applies).
 5. Plotting stays with the existing PUBLISH and Plot.
 6. Only #87 and #85 item 5 ride along.
 
