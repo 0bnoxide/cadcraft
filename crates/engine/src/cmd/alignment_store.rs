@@ -92,12 +92,17 @@ pub(super) fn translated_if_present(d: &Drawing, handle: Handle, delta: Vec2) ->
         element.start[0] += delta.x;
         element.start[1] += delta.y;
     }
+    // Sampled elevations belong to the source location; a copied route must resample.
+    data.profiles.ground = None;
     // Reject non-finite or out-of-range positions before changing the staged drawing.
     carrier(&data)?;
     Ok(Some(data))
 }
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
     data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;
+    save_record(d, handle, KEY, data)
+}
+pub(super) fn save_record(d: &mut Drawing, handle: Handle, key: &str, data: &impl Serialize) -> Result<()> {
     // Serialization is capped while writing, before an input-sized string can be allocated.
     struct Capped(Vec<u8>);
     impl std::io::Write for Capped {
@@ -130,7 +135,7 @@ pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()>
             }
         }
     }
-    write_data(d, handle, &ascii)
+    write_record(d, handle, key, &ascii)
 }
 
 const KEY: &str = "CADCRAFT_ALIGNMENT";
@@ -142,12 +147,15 @@ fn invalid(reason: &str) -> crate::EngineError {
     super::bad("alignment", format!("INVALID_ALIGNMENT_DATA: {reason}"))
 }
 fn record_handle(d: &Drawing, handle: Handle) -> Result<Option<Handle>> {
+    record_handle_for(d, handle, KEY)
+}
+pub(super) fn record_handle_for(d: &Drawing, handle: Handle, name: &str) -> Result<Option<Handle>> {
     let Some(dict) = d.foreign.entities.get(&handle).and_then(|x| x.xdict) else { return Ok(None) };
     let dict =
         d.foreign.objects.iter().find(|o| o.handle == dict && o.kind == "DICTIONARY").ok_or_else(|| invalid("missing extension dictionary"))?;
     let mut out = None;
     for (index, key) in dict.tags.iter().enumerate() {
-        if key.code == 3 && key.value == KEY {
+        if key.code == 3 && key.value == name {
             let value = dict.tags.get(index + 1).ok_or_else(|| invalid("duplicate or malformed alignment entry"))?;
             if out.is_some() || !matches!(value.code, 350 | 360) {
                 return Err(invalid("duplicate or malformed alignment entry"));
@@ -157,14 +165,18 @@ fn record_handle(d: &Drawing, handle: Handle) -> Result<Option<Handle>> {
     }
     Ok(out)
 }
+#[cfg(test)]
 fn write_data(d: &mut Drawing, handle: Handle, data: &str) -> Result<()> {
+    write_record(d, handle, KEY, data)
+}
+fn write_record(d: &mut Drawing, handle: Handle, key: &str, data: &str) -> Result<()> {
     if data.is_empty() || data.len() > MAX_DATA || !data.is_ascii() {
         return Err(invalid("ASCII JSON payload exceeds 8MiB or is empty"));
     }
     if d.entity(handle).is_none() {
         return Err(invalid("carrier does not exist"));
     }
-    let existing = record_handle(d, handle)?;
+    let existing = record_handle_for(d, handle, key)?;
     if let Some(record) = existing {
         let f = Arc::make_mut(&mut d.foreign);
         let obj = f.objects.iter_mut().find(|o| o.handle == record && o.kind == "XRECORD").ok_or_else(|| invalid("missing alignment XRECORD"))?;
@@ -191,14 +203,17 @@ fn write_data(d: &mut Drawing, handle: Handle, data: &str) -> Result<()> {
         f.entities.entry(handle).or_default().xdict = Some(dict);
     }
     let object = f.objects.iter_mut().find(|o| o.handle == dict).ok_or_else(|| invalid("missing extension dictionary"))?;
-    object.tags.extend([tag(3, KEY), tag(360, record.hex())]);
+    object.tags.extend([tag(3, key), tag(360, record.hex())]);
     let mut tags = vec![tag(5, record.hex()), tag(330, dict.hex()), tag(100, "AcDbXrecord"), tag(280, 1)];
     tags.extend(data.as_bytes().chunks(240).map(|b| tag(1, String::from_utf8_lossy(b))));
     f.objects.push(ForeignObject { handle: record, kind: "XRECORD".into(), tags });
     Ok(())
 }
 fn read_data(d: &Drawing, handle: Handle) -> Result<String> {
-    let record = record_handle(d, handle)?.ok_or_else(|| invalid("object is not an alignment"))?;
+    read_record(d, handle, KEY)
+}
+pub(super) fn read_record(d: &Drawing, handle: Handle, key: &str) -> Result<String> {
+    let record = record_handle_for(d, handle, key)?.ok_or_else(|| invalid("object has no owned record"))?;
     let obj = d.foreign.objects.iter().find(|o| o.handle == record && o.kind == "XRECORD").ok_or_else(|| invalid("missing alignment XRECORD"))?;
     let mut data = String::new();
     for t in obj.tags.iter().filter(|t| t.code == 1) {

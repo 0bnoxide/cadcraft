@@ -1,6 +1,7 @@
 //! Host-free route geometry. Stations are start station plus distance along the route.
 #![deny(clippy::unwrap_used, clippy::expect_used, clippy::panic, clippy::unimplemented, clippy::todo, clippy::unreachable)]
 
+pub mod frames;
 mod geometry;
 pub mod landxml;
 pub mod profile;

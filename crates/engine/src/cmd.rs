@@ -38,6 +38,8 @@ mod mleader_edit;
 mod modify;
 mod pointconvert;
 mod profile_cmd;
+mod sheet_frames;
+mod sheet_store;
 mod subsurface_draw;
 mod subsurface_import;
 mod subsurface_report;
@@ -232,6 +234,7 @@ pub fn command_specs() -> &'static [CommandSpec] {
         v.extend(surface_build::specs());
         v.extend(alignment_cmd::specs());
         v.extend(profile_cmd::specs());
+        v.extend(sheet_frames::specs());
         v.extend(surface_contour::specs());
         v.extend(surface_volume::specs());
         v.extend(surface_audit::specs());
