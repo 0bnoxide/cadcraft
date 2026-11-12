@@ -923,6 +923,16 @@ pub(super) mod files {
         // shortcut: unsupported filesystems have no exclusive rename; the final check narrows but cannot remove the concurrent-creation race.
         fs::rename(from, to).map_err(|e| e.to_string())
     }
+    /// Publish a staged regular file exclusively, retaining the stage link until batch cleanup.
+    pub fn publish_file_no_replace(from: &Path, to: &Path) -> Checked<()> {
+        reject_link(from)?;
+        reject_link(to)?;
+        if !fs::symlink_metadata(from).map_err(|e| e.to_string())?.is_file() {
+            return Err("unsafe_path: staged output must be a regular file".into());
+        }
+        // Hard links are atomic and exclusive; unsupported filesystems must refuse (#93).
+        fs::hard_link(from, to).map_err(|e| format!("exclusive_publish_failed: {e}"))
+    }
     #[derive(Clone, Debug, serde::Serialize)]
     pub struct Swap {
         pub prior_sha256: String,
