@@ -722,6 +722,43 @@ pub(super) mod files {
     };
     pub type Checked<T> = std::result::Result<T, String>;
     pub type Mover<'a> = dyn Fn(&Path, &Path) -> Checked<()> + 'a;
+    #[cfg(all(test, windows))]
+    mod stream_tests {
+        use super::{no_named_streams, run_id};
+        use std::fs;
+
+        #[test]
+        fn zone_identifier_refusal_names_stream_and_unblock_steps() {
+            let path = std::env::temp_dir().join(format!("cadcraft-zone-{}", run_id()));
+            fs::write(&path, b"ordinary primary bytes").unwrap();
+            let mut stream = path.as_os_str().to_os_string();
+            stream.push(":Zone.Identifier");
+            fs::write(&stream, b"[ZoneTransfer]\nZoneId=3\n").unwrap();
+            let message = no_named_streams(&path).unwrap_err();
+            assert!(message.starts_with("named_stream:"), "{message}");
+            assert!(message.contains("Zone.Identifier"), "{message}");
+            assert!(message.contains("only if you trust this downloaded file"), "{message}");
+            assert!(message.contains("Properties") && message.contains("Unblock"), "{message}");
+            assert_eq!(fs::read(&stream).unwrap(), b"[ZoneTransfer]\nZoneId=3\n");
+            fs::remove_file(path).unwrap();
+        }
+
+        #[test]
+        fn other_named_stream_refusal_names_it() {
+            let path = std::env::temp_dir().join(format!("cadcraft-stream-{}", run_id()));
+            fs::write(&path, b"ordinary primary bytes").unwrap();
+            let mut stream = path.as_os_str().to_os_string();
+            stream.push(":caller-data");
+            fs::write(&stream, b"keep me").unwrap();
+            let message = no_named_streams(&path).unwrap_err();
+            assert!(message.contains("caller-data"), "{message}");
+            assert!(!message.contains("Unblock"), "{message}");
+            assert!(message.contains("preserve or remove the stream deliberately"), "{message}");
+            assert!(message.contains("source without named streams"), "{message}");
+            assert_eq!(fs::read(&stream).unwrap(), b"keep me");
+            fs::remove_file(path).unwrap();
+        }
+    }
     pub struct Lock(PathBuf);
     impl Drop for Lock {
         fn drop(&mut self) {
@@ -779,6 +816,38 @@ pub(super) mod files {
             Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
             Err(e) => return Err(e.to_string()),
         }
+        Ok(())
+    }
+    /// Reject data that a primary-byte fingerprint, copy, or ZIP would silently omit.
+    pub fn no_named_streams(path: &Path) -> Checked<()> {
+        #[cfg(windows)]
+        {
+            use std::os::windows::ffi::OsStrExt;
+            // Bound the dependency's UTF-16 allocation and prevent Win32 NUL truncation.
+            if path.as_os_str().encode_wide().take(32_768).count() >= 32_768 || path.as_os_str().encode_wide().any(|c| c == 0) {
+                return Err("stream_inspection_failed: path is invalid or too long".into());
+            }
+            let failed = |e| format!("stream_inspection_failed: cannot inspect {}: {e}", path.display());
+            // Only the unnamed $DATA stream is skipped. Even an empty named stream is
+            // caller data that a primary-byte hash does not cover.
+            let mut streams = match fsquirrel::list(path) {
+                Ok(streams) => streams,
+                // An ordinary directory has no unnamed $DATA stream on NTFS.
+                Err(e) if e.raw_os_error() == Some(0x8007_0026_u32.cast_signed()) && path.is_dir() => return Ok(()),
+                Err(e) => return Err(failed(e)),
+            };
+            if let Some(name) = streams.next().transpose().map_err(failed)? {
+                let name = name.to_string_lossy();
+                let help = if name.eq_ignore_ascii_case("Zone.Identifier") {
+                    "; only if you trust this downloaded file, open its Properties in Windows File Explorer and choose Unblock, then retry"
+                } else {
+                    "; preserve or remove the stream deliberately before retrying, or use a source without named streams"
+                };
+                return Err(format!("named_stream: {} has named stream {name} not covered by the primary-byte hash{help}", path.display()));
+            }
+        }
+        #[cfg(not(windows))]
+        let _ = path;
         Ok(())
     }
     pub fn child(root: &Path, relative: &str) -> Checked<PathBuf> {
@@ -1324,21 +1393,21 @@ mod tests {
 
     #[test]
     fn package_failed_zip_publish_rolls_back_folder_without_success_receipt() {
-        super::super::file::set_io(super::super::file::IoHooks {
+        let hooks = super::super::file::IoHooks {
             read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
             write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
             plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
-        });
+        };
         let (root, mut p, _) = follow_project(json!({}));
         let profile = root.join("profile.json");
         std::fs::write(&profile, b"{}").unwrap();
         p["profile_path"] = json!(profile);
-        let planned = super::super::packagedeliverables::run_with_move(&p, &files::rename_no_replace);
+        let planned = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &files::rename_no_replace);
         assert!(planned["hash"].is_string(), "{planned}");
         p["action"] = json!("execute");
         p["approved_hash"] = planned["hash"].clone();
         let calls = std::cell::Cell::new(0);
-        let failed = super::super::packagedeliverables::run_with_move(&p, &|a, b| {
+        let failed = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &|a, b| {
             calls.set(calls.get() + 1);
             if calls.get() == 2 { Err("forced ZIP publish failure".into()) } else { files::rename_no_replace(a, b) }
         });
@@ -1351,14 +1420,49 @@ mod tests {
         std::fs::remove_dir_all(root).unwrap();
     }
 
+    #[test]
+    fn package_panicking_second_plot_keeps_only_failed_receipt() {
+        use std::sync::atomic::{AtomicUsize, Ordering};
+        static PLOTS: AtomicUsize = AtomicUsize::new(0);
+        fn plot_then_panic(d: &cadcraft_doc::Drawing, s: &cadcraft_doc::Space, p: &Value) -> std::result::Result<Vec<u8>, String> {
+            if PLOTS.fetch_add(1, Ordering::Relaxed) == 1 {
+                panic!("forced package plot panic");
+            }
+            cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())
+        }
+        let hooks = super::super::file::IoHooks {
+            read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
+            write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
+            plot: Some(plot_then_panic),
+        };
+        let (root, mut p, _) = follow_project(json!({}));
+        let profile = root.join("profile.json");
+        std::fs::write(&profile, b"{}").unwrap();
+        p["profile_path"] = json!(profile);
+        let planned = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &files::rename_no_replace);
+        assert!(planned["hash"].is_string(), "{planned}");
+        p["action"] = json!("execute");
+        p["approved_hash"] = planned["hash"].clone();
+        PLOTS.store(0, Ordering::Relaxed);
+        let result = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &files::rename_no_replace);
+        assert_eq!(PLOTS.load(Ordering::Relaxed), 2);
+        assert_eq!(result["receipt"]["outcome"], "Failed", "{result}");
+        assert!(result["receipt"]["failed_checks"][0]["message"].as_str().is_some_and(|m| m.contains("forced package plot panic")), "{result}");
+        assert!(!root.join("Client - Site/Deliverables").exists());
+        let receipt = result["receipt"]["receipt_path"].as_str().unwrap();
+        assert_eq!(serde_json::from_slice::<Value>(&std::fs::read(receipt).unwrap()).unwrap()["outcome"], "Failed");
+        assert!(!std::fs::read_dir(root.join("Client - Site")).unwrap().any(|e| e.unwrap().file_name().to_string_lossy().contains(".stage")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[cfg(windows)]
     #[test]
     fn package_rechecks_named_streams_after_publication() {
-        super::super::file::set_io(super::super::file::IoHooks {
+        let hooks = super::super::file::IoHooks {
             read: |b, n| cadcraft_io::read(b, n).map_err(|e| e.to_string()),
             write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
             plot: Some(|d, s, p| cadcraft_io::plotter::plot(d, s, p).map_err(|e| e.to_string())),
-        });
+        };
         for (location, stream_path, retain_folder, retain_zip) in [
             ("source", "extra.txt:additional", false, false),
             ("file", "Client - Site/Deliverables/Package/extra.txt:additional", true, false),
@@ -1372,7 +1476,7 @@ mod tests {
                 std::fs::write(root.join("extra.txt"), b"primary").unwrap();
                 std::fs::write(&profile, br#"{"extra_files":[{"path":"extra.txt","role":"other"}]}"#).unwrap();
                 p["profile_path"] = json!(profile);
-                let planned = super::super::packagedeliverables::run_with_move(&p, &files::rename_no_replace);
+                let planned = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &files::rename_no_replace);
                 assert!(planned["hash"].is_string(), "{planned}");
                 p["action"] = json!("execute");
                 p["approved_hash"] = planned["hash"].clone();
@@ -1380,7 +1484,7 @@ mod tests {
                 let zip = root.join("Client - Site/Deliverables/Package.zip");
                 let source = root.join("extra.txt");
                 let stream = root.join(stream_path);
-                let result = super::super::packagedeliverables::run_with_move(&p, &|a, b| {
+                let result = super::super::packagedeliverables::run_with_hooks(&p, &hooks, &|a, b| {
                     files::rename_no_replace(a, b)?;
                     if b.extension().is_some_and(|ext| ext == "zip") {
                         std::fs::write(&stream, b"new data").map_err(|e| e.to_string())?;
