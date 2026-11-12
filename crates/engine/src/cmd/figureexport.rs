@@ -676,7 +676,7 @@ pub(super) mod native {
         }
         count
     }
-    fn substitute(value: &str, values: &BTreeMap<String, String>, qa: &mut Vec<Qa>, subject: &str, mtext: bool) -> Checked<String> {
+    pub(crate) fn substitute(value: &str, values: &BTreeMap<String, String>, qa: &mut Vec<Qa>, subject: &str, mtext: bool) -> Checked<String> {
         let mut out = String::new();
         let mut at = 0;
         let mut copied = 0;

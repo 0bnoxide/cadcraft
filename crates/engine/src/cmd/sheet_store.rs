@@ -22,6 +22,36 @@ pub(super) struct Group {
     pub frames: Vec<Member>,
     pub matchline: Option<Matchline>,
     pub profiles: Option<ProfileSettings>,
+    #[serde(default)]
+    pub sheets: Option<SheetRun>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SheetConfig {
+    pub template: String,
+    pub template_layout: String,
+    pub arrangement: String,
+    pub layout_name: String,
+    pub number_start: u32,
+    pub number_increment: u32,
+    pub number_width: usize,
+    pub north_arrow: Option<String>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct SheetRun {
+    pub config: SheetConfig,
+    pub source_hash: String,
+    pub layouts: Vec<Sheet>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Sheet {
+    pub name: String,
+    pub marker: String,
+    pub frames: Vec<u32>,
+    pub members: Vec<String>,
+    pub hash: String,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -135,6 +165,7 @@ pub(super) fn save(d: &mut Drawing, g: &Group) -> Result<()> {
     alignment_store::save_record(d, handle(&g.own)?, GROUP_KEY, g).map_err(invalid)
 }
 pub(super) fn own(d: &mut Drawing, h: Handle, g: &str, frame: u32, role: &str) -> Result<()> {
+    // shortcut: shared XRECORD lookups scan linearly; batch-index them when large groups are qualified.
     alignment_store::save_record(d, h, OWNER_KEY, &Owner { version: 1, group: g.into(), own: h.hex(), frame, role: role.into() }).map_err(invalid)
 }
 pub(super) fn check(d: &Drawing, h: Handle, g: &str, frame: u32, role: &str) -> Result<()> {
