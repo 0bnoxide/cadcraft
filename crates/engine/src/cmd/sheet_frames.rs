@@ -168,7 +168,9 @@ pub(super) fn rectangle(points: &[[f64; 2]; 4]) -> Result<([f64; 2], [f64; 2], f
     let center = [a[0] + (c[0] - a[0]) / 2., a[1] + (c[1] - a[1]) / 2.];
     let test = Frame { range: [0., 1.], center, size, angle, half_chord: 1., offset: 0. };
     test.validate().map_err(|e| bad(CMD, e.to_string()))?;
-    if test.corners().iter().zip(points).any(|(a, b)| (a[0] - b[0]).hypot(a[1] - b[1]) > cadcraft_alignment::POSITION_TOLERANCE) {
+    let close = |a: &[f64; 2], b: &[f64; 2]| (a[0] - b[0]).hypot(a[1] - b[1]) <= cadcraft_alignment::POSITION_TOLERANCE;
+    let corners = test.corners();
+    if !corners.iter().zip(points).all(|(a, b)| close(a, b)) && !corners.iter().zip(points.iter().rev()).all(|(a, b)| close(a, b)) {
         return Err(bad(CMD, "INVALID_FRAME: ordered rectangular corners required"));
     }
     Ok((center, size, angle))
@@ -361,4 +363,15 @@ pub(super) fn redraw_profiles(d: &mut Drawing, g: &mut Group, a: &alignment_stor
         f.profile = Some(p);
     }
     Ok(json!({"group":g.own,"views":views,"clipped":clipped}))
+}
+#[cfg(test)]
+mod rectangle_tests {
+    #[test]
+    fn clockwise_site_outline_keeps_the_first_edge_axis() {
+        let (center, size, angle) = super::rectangle(&[[0., 0.], [0., 10.], [30., 10.], [30., 0.]]).unwrap();
+        assert_eq!(center, [15., 5.]);
+        assert_eq!(size, [10., 30.]);
+        assert_eq!(angle, std::f64::consts::FRAC_PI_2);
+        assert!(super::rectangle(&[[0., 0.], [0., 10.], [30., 0.], [30., 10.]]).is_err());
+    }
 }

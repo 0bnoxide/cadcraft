@@ -327,6 +327,23 @@ pub(super) mod native {
         }
         digest(&(&layout.page, layout.view, layout.limits, data))
     }
+    fn model_hash(d: &Drawing, g: &Group) -> Result<String> {
+        let mut data = Vec::new();
+        for f in &g.frames {
+            for (role, handles) in [("matchline", f.matchlines.as_slice()), ("profile", f.profile.as_ref().map_or(&[][..], |p| p.handles.as_slice()))]
+            {
+                for value in handles {
+                    let h = store::handle(value)?;
+                    let e = d.model.get(h);
+                    if e.is_some() {
+                        store::check(d, h, &g.own, f.index, role)?;
+                    }
+                    data.push((value, e.map(|e| (&e.common, &e.kind))));
+                }
+            }
+        }
+        digest(&data)
+    }
     fn owned(d: &Drawing, g: &Group, run: &SheetRun) -> Result<bool> {
         if run.layouts.len() > 4096 {
             return Err(bad(CMD, "OWNERSHIP: sheet count limit"));
@@ -507,7 +524,7 @@ pub(super) mod native {
         }
         add_frames(&mut d, &mut g, p, a.as_ref())?;
         let (source, layout, template_hash) = template(&c, &g)?;
-        let input = digest(&(&c, &template_hash, &g.frames, &a))?;
+        let input = digest(&(&c, &template_hash, &g.frames, &a, model_hash(&d, &g)?))?;
         let unchanged = old.as_ref().map(|r| owned(&d, &g, r)).transpose()?.unwrap_or(false);
         if update && unchanged && old.as_ref().is_some_and(|r| r.source_hash == input) {
             return Ok(
@@ -664,7 +681,7 @@ pub(super) mod native {
         }
         let gaps = gaps_overlaps(&g);
         let layouts = sheets.iter().map(|s| s.name.clone()).collect::<Vec<_>>();
-        let input = digest(&(&c, &template_hash, &g.frames, &a))?;
+        let input = digest(&(&c, &template_hash, &g.frames, &a, model_hash(&d, &g)?))?;
         if d.layouts.is_empty() {
             return Err(bad(CMD, "LAST_LAYOUT: keep one paper layout before removing every sheet"));
         }
@@ -676,6 +693,10 @@ pub(super) mod native {
         state.views.retain(|(space, _)| space.layout().is_none_or(|name| remaining.contains(&name.to_ascii_uppercase())));
         if state.space.layout().is_some_and(|name| !remaining.contains(&name.to_ascii_uppercase())) {
             state.space = Space::Model;
+            state.mspace = None;
+            state.selection.clear();
+        }
+        if state.mspace.is_some() && state.active_viewport().is_none() {
             state.mspace = None;
             state.selection.clear();
         }

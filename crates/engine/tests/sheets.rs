@@ -532,3 +532,44 @@ fn an_erased_owned_profile_component_refuses_sheet_creation() {
     assert!(s.execute("sheetcreate", &request(&g, &t, "plan_profile")).unwrap_err().to_string().contains("MISSING_PROFILE_VIEW"));
     assert_eq!(*s.doc().unwrap(), before);
 }
+#[test]
+fn model_output_edits_invalidate_the_unchanged_shortcut() {
+    hooks();
+    let temp = Temp::new();
+    let t = template(&temp, &["SHEET-PLAN-1", "SHEET-PROFILE-1"]);
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_profile")).unwrap();
+    let matchline = s.doc().unwrap().model.iter().find(|e| e.common.layer == "CADCRAFT-MATCHLINES").unwrap().handle;
+    s.execute("erase", &json!({"handles":[matchline.hex()]})).unwrap();
+    assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], true);
+    let h = s
+        .doc()
+        .unwrap()
+        .model
+        .iter()
+        .find(|e| e.common.layer.starts_with("CADCRAFT-SHEET-PROFILE-") && matches!(e.kind, EntityKind::LwPolyline(_)))
+        .unwrap()
+        .handle;
+    s.execute("move", &json!({"handles":[h.hex()],"delta":[0,100]})).unwrap();
+    assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], true);
+    assert!(s.doc().unwrap().entity(h).is_none(), "moved generated component is replaced");
+    assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], false);
+}
+#[test]
+fn rebuilding_the_active_sheet_clears_an_erased_mspace_viewport() {
+    hooks();
+    let temp = Temp::new();
+    let t = template(&temp, &["SHEET-PLAN-1"]);
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap();
+    let h =
+        s.doc().unwrap().layout("Road-010").unwrap().entities.iter().find(|e| matches!(&e.kind,EntityKind::Viewport(v) if v.id!=1)).unwrap().handle;
+    s.execute("move", &json!({"handles":[g["frames"][0]["handle"]],"delta":[10,5]})).unwrap();
+    s.state_mut().unwrap().space = Space::Paper("Road-010".into());
+    s.state_mut().unwrap().mspace = Some(h);
+    s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
+    assert_eq!(s.space(), Space::Paper("Road-010".into()));
+    assert_eq!(s.state().unwrap().mspace, None);
+}
