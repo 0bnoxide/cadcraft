@@ -481,15 +481,93 @@ fn export_element(out: &mut String, e: &Element) -> Result<()> {
                 return Err(error("UNREPRESENTABLE_SPIRAL", "parallel endpoint tangents have no finite LandXML PI"));
             }
             let t = cross(sub(end.point, e.start), b) / det;
-            if t <= 0. {
-                return Err(error("UNREPRESENTABLE_SPIRAL", "LandXML PI is behind the start tangent"));
+            let u = cross(sub(end.point, e.start), a) / det;
+            let pi = [e.start[0] + t * a[0], e.start[1] + t * a[1]];
+            if t <= 0. || u >= 0. || pi.iter().any(|v| !v.is_finite()) || cross(b, sub(pi, end.point)).abs() > POSITION_TOLERANCE {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "no reliable finite forward LandXML PI"));
             }
-            xml_point(out, "PI", [e.start[0] + t * a[0], e.start[1] + t * a[1]])?;
+            // A bearing error rotates every interior point, even when the endpoint nearly closes.
+            let recovered = (pi[1] - e.start[1]).atan2(pi[0] - e.start[0]);
+            if angle_delta(recovered, direction) * e.length > POSITION_TOLERANCE {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "PI bearing exceeds interior position precision"));
+            }
+            xml_point(out, "PI", pi)?;
         }
         _ => {}
     }
     xml_point(out, "End", end.point)?;
     append(out, &format!("</{close}>"))
+}
+/// A full-turn clothoid has coincident endpoint bearings, so its endpoint
+/// tangents cannot supply the finite PI required by LandXML 1.2. Splitting
+/// the same linear-curvature law keeps the physical route and stations exact,
+/// though an importer will see a different element partition.
+fn export_spiral_parts(e: &Element, prefix_length: f64) -> Result<(String, usize)> {
+    let Kind::Spiral { turn, radius_start, radius_end } = e.kind else {
+        return Err(error("UNREPRESENTABLE_SPIRAL", "only clothoids can be subdivided"));
+    };
+    let (k0, k1) = e.curvatures();
+    // Each piece turns by at most pi/2; for a monotone-turning clothoid this
+    // puts the intersection ahead of Start and behind End, never at infinity.
+    let count = (e.length * e.max_curvature() / FRAC_PI_2).ceil().max(2.) as usize;
+    if count > MAX_ELEMENTS {
+        return Err(error("ELEMENT_LIMIT", "spiral subdivision exceeds 4096 elements"));
+    }
+    let radius_at = |i: usize| -> Option<f64> {
+        if i == 0 {
+            radius_start
+        } else if i == count {
+            radius_end
+        } else {
+            let k = k0 + (k1 - k0) * (i as f64 / count as f64);
+            if k == 0. { None } else { Some(1. / k.abs()) }
+        }
+    };
+    let mut out = String::new();
+    let mut accumulated = prefix_length;
+    for i in 0..count {
+        let start_distance = e.length * (i as f64 / count as f64);
+        let end_distance = if i + 1 == count { e.length } else { e.length * ((i + 1) as f64 / count as f64) };
+        let start = e.at(start_distance)?;
+        let mut length = end_distance - start_distance;
+        if i + 1 == count {
+            // Match the original accumulation order so the inclusive end station survives subdivision.
+            let target = prefix_length + e.length;
+            for _ in 0..8 {
+                let actual = accumulated + length;
+                if actual == target {
+                    break;
+                }
+                let corrected = length + (target - actual);
+                length = if corrected != length {
+                    corrected
+                } else if actual < target {
+                    length.next_up()
+                } else {
+                    length.next_down()
+                };
+            }
+            if accumulated + length != target || !length.is_finite() || length <= 0. {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision changes station extent"));
+            }
+        }
+        accumulated += length;
+        let piece = Element {
+            start: start.point,
+            direction: start.direction,
+            length,
+            kind: Kind::Spiral { radius_start: radius_at(i), radius_end: radius_at(i + 1), turn },
+        };
+        let expected_end = e.at(end_distance)?;
+        let actual_end = piece.at(piece.length)?;
+        if distance(expected_end.point, actual_end.point) > POSITION_TOLERANCE
+            || angle_delta(expected_end.direction, actual_end.direction) > DIRECTION_TOLERANCE
+        {
+            return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision exceeds geometric precision"));
+        }
+        export_element(&mut out, &piece)?;
+    }
+    Ok((out, count))
 }
 pub fn export(alignments: &[Alignment], unit: Unit) -> Result<String> {
     let total = alignments.iter().try_fold(0usize, |n, a| n.checked_add(a.elements.len()));
@@ -505,6 +583,7 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
     }
     let mut names = BTreeSet::new();
     let mut out = String::new();
+    let mut spiral_names = BTreeSet::new();
     let family = if unit == Unit::Meter { "Metric" } else { "Imperial" };
     // Fixed epoch is deterministic; no hand-written calendar conversion or clock is needed.
     write!(&mut out,"<?xml version=\"1.0\" encoding=\"UTF-8\"?><LandXML xmlns=\"{NS}\" version=\"1.2\" date=\"1970-01-01\" time=\"00:00:00\"><Units><{family} linearUnit=\"{}\" areaUnit=\"{}\" volumeUnit=\"{}\" temperatureUnit=\"{}\" pressureUnit=\"{}\" angularUnit=\"decimal degrees\" directionUnit=\"decimal degrees\"/></Units><Alignments name=\"Alignments\">",unit.name(),if unit==Unit::Meter{"squareMeter"}else{"squareFoot"},if unit==Unit::Meter{"cubicMeter"}else{"cubicFeet"},if unit==Unit::Meter{"celsius"}else{"fahrenheit"},if unit==Unit::Meter{"milliBars"}else{"inHG"}).map_err(|_|error("XML_LIMIT","formatting failed"))?;
@@ -513,10 +592,6 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
         let a = &route.definition;
         let view = a.validated()?;
         route.profiles.validate_on(&view)?;
-        total += a.elements.len();
-        if total > MAX_ELEMENTS {
-            return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
-        }
         if !names.insert(&a.name) {
             return Err(error("DUPLICATE_NAME", "LandXML alignment names must be unique"));
         }
@@ -524,13 +599,52 @@ pub fn export_routes(alignments: &[Route], unit: Unit) -> Result<String> {
             &mut out,
             &format!("<Alignment name=\"{}\" staStart=\"{}\" length=\"{}\"><CoordGeom>", escaped(&a.name), a.start_station, view.length()),
         )?;
+        let mut prefix_length = 0.;
         for e in &a.elements {
-            export_element(&mut out, e)?;
+            if matches!(e.kind, Kind::Spiral { .. }) {
+                spiral_names.insert(a.name.as_str());
+            }
+            let mut encoded = String::new();
+            let count = match export_element(&mut encoded, e) {
+                Ok(()) => 1,
+                Err(err) if err.code == "UNREPRESENTABLE_SPIRAL" => {
+                    let (parts, count) = export_spiral_parts(e, prefix_length)?;
+                    encoded = parts;
+                    count
+                }
+                Err(err) => return Err(err),
+            };
+            prefix_length += e.length;
+            total = total.checked_add(count).ok_or_else(|| error("ELEMENT_LIMIT", "file exceeds 4096 elements"))?;
+            if total > MAX_ELEMENTS {
+                return Err(error("ELEMENT_LIMIT", "file exceeds 4096 elements"));
+            }
+            append(&mut out, &encoded)?;
         }
         append(&mut out, "</CoordGeom>")?;
         profiles::write(&mut out, a, &route.profiles)?;
         append(&mut out, "</Alignment>")?;
     }
     append(&mut out, "</Alignments></LandXML>")?;
+    // PI coordinates lose angular precision at large map coordinates. A
+    // schema-valid file is not an exchange if its PI-derived bearings or
+    // joints fail our import contract, so refuse rather than return it.
+    if !spiral_names.is_empty() {
+        let checked = import(out.as_bytes(), unit)?;
+        if let Some(f) = checked.refusals.iter().find(|f| spiral_names.contains(f.name.as_str())) {
+            return Err(error("UNREPRESENTABLE_SPIRAL", format!("exported spiral cannot be reimported: {}: {}", f.code, f.reason)));
+        }
+        for original in alignments.iter().filter(|a| spiral_names.contains(a.definition.name.as_str())) {
+            let restored = checked
+                .alignments
+                .iter()
+                .find(|a| a.definition.name == original.definition.name)
+                .ok_or_else(|| error("UNREPRESENTABLE_SPIRAL", "exported spiral alignment is missing"))?;
+            // Even one ulp changes whether the original inclusive end station is queryable.
+            if original.definition.length()? != restored.definition.length()? {
+                return Err(error("UNREPRESENTABLE_SPIRAL", "subdivision changes station extent"));
+            }
+        }
+    }
     Ok(out)
 }
