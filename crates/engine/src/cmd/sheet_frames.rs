@@ -101,8 +101,17 @@ fn road(s: &mut Session, p: &Value) -> Result<Value> {
     let m = matchline(p, s.doc()?)?;
     let mut d = s.doc()?.clone();
     let group = anchor(&mut d, f.first().ok_or_else(|| bad(CMD, "NO_FRAMES"))?.corners()[0])?;
-    let mut g =
-        Group { version: 1, own: group.hex(), alignment: Some(h.hex()), paper_size: size, scale, frames: Vec::new(), matchline: m, profiles: None };
+    let mut g = Group {
+        version: 1,
+        own: group.hex(),
+        alignment: Some(h.hex()),
+        paper_size: size,
+        scale,
+        frames: Vec::new(),
+        matchline: m,
+        profiles: None,
+        sheets: None,
+    };
     d.ensure_layer("CADCRAFT-VIEW-FRAMES");
     for (i, frame) in f.into_iter().enumerate() {
         let handle = d.add(&Space::Model, Common { layer: "CADCRAFT-VIEW-FRAMES".into(), ..Default::default() }, poly(&frame))?;
@@ -177,7 +186,7 @@ pub(super) fn rectangle(points: &[[f64; 2]; 4]) -> Result<([f64; 2], [f64; 2], f
     }
     Ok((center, size, angle))
 }
-fn points(poly: &LwPolyline) -> Result<[[f64; 2]; 4]> {
+pub(super) fn points(poly: &LwPolyline) -> Result<[[f64; 2]; 4]> {
     if !poly.closed
         || poly.vertices.len() != 4
         || poly.elevation != 0.
@@ -260,6 +269,7 @@ fn site(s: &mut Session, p: &Value) -> Result<Value> {
         frames: Vec::new(),
         matchline: None,
         profiles: None,
+        sheets: None,
     };
     for (index, (h, geometry)) in members.into_iter().enumerate() {
         store::own(&mut d, h, &g.own, index as u32, "frame")?;
@@ -351,7 +361,10 @@ pub(super) fn redraw_profiles(d: &mut Drawing, g: &mut Group, a: &alignment_stor
             return Err(bad(CMD, "PROFILE_LIMIT: too many figure entities"));
         }
         let handles = profile_cmd::add_marks(d, &Space::Model, figure.marks, text_height)?;
+        let layer = store::profile_layer(&g.own, f.index);
+        d.ensure_layer(&layer);
         for h in &handles {
+            d.modify_entity(*h, |e| e.common.layer.clone_from(&layer))?;
             store::own(d, *h, &g.own, f.index, "profile")?;
         }
         clipped.push(json!({"frame":f.index,"spans":figure.clipped}));
