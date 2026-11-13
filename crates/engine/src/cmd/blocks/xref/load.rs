@@ -131,6 +131,8 @@ struct Ctx {
     bytes: u64,
     /// Messages about nested xrefs.
     notes: Vec<String>,
+    /// Explicit reader for isolated callers; ordinary commands use the host registration.
+    read_hook: Option<fn(&[u8], &str) -> Result<Drawing, String>>,
 }
 
 /// The folder of the host drawing at `host` (a file path).
@@ -257,7 +259,7 @@ fn case_insensitive(p: &Path) -> Option<PathBuf> {
 
 /// Read a drawing file through the host's io hooks, counting its bytes against the load's total.
 fn read(file: &Path, cx: &mut Ctx) -> Result<Drawing, String> {
-    let hooks = super::super::super::file::io().ok_or("file formats are not available in this build")?;
+    let read_hook = cx.read_hook.or_else(|| super::super::super::file::io().map(|h| h.read)).ok_or("file formats are not available in this build")?;
     #[cfg(not(target_arch = "wasm32"))]
     {
         use std::io::Read;
@@ -282,11 +284,11 @@ fn read(file: &Path, cx: &mut Ctx) -> Result<Drawing, String> {
             return Err(too_big());
         }
         cx.bytes = cx.bytes.saturating_add(n);
-        (hooks.read)(&bytes, &file.to_string_lossy())
+        read_hook(&bytes, &file.to_string_lossy())
     }
     #[cfg(target_arch = "wasm32")]
     {
-        let _ = (hooks, file, cx);
+        let _ = (read_hook, file, cx);
         Err("files are not available on the web".into())
     }
 }
@@ -294,13 +296,21 @@ fn read(file: &Path, cx: &mut Ctx) -> Result<Drawing, String> {
 /// Load every xref of `d` that isn't unloaded from the paths saved in it; `host` is the drawing's
 /// own path.
 pub(crate) fn load_all(d: &mut Drawing, host: Option<&str>) -> Vec<Outcome> {
+    load_all_with_reader(d, host, None)
+}
+
+pub(crate) fn load_all_with_hooks(d: &mut Drawing, host: Option<&str>, hooks: &super::super::super::file::IoHooks) -> Vec<Outcome> {
+    load_all_with_reader(d, host, Some(hooks.read))
+}
+
+fn load_all_with_reader(d: &mut Drawing, host: Option<&str>, reader: Option<fn(&[u8], &str) -> Result<Drawing, String>>) -> Vec<Outcome> {
     let names: Vec<String> = d
         .blocks
         .values()
         .filter(|b| b.xref_path.is_some() && b.xref_status != XrefStatus::Unloaded && !b.name.contains('|'))
         .map(|b| b.name.clone())
         .collect();
-    load_each(d, &names, host, false)
+    load_each_with_reader(d, &names, host, false, reader)
 }
 
 /// Load (or reload) xref `name` of `d` from its file; `host` is the drawing's own path, and
@@ -312,14 +322,40 @@ pub(crate) fn load(d: &mut Drawing, name: &str, host: Option<&str>, chosen: bool
 
 /// [`load`] the xrefs `names` within one set of limits.
 pub(crate) fn load_each(d: &mut Drawing, names: &[String], host: Option<&str>, chosen: bool) -> Vec<Outcome> {
-    let mut cx = Ctx::new(host);
-    names.iter().flat_map(|n| load_with(d, n, host, chosen, &mut cx)).collect()
+    load_each_with_reader(d, names, host, chosen, None)
+}
+
+fn load_each_with_reader(
+    d: &mut Drawing,
+    names: &[String],
+    host: Option<&str>,
+    chosen: bool,
+    reader: Option<fn(&[u8], &str) -> Result<Drawing, String>>,
+) -> Vec<Outcome> {
+    let mut cx = Ctx::new(host, reader);
+    // Names are case-insensitive, so a name that differs only by case from an earlier one is the same xref.
+    let mut seen = std::collections::HashMap::new();
+    names
+        .iter()
+        .flat_map(|n| match seen.entry(n.to_ascii_lowercase()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(n.as_str());
+                load_with(d, n, host, chosen, &mut cx)
+            }
+            // Reported, not silent: the skipped xref keeps its status and is not loaded here.
+            std::collections::hash_map::Entry::Occupied(o) => vec![Outcome {
+                name: String::new(),
+                status: XrefStatus::Unresolved,
+                detail: format!("xref \"{n}\" not loaded: it differs only by case from \"{}\"", o.get()),
+            }],
+        })
+        .collect()
 }
 
 impl Ctx {
-    fn new(host: Option<&str>) -> Self {
+    fn new(host: Option<&str>, read_hook: Option<fn(&[u8], &str) -> Result<Drawing, String>>) -> Self {
         let host_file = host.map(Path::new).filter(|p| p.file_name().is_some());
-        Ctx { chain: host_file.map(canonical).into_iter().collect(), objects: 0, files: 0, bytes: 0, notes: Vec::new() }
+        Ctx { chain: host_file.map(canonical).into_iter().collect(), objects: 0, files: 0, bytes: 0, notes: Vec::new(), read_hook }
     }
 }
 
@@ -613,7 +649,7 @@ mod tests {
 
         let mut d = Drawing::default();
         d.blocks.insert("SITE".into(), Arc::new(Block::new("SITE")));
-        let mut cx = Ctx { chain: Vec::new(), objects: 0, files: 0, bytes: 0, notes: Vec::new() };
+        let mut cx = Ctx { chain: Vec::new(), objects: 0, files: 0, bytes: 0, notes: Vec::new(), read_hook: None };
         assert!(import(&mut d, "SITE", &x, &mut cx).is_ok());
 
         let got = d.blocks.get("SITE|*U2").and_then(|b| b.array.clone());

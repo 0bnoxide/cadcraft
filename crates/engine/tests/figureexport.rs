@@ -5,6 +5,10 @@ use cadcraft_engine::{
     cmd::file::{IoHooks, set_io},
 };
 use serde_json::{Value, json};
+#[path = "support/pdf_font.rs"]
+mod pdf_font;
+#[path = "../../io/tests/support/pdf_read.rs"]
+mod pdf_read;
 use std::{
     path::PathBuf,
     sync::atomic::{AtomicU64, Ordering},
@@ -70,6 +74,93 @@ fn plans_four_jobs_exports_versions_and_preserves_source_and_current_session() {
     assert_eq!(s.doc().unwrap(), &before);
     assert_eq!(format!("{:?}", s.docs[s.active].undo), undo);
     assert_eq!(s.doc_epoch, epoch);
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exports_png_with_decodable_pixels() {
+    let (root, mut p) = fixture();
+    let mut s = Session::new();
+    p["format"] = json!("png");
+    let planned = s.execute("figureexport", &p).unwrap();
+    assert_eq!(planned["plan"]["jobs"].as_array().unwrap().len(), 4);
+    p["action"] = json!("execute");
+    p["approved_hash"] = planned["hash"].clone();
+    let done = s.execute("figureexport", &p).unwrap();
+    assert_eq!(done["receipt"]["outcome"], "Succeeded", "{done}");
+    for name in ["A_2025_F.png", "A_2026_F.png", "B_2025_F.png", "B_2026_F.png"] {
+        let bytes = std::fs::read(root.join("out").join(name)).unwrap();
+        assert!(bytes.starts_with(b"\x89PNG\r\n\x1a\n"));
+        let image = cadcraft_io::raster::decode(&bytes).unwrap();
+        assert!(image.width() > 0 && image.height() > 0);
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn exported_pdfs_contain_substituted_text() {
+    pdf_font::register();
+    let (root, mut p) = fixture();
+    let mut d = Drawing::new_metric();
+    d.text_styles.push(cadcraft_doc::TextStyle { name: "Synthetic".into(), font: "cadcraft-figure-test.ttf".into(), ..Default::default() });
+    d.layouts.push(Layout::new("Figure", 1));
+    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"style":"Synthetic","value":"{{Site}}{{Event}}{{FigureId}}"})).unwrap();
+    d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::Text(text)).unwrap();
+    std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+    std::fs::write(root.join("figure.json"), br#"{"figure_id":"A","source_drawing":"source.dxf","layout":"Figure"}"#).unwrap();
+    p["sites"] = json!(["A", "B"]);
+    p["events"] = json!(["A", "B"]);
+    let mut s = Session::new();
+    let planned = s.execute("figureexport", &p).unwrap();
+    p["action"] = json!("execute");
+    p["approved_hash"] = planned["hash"].clone();
+    let done = s.execute("figureexport", &p).unwrap();
+    assert_eq!(done["receipt"]["outcome"], "Succeeded", "{done}");
+    for (name, expected) in [("A_A_A.pdf", "AAA"), ("A_B_A.pdf", "ABA"), ("B_A_A.pdf", "BAA"), ("B_B_A.pdf", "BBA")] {
+        let pdf = pdf_read::read(&std::fs::read(root.join("out").join(name)).unwrap());
+        let page = &pdf.pages[0];
+        // Only the fixture's A/B font may contribute text. PDF character codes are
+        // font-local, so combining ToUnicode maps from multiple fonts is invalid.
+        assert_eq!(page.fonts.len(), 1, "{name}: unexpected fallback font");
+        let font = &page.fonts[0];
+        assert_eq!(font.encoding.as_deref(), Some("Identity-H"), "{name}");
+        let map: std::collections::BTreeMap<u32, String> =
+            pdf_read::to_unicode_map(font.to_unicode.as_deref().expect("fixture font needs ToUnicode")).into_iter().collect();
+        let mut extracted = String::new();
+        let shown = pdf_read::shown(&page.content_bytes);
+        assert!(!shown.is_empty(), "{name}: no actual PDF text");
+        for codes in shown {
+            assert_eq!(codes.len() % 2, 0, "{name}: odd Identity-H text bytes");
+            for code in codes.as_chunks::<2>().0 {
+                let cid = u32::from(u16::from_be_bytes([code[0], code[1]]));
+                extracted.push_str(map.get(&cid).unwrap_or_else(|| panic!("{name}: unmapped CID {cid}")));
+            }
+        }
+        assert_eq!(extracted, expected, "{name}");
+    }
+    std::fs::remove_dir_all(root).unwrap();
+}
+
+#[test]
+fn planning_warns_for_unresolved_placeholder() {
+    let (root, p) = fixture();
+    let mut d = Drawing::new_metric();
+    d.layouts.push(Layout::new("Figure", 1));
+    let text = serde_json::from_value(json!({"insert":[10,10,0],"height":3,"value":"{{Site}}{{Unknown}}"})).unwrap();
+    d.add(&Space::Paper("Figure".into()), Default::default(), EntityKind::Text(text)).unwrap();
+    std::fs::write(root.join("source.dxf"), cadcraft_io::write(&d, "source.dxf").unwrap()).unwrap();
+    let planned = Session::new().execute("figureexport", &p).unwrap();
+    for job in planned["plan"]["jobs"].as_array().unwrap() {
+        assert!(
+            job["qa"]
+                .as_array()
+                .unwrap()
+                .iter()
+                .any(|q| q["code"] == "unresolved_placeholder" && q["subject"].as_str().is_some_and(|s| s.ends_with(": Unknown"))),
+            "{job}"
+        );
+    }
+    assert!(!root.join("out").exists());
     std::fs::remove_dir_all(root).unwrap();
 }
 

@@ -1503,5 +1503,19 @@ menu	View	视图
 	Ctrl+Enter to apply	Ctrl+Enter 应用
 	Edit Text	编辑文字
 	Point File Converter	点文件转换器
+	Create Alignment	创建路线
+	Sample Ground Profile	采样地面纵断面
+	Create Design Profile	创建设计纵断面
+	Draw Profile View	绘制纵断面图
+	Alignment Report	路线报告
+	Import Alignments from LandXML	从 LandXML 导入路线
+	Export Alignments to LandXML	将路线导出为 LandXML
 	Callout Override	标注位置覆盖
 	The drawing changed. Close the window and open it again.	图纸已切换。请关闭窗口后重新打开。
+
+	Create Road View Frames	创建道路视图框
+	Group Site View Frames	编组场地视图框
+	Create Frame Profile Views	创建视图框纵断面图
+
+	Create Sheets	创建图纸
+	Update Sheets	更新图纸
