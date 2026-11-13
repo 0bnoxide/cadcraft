@@ -333,7 +333,23 @@ fn load_each_with_reader(
     reader: Option<fn(&[u8], &str) -> Result<Drawing, String>>,
 ) -> Vec<Outcome> {
     let mut cx = Ctx::new(host, reader);
-    names.iter().flat_map(|n| load_with(d, n, host, chosen, &mut cx)).collect()
+    // Names are case-insensitive, so a name that differs only by case from an earlier one is the same xref.
+    let mut seen = std::collections::HashMap::new();
+    names
+        .iter()
+        .flat_map(|n| match seen.entry(n.to_ascii_lowercase()) {
+            std::collections::hash_map::Entry::Vacant(v) => {
+                v.insert(n.as_str());
+                load_with(d, n, host, chosen, &mut cx)
+            }
+            // Reported, not silent: the skipped xref keeps its status and is not loaded here.
+            std::collections::hash_map::Entry::Occupied(o) => vec![Outcome {
+                name: String::new(),
+                status: XrefStatus::Unresolved,
+                detail: format!("xref \"{n}\" not loaded: it differs only by case from \"{}\"", o.get()),
+            }],
+        })
+        .collect()
 }
 
 impl Ctx {

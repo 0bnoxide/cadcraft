@@ -110,6 +110,44 @@ fn drawings_update_versions_owned_files_and_refuses_the_exact_colliding_version(
         assert_eq!(std::fs::read(f.root.join(name)).unwrap(), bytes);
     }
 }
+fn header_change_republishes(name: &str, value: Value) {
+    let mut f = Fixture::new();
+    f.session.execute("sheetcreate", &f.params).unwrap();
+    let originals = f.bytes();
+    let update = json!({"group":f.group["group"],"duplicate_objects":true});
+    assert_eq!(f.session.execute("sheetupdate", &update).unwrap()["changed"], false);
+    f.session.execute("setvar", &json!({"name":name,"value":value})).unwrap();
+    let expected = f.session.doc().unwrap().header.get(name).cloned().unwrap();
+    let result = f.session.execute("sheetupdate", &update).unwrap();
+    assert_eq!(result["changed"], true, "{name} must invalidate the publication signature");
+    assert_eq!(result["written"].as_array().unwrap().len(), 2);
+    assert_eq!(result["superseded"].as_array().unwrap().len(), 2);
+    for output in result["written"].as_array().unwrap() {
+        let path = PathBuf::from(output["path"].as_str().unwrap());
+        let drawing = cadcraft_io::read(&std::fs::read(&path).unwrap(), &path).unwrap();
+        assert_eq!(drawing.header.get(name), Some(&expected));
+    }
+    for (name, bytes) in originals {
+        assert_eq!(std::fs::read(f.root.join(name)).unwrap(), bytes);
+    }
+    let published = f.bytes();
+    assert_eq!(f.session.execute("sheetupdate", &update).unwrap()["changed"], false);
+    for file in ["source.dxf", "source.dwg"] {
+        let drawing = cadcraft_io::read(&cadcraft_io::write(f.session.doc().unwrap(), file).unwrap(), file).unwrap();
+        let mut reopened = Session::new();
+        *reopened.doc_mut().unwrap() = drawing;
+        assert_eq!(reopened.execute("sheetupdate", &update).unwrap()["changed"], false);
+    }
+    assert_eq!(f.bytes(), published, "unchanged and reopened updates must leave files alone");
+}
+#[test]
+fn drawings_republish_after_ltscale_changes() {
+    header_change_republishes("LTSCALE", json!(2.5));
+}
+#[test]
+fn drawings_republish_after_psltscale_changes() {
+    header_change_republishes("PSLTSCALE", json!(0));
+}
 #[test]
 fn duplicate_drawing_names_and_changed_owned_files_refuse_without_outputs() {
     let mut f = Fixture::new();
