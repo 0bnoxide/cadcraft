@@ -125,12 +125,7 @@ impl DesignProfile {
             return Err(error("INVALID_TOLERANCE", "positive finite profile chord tolerance required"));
         }
         let curves = self.curves()?;
-        let mut cuts = self.pvis.iter().map(|p| p.station).collect::<Vec<_>>();
-        for c in &curves {
-            cuts.extend([c.start, c.end]);
-        }
-        cuts.sort_by(f64::total_cmp);
-        cuts.dedup();
+        let cuts = self.vertex_stations(&curves);
         let mut out = Vec::new();
         for pair in cuts.windows(2) {
             let [lo, hi] = pair else { continue };
@@ -149,6 +144,23 @@ impl DesignProfile {
             }
         }
         Ok(out)
+    }
+    fn vertex_stations(&self, curves: &[Curve]) -> Vec<f64> {
+        let mut cuts = self.pvis.iter().map(|p| p.station).collect::<Vec<_>>();
+        for c in curves {
+            cuts.extend([c.start, c.end]);
+        }
+        cuts.sort_by(f64::total_cmp);
+        cuts.dedup();
+        cuts
+    }
+    /// Evaluated PVIs and PVC/PVT endpoints, without rendering subdivisions.
+    pub fn vertices(&self) -> Result<Vec<Sample>> {
+        let curves = self.curves()?;
+        self.vertex_stations(&curves)
+            .into_iter()
+            .map(|station| Ok(Sample { station, elevation: self.evaluate(station, &curves)?.elevation }))
+            .collect()
     }
     pub fn extrema(&self) -> Result<Vec<Sample>> {
         let mut points = Vec::new();

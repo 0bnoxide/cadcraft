@@ -9,7 +9,7 @@ use cadcraft_alignment::{
     sampling,
     view::{self, Mark},
 };
-use cadcraft_doc::{Common, EntityKind, Line, LwPolyline};
+use cadcraft_doc::{Common, Drawing, EntityKind, Handle, Line, LwPolyline, Space};
 use cadcraft_geom::{PolyVertex, Vec2, Vec3};
 use serde::Deserialize;
 use serde_json::{Value, json};
@@ -20,8 +20,9 @@ pub fn specs() -> Vec<CommandSpec> {
         ),
         CommandSpec::new("profilecreate", "Create Design Profile", create)
             .params("{alignment:handle,name?:Design,pvis:[{station,elevation,curve_length?}]} -> {profile,extrema}; replaces stored design profile"),
-        CommandSpec::new("profileview", "Draw Profile View", draw)
-            .params("{alignment:handle,at:[x,y],exaggeration?:1} -> {handles}; draws a new figure without erasing any prior one"),
+        CommandSpec::new("profileview", "Draw Profile View", draw).params(
+            "{alignment:handle,at:[x,y],exaggeration?:1,range?:[start,end],elevation_window?:[base,top]} -> {handles,clipped}; draws a new figure",
+        ),
     ]
 }
 fn sample(s: &mut Session, p: &Value) -> Result<Value> {
@@ -73,10 +74,25 @@ fn draw(s: &mut Session, p: &Value) -> Result<Value> {
     let data = alignment_store::load(s.doc()?, h)?;
     let at = super::subsurface_draw::point(p, "at", None, CMD)?;
     let exaggeration = scalar(p, "exaggeration", 1., CMD)?;
-    let marks = view::draw(&data.definition, &data.profiles, at, exaggeration).map_err(|e| bad(CMD, e.to_string()))?;
-    let text_height = (data.definition.length().map_err(|e| bad(CMD, e.to_string()))? / 100.).max(0.25);
-    let v3 = |p: [f64; 2]| Vec3 { x: p[0], y: p[1], z: 0. };
+    let range = pair(p, "range")?
+        .unwrap_or([data.definition.start_station, data.definition.start_station + data.definition.length().map_err(|e| bad(CMD, e.to_string()))?]);
+    let figure = view::draw_range(&data.definition, &data.profiles, at, exaggeration, range, pair(p, "elevation_window")?)
+        .map_err(|e| bad(CMD, e.to_string()))?;
+    let text_height = ((range[1] - range[0]) / 100.).max(0.25);
     let mut d = s.doc()?.clone();
+    let handles = add_marks(&mut d, &s.space(), figure.marks, text_height)?;
+    *s.doc_mut()? = d;
+    Ok(json!({"handles":handles.iter().map(|h|h.hex()).collect::<Vec<_>>(),"clipped":figure.clipped}))
+}
+pub(super) fn pair(p: &Value, key: &str) -> Result<Option<[f64; 2]>> {
+    p.get(key)
+        .map(|v| <[f64; 2]>::deserialize(v).map_err(|_| bad("profileview", format!("{key} requires two finite numbers"))))
+        .transpose()
+        .and_then(|v| if v.is_some_and(|v| v.iter().any(|v| !v.is_finite())) { Err(bad("profileview", "nonfinite pair")) } else { Ok(v) })
+}
+pub(super) fn add_marks(d: &mut Drawing, space: &Space, marks: Vec<Mark>, text_height: f64) -> Result<Vec<Handle>> {
+    const CMD: &str = "profileview";
+    let v3 = |p: [f64; 2]| Vec3 { x: p[0], y: p[1], z: 0. };
     let mut handles = Vec::new();
     for mark in marks {
         let (layer, kind) = match mark {
@@ -111,11 +127,10 @@ fn draw(s: &mut Session, p: &Value) -> Result<Value> {
             "PROFILE-DESIGN" => 1,
             _ => 256,
         });
-        let handle = d.add(&s.space(), Common { layer: layer.into(), color, ..Common::default() }, kind)?;
-        handles.push(handle.hex());
+        let handle = d.add(space, Common { layer: layer.into(), color, ..Common::default() }, kind)?;
+        handles.push(handle);
     }
-    *s.doc_mut()? = d;
-    Ok(json!({"handles":handles}))
+    Ok(handles)
 }
 #[cfg(test)]
 mod tests {
