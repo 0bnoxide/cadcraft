@@ -1162,7 +1162,10 @@ pub(super) mod files {
         // These are allocation/lookup bookkeeping, not saved drawing content.
         d.header.vars.remove("HANDSEED");
         d.handseed = 0;
-        std::sync::Arc::make_mut(&mut d.foreign).targets.clear();
+        let foreign = std::sync::Arc::make_mut(&mut d.foreign);
+        foreign.targets.clear();
+        // File handles of objects CADCraft writes itself; saving renumbers them (upstream #495).
+        foreign.handles.clear();
         d
     }
     pub fn same_drawing(a: &Drawing, b: &Drawing) -> bool {
