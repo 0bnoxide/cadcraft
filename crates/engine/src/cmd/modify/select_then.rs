@@ -1,6 +1,6 @@
 use super::break_join::join;
 use super::explode::explode;
-use super::transform::{at_elevation, copy_translated, erase, scale_entities, transform_entities};
+use super::transform::{at_elevation, copy_translated, erase, rotate_entities, scale_entities, transform_entities};
 use super::{
     Accept, EngineError, EntityKind, Handle, Input, Interactive, Mat3, Prompt, Result, SelOutcome, SelectPhase, Session, Step, Vec2, line, number,
 };
@@ -195,7 +195,7 @@ impl SelectThen {
             (true, Some(a), Input::Point(p)) => two_points(a, p)?,
             _ => return Ok(Step::Continue),
         };
-        transform_entities(s, &self.objs, &Mat3::rotate_about(base, new - r), self.copy_mode)?;
+        rotate_entities(s, &self.objs, base, new - r, self.copy_mode)?;
         s.set_selection(Vec::new());
         Ok(Step::Done)
     }
@@ -425,7 +425,7 @@ impl Interactive for SelectThen {
                     _ => s.last_used.rotate_angle,
                 };
                 s.last_used.rotate_angle = a;
-                transform_entities(s, &self.objs, &Mat3::rotate_about(self.pts[0], a), self.copy_mode)?;
+                rotate_entities(s, &self.objs, self.pts[0], a, self.copy_mode)?;
                 s.set_selection(Vec::new());
                 Ok(Step::Done)
             }

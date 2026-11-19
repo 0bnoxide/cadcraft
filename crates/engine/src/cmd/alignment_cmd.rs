@@ -19,7 +19,7 @@ pub fn specs() -> Vec<CommandSpec> {
     vec![
     CommandSpec::new("alignmentcreate","Create Alignment",create).params("{name,start_station?:0,format?:thousands|hundreds,chord_tolerance?:0.01,elements:[{start:[x,y],direction:radians,length,type:line|arc|spiral,radius?,turn?:left|right,radius_start?,radius_end?}] OR polyline:handle (else selection)}"),
     CommandSpec::new("alignmentreport","Alignment Report",report).noundo().params("{alignment:handle,stations?:[station|{station,offset}],points?:[[x,y]]} -> {definition,length,elements,points_at_stations,projections}"),
-    CommandSpec::new("alignmentimport","Import Alignments from LandXML",import).params("{xml OR path,unit?:meter|foot|USSurveyFoot (drawing coordinate unit; default meter),chord_tolerance?:0.01} -> {handles,refusals,warnings}"),
+    CommandSpec::new("alignmentimport","Import Alignments from LandXML",import).params("{xml OR path,unit?:meter|foot|USSurveyFoot (drawing coordinate unit; default meter),chord_tolerance?:0.01,coordinate_step?:positive <= 0.001 (opt-in rounding step in source units)} -> {handles,refusals,warnings}"),
     CommandSpec::new("alignmentexport","Export Alignments to LandXML",export).noundo().params("{alignment:handle OR alignments:[handle] (else selection),unit?:meter|foot|USSurveyFoot (default meter),path?} -> {xml OR path}"),
 ]
 }
@@ -175,7 +175,12 @@ fn import(s: &mut Session, p: &Value) -> Result<Value> {
         Some(_) => return Err(bad(CMD, "xml must be a string of at most 16MiB")),
         None => read_xml(p)?,
     };
-    let result = landxml::import(&bytes, unit(p, CMD)?).map_err(|e| bad(CMD, e.to_string()))?;
+    let unit = unit(p, CMD)?;
+    let result = match p.get("coordinate_step") {
+        Some(step) => landxml::import_rounded(&bytes, unit, step.as_f64().ok_or_else(|| bad(CMD, "coordinate_step must be numeric"))?),
+        None => landxml::import(&bytes, unit),
+    }
+    .map_err(|e| bad(CMD, e.to_string()))?;
     let tolerance = scalar(p, "chord_tolerance", 0.01, CMD)?;
     let mut d = s.doc()?.clone();
     let mut handles = Vec::new();
@@ -630,7 +635,7 @@ mod tests {
             }))
             .unwrap();
         s.set_selection(vec![source]);
-        let created = s.execute("alignmentcreate", &json!({"name":"from polyline"})).unwrap();
+        let created = s.execute("alignmentcreate", &json!({"name":"from polyline","start_station":100.})).unwrap();
         let h = created["handle"].as_str().unwrap();
         let report = s.execute("alignmentreport", &json!({"alignment":h})).unwrap();
         assert_eq!(report["elements"].as_array().unwrap().len(), 3);
@@ -644,9 +649,25 @@ mod tests {
         assert_eq!(copied_data.definition.name, "from polyline");
         assert_eq!(copied_data.definition.elements[0].start, [0., 0.]);
         s.execute("move", &json!({"handles":[h],"delta":[1,0]})).unwrap();
-        assert!(s.execute("alignmentreport", &json!({"alignment":h})).unwrap_err().to_string().contains("STALE_ALIGNMENT"));
+        let moved = super::alignment_store::load(s.doc().unwrap(), original).unwrap();
+        assert_eq!(moved.definition.elements[0].start, [1., 0.]);
         s.undo().unwrap();
-        assert!(s.execute("alignmentreport", &json!({"alignment":h})).is_ok());
+        assert_eq!(super::alignment_store::load(s.doc().unwrap(), original).unwrap().definition.elements[0].start, [0., 0.]);
+        s.redo().unwrap();
+        s.execute("rotate", &json!({"handles":[h],"base":[1,0],"angle":90})).unwrap();
+        s.execute("scale", &json!({"handles":[h],"base":[1,0,0],"factor":2})).unwrap();
+        let transformed = super::alignment_store::load(s.doc().unwrap(), original).unwrap();
+        assert_eq!(transformed.definition.start_station, 100.);
+        assert_eq!(transformed.definition.elements[0].length, 20.);
+        assert!(matches!(transformed.definition.elements[1].kind, cadcraft_alignment::Kind::Arc { radius, .. } if (radius - 20.).abs() < 1e-8));
+        let end = transformed.definition.at(120., 0.).unwrap().point;
+        assert!((end[0] - 1.).abs() < 1e-8 && (end[1] - 20.).abs() < 1e-8);
+        for file in ["transformed.dxf", "transformed.dwg"] {
+            let bytes = cadcraft_io::write(s.doc().unwrap(), file).unwrap();
+            let reopened = cadcraft_io::read(&bytes, file).unwrap();
+            let found = reopened.model.iter().filter_map(|e| super::alignment_store::load(&reopened, e.handle).ok());
+            assert!(found.into_iter().any(|data| data.definition.elements[0].start == [1., 0.] && data.definition.elements[0].length == 20.));
+        }
         s.doc_mut()
             .unwrap()
             .modify_entity(original, |e| {
@@ -656,6 +677,85 @@ mod tests {
             })
             .unwrap();
         assert!(s.execute("alignmentreport", &json!({"alignment":h})).unwrap_err().to_string().contains("STALE_ALIGNMENT"));
+    }
+    #[test]
+    fn alignment_transform_preserves_design_and_refuses_unsupported_batches() {
+        use cadcraft_alignment::profile::{DesignProfile, GroundProfile, Pvi, Sample};
+        let mut s = Session::new();
+        let created =
+            s.execute("alignmentcreate", &json!({"name":"route","elements":[{"start":[500000,0],"direction":0,"length":10,"type":"line"}]})).unwrap();
+        let h = Handle::parse_hex(created["handle"].as_str().unwrap()).unwrap();
+        let mut data = super::alignment_store::load(s.doc().unwrap(), h).unwrap();
+        data.profiles.design = Some(DesignProfile {
+            name: "Design".into(),
+            pvis: vec![Pvi { station: 0., elevation: 1., curve_length: None }, Pvi { station: 10., elevation: 2., curve_length: None }],
+        });
+        data.profiles.ground = Some(GroundProfile {
+            name: "Ground".into(),
+            segments: vec![vec![Sample { station: 0., elevation: 0. }, Sample { station: 10., elevation: 1. }]],
+        });
+        super::alignment_store::save(s.doc_mut().unwrap(), h, &data).unwrap();
+        let hs = h.hex();
+        s.execute("move", &json!({"handles":[hs],"delta":[0,0]})).unwrap();
+        s.execute("move", &json!({"handles":[hs],"delta":[1e-12,0]})).unwrap();
+        s.execute("rotate", &json!({"handles":[hs],"base":[1,2],"angle":3960})).unwrap();
+        assert_eq!(super::alignment_store::load(s.doc().unwrap(), h).unwrap().profiles, data.profiles);
+        let point = cadcraft_geom::Vec3::new(1., 0., 0.);
+        let other = s.add_entity(EntityKind::Point(cadcraft_doc::Point { p: point, angle: 0. })).unwrap();
+        Arc::make_mut(&mut s.doc_mut().unwrap().foreign).entities.entry(other).or_default().xdict = Some(Handle(u64::MAX - 1));
+        let error = s.execute("scale", &json!({"handles":[other.hex(),hs],"base":[0,0,0],"factor":2})).unwrap_err();
+        assert!(error.to_string().contains("design profile"), "{error}");
+        let EntityKind::Point(entity) = &s.doc().unwrap().entity(other).unwrap().kind else { panic!("expected point") };
+        assert_eq!(entity.p, point);
+        s.execute("move", &json!({"handles":[other.hex()],"delta":[1,0]})).unwrap();
+        let EntityKind::Point(entity) = &s.doc().unwrap().entity(other).unwrap().kind else { panic!("expected point") };
+        assert_eq!(entity.p, cadcraft_geom::Vec3::new(2., 0., 0.));
+        s.set_selection(vec![h]);
+        s.start("move").unwrap();
+        s.input(crate::Input::Point(cadcraft_geom::Vec2::ZERO)).unwrap();
+        s.input(crate::Input::Point(cadcraft_geom::Vec2::new(0., 2.))).unwrap();
+        let moved = super::alignment_store::load(s.doc().unwrap(), h).unwrap();
+        assert_eq!(moved.definition.elements[0].start, [500000., 2.]);
+        assert_eq!(moved.profiles.design, data.profiles.design);
+        assert!(moved.profiles.ground.is_none());
+        s.undo().unwrap();
+        assert_eq!(super::alignment_store::load(s.doc().unwrap(), h).unwrap().profiles, data.profiles);
+    }
+    #[test]
+    fn alignment_rotate_copy_preserves_source_and_refuses_nonplanar_scale() {
+        let mut s = Session::new();
+        let h = line(&mut s, "route");
+        let original = h.hex();
+        let result = s.execute("rotate", &json!({"handles":[original],"base":[0,0],"angle":90,"copy":true})).unwrap();
+        let copied = Handle::parse_hex(result["handles"][0].as_str().unwrap()).unwrap();
+        assert_ne!(copied, h);
+        let source = super::alignment_store::load(s.doc().unwrap(), h).unwrap();
+        let target = super::alignment_store::load(s.doc().unwrap(), copied).unwrap();
+        assert_eq!(source.definition.elements[0].direction, 0.);
+        assert_eq!(target.definition.elements[0].direction, std::f64::consts::FRAC_PI_2);
+        let err = s.execute("scale", &json!({"handles":[original],"base":[0,0,5],"factor":2})).unwrap_err();
+        assert!(err.to_string().contains("XY plane"), "{err}");
+        assert_eq!(super::alignment_store::load(s.doc().unwrap(), h).unwrap().definition.elements[0].length, 10.);
+    }
+    #[test]
+    fn rounded_landxml_is_opt_in_and_reports_the_adjustment() {
+        let mut s = Session::new();
+        let xml = r#"<LandXML xmlns="http://www.landxml.org/schema/LandXML-1.2" version="1.2">
+          <Units><Metric linearUnit="meter"/></Units>
+          <Alignments><Alignment name="Rounded" staStart="10" length="100"><CoordGeom>
+            <Line length="100" dir="60"><Start>0 0</Start><End>50 86.603</End></Line>
+          </CoordGeom></Alignment></Alignments></LandXML>"#;
+        let strict = s.execute("alignmentimport", &json!({"xml":xml})).unwrap();
+        assert_eq!(strict["handles"], json!([]));
+        assert_eq!(strict["refusals"][0]["code"], "GEOMETRY_MISMATCH");
+        let adjusted = s.execute("alignmentimport", &json!({"xml":xml,"coordinate_step":0.001})).unwrap();
+        assert_eq!(adjusted["refusals"], json!([]));
+        assert_eq!(adjusted["warnings"][0]["code"], "ROUNDED_GEOMETRY_ADJUSTED");
+        let h = adjusted["handles"][0].as_str().unwrap();
+        let report = s.execute("alignmentreport", &json!({"alignment":h,"stations":[110]})).unwrap();
+        assert_eq!(report["length"], 100.);
+        s.undo().unwrap();
+        assert!(s.doc().unwrap().model.is_empty());
     }
     #[test]
     fn commands_create_report_exchange_reopen_and_reject_stale_carrier() {

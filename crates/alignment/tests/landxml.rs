@@ -42,6 +42,140 @@ fn file(body: &str) -> String {
     )
 }
 #[test]
+fn rounded_coordinates_reconstruct_declared_geometry_and_station_extent() {
+    for (step, middle) in [(0.001, "86.603"), (0.0001, "86.6025")] {
+        let xml = file(&format!(
+            "<Alignment name='Rounded' staStart='1000' length='120'><CoordGeom>\
+             <Line dir='60' length='100'><Start>0 0</Start><End>50 {middle}</End></Line>\
+             <Line dir='60' length='20'><Start>50 {middle}</Start><End>60 103.923</End></Line>\
+             </CoordGeom><Profile><ProfAlign name='Design'><PVI>1000 12</PVI><PVI>1120 10</PVI></ProfAlign></Profile></Alignment>"
+        ));
+        let strict = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+        assert!(strict.alignments.is_empty());
+        assert_eq!(strict.refusals[0].code, "GEOMETRY_MISMATCH");
+
+        let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, step).unwrap();
+        assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+        let route = &imported.alignments[0];
+        assert_eq!(route.definition.start_station, 1000.);
+        assert_eq!(route.definition.length().unwrap(), 120.);
+        assert!(route.profiles.design.is_some());
+        let end = route.definition.at(1120., 0.).unwrap().point;
+        assert!((end[0] - 103.923048454).abs() < 1e-9);
+        assert!((end[1] - 60.).abs() < 1e-9);
+        assert_eq!(imported.warnings.len(), 1);
+        assert_eq!(imported.warnings[0].code, "ROUNDED_GEOMETRY_ADJUSTED");
+    }
+}
+#[test]
+fn rounded_coordinates_recover_a_long_line_with_a_rounded_bearing() {
+    let body = "<Alignment name='Long' staStart='0' length='1000'><CoordGeom>\
+                <Line dir='90.000' length='1000'><Start>0 0</Start><End>0.007 1000</End></Line>\
+                </CoordGeom></Alignment>";
+    let xml = file(body);
+    let strict = landxml::import(xml.as_bytes(), Unit::Meter).unwrap();
+    assert_eq!(strict.refusals[0].code, "GEOMETRY_MISMATCH");
+
+    let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, 0.001).unwrap();
+    assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+    let route = &imported.alignments[0].definition;
+    assert_eq!(route.length().unwrap(), 1000.);
+    let end = route.at(1000., 0.).unwrap().point;
+    assert!((end[0] - 1000.).hypot(end[1] - 0.007) < 0.001);
+    assert_eq!(imported.warnings[0].code, "ROUNDED_GEOMETRY_ADJUSTED");
+
+    let inconsistent = file(&body.replace("90.000", "90.001"));
+    let refused = landxml::import_rounded(inconsistent.as_bytes(), Unit::Meter, 0.001).unwrap();
+    assert!(refused.alignments.is_empty());
+    assert_eq!(refused.refusals[0].code, "GEOMETRY_MISMATCH");
+}
+
+#[test]
+fn rounded_curve_and_spiral_keep_supported_geometry() {
+    let body = "<Alignment name='Transitions' staStart='0' length='170'><CoordGeom>\
+                <Line dir='90' length='100'><Start>0 0</Start><End>0 100</End></Line>\
+                <Curve rot='ccw' radius='100' length='30'><Start>0 100</Start><Center>100 100</Center><End>4.466 129.552</End></Curve>\
+                <Spiral spiType='clothoid' rot='ccw' radiusStart='100' radiusEnd='INF' length='40' dirStart='72.811' dirEnd='61.352'>\
+                <Start>4.466 129.552</Start><PI>8.422 142.339</PI><End>21.233 165.790</End></Spiral>\
+                </CoordGeom></Alignment>";
+    let xml = file(body);
+    let imported = landxml::import_rounded(xml.as_bytes(), Unit::Foot, 0.001).unwrap();
+    assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+    assert_eq!(imported.warnings.len(), 1);
+    assert!(imported.warnings[0].reason.contains("foot"));
+    let route = &imported.alignments[0].definition;
+    let length = route.length().unwrap();
+    assert!((length * 0.3048 - 170.).abs() < 1e-10);
+    assert!(matches!(route.elements[1].kind, Kind::Arc { .. }));
+    assert!(matches!(route.elements[2].kind, Kind::Spiral { .. }));
+    let end = route.at(length, 0.).unwrap();
+    assert!((end.point[0] * 0.3048 - 165.789989697).abs() < 1e-7);
+    assert!((end.point[1] * 0.3048 - 21.233264147).abs() < 1e-7);
+
+    for bad in [("8.422 142.339", "8.422 142.341"), ("61.352", "61.351"), ("100 100", "100.002 100")] {
+        let xml = file(&body.replace(bad.0, bad.1));
+        let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, 0.001).unwrap();
+        assert!(imported.alignments.is_empty(), "{bad:?}");
+        assert_eq!(imported.refusals[0].code, "GEOMETRY_MISMATCH");
+        assert!(imported.warnings.is_empty());
+    }
+}
+
+#[test]
+fn rounded_import_refuses_cumulative_drift_and_leaves_exact_routes_unadjusted() {
+    let xml = file(
+        "<Alignment name='Drift' staStart='0' length='30'><CoordGeom>\
+         <Line dir='90' length='10'><Start>0 0</Start><End>0 10.0006</End></Line>\
+         <Line dir='90' length='10'><Start>0 10.0006</Start><End>0 20.0012</End></Line>\
+         <Line dir='90' length='10'><Start>0 20.0012</Start><End>0 30.0018</End></Line>\
+         </CoordGeom></Alignment>\
+         <Alignment name='Exact' staStart='0' length='10'><CoordGeom>\
+         <Line><Start>0 0</Start><End>0 10</End></Line></CoordGeom></Alignment>",
+    );
+    let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, 0.001).unwrap();
+    assert_eq!(imported.alignments.len(), 1);
+    assert_eq!(imported.alignments[0].definition.name, "Exact");
+    assert_eq!(imported.refusals.len(), 1);
+    assert_eq!(imported.refusals[0].name, "Drift");
+    assert_eq!(imported.refusals[0].code, "GEOMETRY_MISMATCH");
+    assert!(imported.warnings.is_empty());
+
+    for step in [0., -0.001, 0.01, f64::NAN, f64::INFINITY] {
+        assert!(landxml::import_rounded(xml.as_bytes(), Unit::Meter, step).is_err());
+    }
+}
+
+#[test]
+fn rounded_import_preserves_a_declared_line_corner() {
+    let xml = file(
+        "<Alignment name='Corner' staStart='0' length='120'><CoordGeom>\
+         <Line dir='60' length='100'><Start>0 0</Start><End>50 86.603</End></Line>\
+         <Line dir='90' length='20'><Start>50 86.603</Start><End>50 106.603</End></Line>\
+         </CoordGeom></Alignment>",
+    );
+    let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, 0.001).unwrap();
+    assert!(imported.refusals.is_empty(), "{:?}", imported.refusals);
+    let route = &imported.alignments[0].definition;
+    let end = route.at(120., 0.).unwrap();
+    assert!((end.point[0] - 106.602540378).abs() < 1e-9);
+    assert!((end.point[1] - 50.).abs() < 1e-9);
+}
+
+#[test]
+fn rounded_import_refuses_inconsistent_stated_joints() {
+    let xml = file(
+        "<Alignment name='Gap' staStart='0' length='20'><CoordGeom>\
+         <Line dir='90' length='10'><Start>0 0</Start><End>0 9.999</End></Line>\
+         <Line dir='90' length='10'><Start>0 10.001</Start><End>0 20</End></Line>\
+         </CoordGeom></Alignment>",
+    );
+    let imported = landxml::import_rounded(xml.as_bytes(), Unit::Meter, 0.001).unwrap();
+    assert!(imported.alignments.is_empty());
+    assert_eq!(imported.refusals[0].code, "GEOMETRY_MISMATCH");
+    assert!(imported.refusals[0].reason.contains("stated joint gap"));
+    assert!(imported.warnings.is_empty());
+}
+#[test]
 fn unsupported_alignment_is_refused_without_losing_other_alignment() {
     let body = "<Alignment name=\"bad\" staStart=\"0\" length=\"10\"><CoordGeom><Spiral spiType=\"cubic\"/></CoordGeom></Alignment><Alignment name=\"good\" staStart=\"0\" length=\"10\"><CoordGeom><Line><Start>0 0</Start><End>0 10</End></Line></CoordGeom><StaEquation staBack=\"5\" staAhead=\"10\"/><Profile/></Alignment>";
     let r = landxml::import(file(body).as_bytes(), Unit::Meter).unwrap();

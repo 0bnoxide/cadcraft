@@ -22,7 +22,7 @@ impl ValidatedAlignment<'_> {
             let mut consider = |s: f64| {
                 let d = distance(e.pose(s).point, point);
                 let st = a.start_station + (distance_along + s);
-                consider_candidate(&mut best, Candidate { distance: d, station: st, element: index, root: None });
+                consider_candidate(&mut best, Candidate { distance: d, station: st, element: index, local: s, root: None });
             };
             consider(0.);
             consider(e.length);
@@ -82,6 +82,7 @@ impl ValidatedAlignment<'_> {
                                 distance: distance(e.pose(s).point, point),
                                 station: a.start_station + (distance_along + s),
                                 element: index,
+                                local: s,
                                 root: Some(s),
                             },
                         );
@@ -94,6 +95,7 @@ impl ValidatedAlignment<'_> {
                                 distance: distance(e.pose(s).point, point),
                                 station: a.start_station + (distance_along + s),
                                 element: index,
+                                local: s,
                                 root: None,
                             },
                         );
@@ -109,22 +111,25 @@ impl ValidatedAlignment<'_> {
             }
             distance_along += e.length;
         }
-        let Candidate { distance, station, element: index, .. } = best.ok_or_else(|| error("INVALID_ALIGNMENT", "empty alignment"))?;
-        let pose = self.at(station, 0.)?;
+        let Candidate { distance, station, element: index, local, .. } = best.ok_or_else(|| error("INVALID_ALIGNMENT", "empty alignment"))?;
+        let e = a.elements.get(index).ok_or_else(|| error("INVALID_ALIGNMENT", "element missing"))?;
+        let endpoint = local == 0. || local == e.length;
+        // An interior projection can round to a joint's absolute station and pick up the wrong normal.
+        let pose = if endpoint { self.at(station, 0.)? } else { e.pose(local) };
         let delta = sub(point, pose.point);
         let (sn, cs) = pose.direction.sin_cos();
         let lateral = cross([cs, sn], delta);
         let along = dot(delta, [cs, sn]);
-        let end = a.start_station + self.length();
-        let beyond = if station == a.start_station && along < 0. {
+        let beyond = if index == 0 && local == 0. && along < 0. {
             Some(Beyond::Before)
-        } else if station == end && along > 0. {
+        } else if index + 1 == a.elements.len() && local == e.length && along > 0. {
             Some(Beyond::After)
         } else {
             None
         };
-        let offset = if beyond.is_some() { lateral } else { distance.copysign(lateral) };
-        Ok(Projection { station, offset, distance, element: index, beyond })
+        let angle_point = if endpoint && matches!(e.kind, Kind::Line) { self.angle_point_at(station) } else { None };
+        let offset = if beyond.is_some() || angle_point.is_some() { lateral } else { distance.copysign(lateral) };
+        Ok(Projection { station, offset, distance, element: angle_point.unwrap_or(index), beyond })
     }
 }
 
@@ -133,6 +138,7 @@ struct Candidate {
     distance: f64,
     station: f64,
     element: usize,
+    local: f64,
     root: Option<f64>,
 }
 fn consider_candidate(best: &mut Option<Candidate>, next: Candidate) {

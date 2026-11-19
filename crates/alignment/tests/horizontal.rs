@@ -12,6 +12,68 @@ fn close(a: f64, b: f64) {
 }
 
 #[test]
+fn line_angle_point_uses_outgoing_direction_and_offset() {
+    let a = route(vec![element([0., 0.], 0., 10., Kind::Line), element([10., 0.], FRAC_PI_2, 10., Kind::Line)]);
+    close(a.length().unwrap(), 20.);
+    for (station, direction, point) in [(-1., 0., [9., 2.]), (0., FRAC_PI_2, [8., 0.]), (1., FRAC_PI_2, [8., 1.]), (10., FRAC_PI_2, [8., 10.])] {
+        let pose = a.at(station, 2.).unwrap();
+        close(pose.direction, direction);
+        close(pose.point[0], point[0]);
+        close(pose.point[1], point[1]);
+    }
+
+    for (point, station, offset, distance, element, beyond) in [
+        ([9., -2.], -1., -2., 2., 0, None),
+        ([10., 0.], 0., 0., 0., 1, None),
+        ([13., -4.], 0., -3., 5., 1, None),
+        ([12., 1.], 1., -2., 2., 1, None),
+        ([13., 14.], 10., -3., 5., 1, Some(cadcraft_alignment::Beyond::After)),
+    ] {
+        let p = a.project(point).unwrap();
+        close(p.station, station);
+        close(p.offset, offset);
+        close(p.distance, distance);
+        assert_eq!(p.element, element);
+        assert_eq!(p.beyond, beyond);
+    }
+}
+
+#[test]
+fn angle_points_do_not_admit_gaps_or_kinks_into_curves() {
+    let line = element([0., 0.], 0., 10., Kind::Line);
+    for other in [
+        element([11., 0.], FRAC_PI_2, 10., Kind::Line),
+        element([10., 0.], FRAC_PI_2, 10., Kind::Arc { radius: 10., turn: Turn::Left }),
+        element([10., 0.], FRAC_PI_2, 10., Kind::Spiral { radius_start: None, radius_end: Some(100.), turn: Turn::Left }),
+    ] {
+        let a = route(vec![line.clone(), other]);
+        assert_eq!(a.validate().unwrap().len(), 1);
+        assert_eq!(a.length().unwrap_err().code, "INVALID_JOINTS");
+    }
+}
+
+#[test]
+fn projection_at_smooth_line_joint_keeps_incoming_element_tie() {
+    let a = route(vec![element([0., 0.], 0., 10., Kind::Line), element([10., 0.], 0., 10., Kind::Line)]);
+    let p = a.project([10., -2.]).unwrap();
+    close(p.station, 0.);
+    close(p.offset, -2.);
+    close(p.distance, 2.);
+    assert_eq!(p.element, 0);
+}
+
+#[test]
+fn station_rounding_does_not_turn_an_interior_projection_into_an_angle_point() {
+    let mut a = route(vec![element([0., 0.], 0., 10., Kind::Line), element([10., 0.], FRAC_PI_2, 10., Kind::Line)]);
+    a.start_station = 1e16;
+    let p = a.project([9.5, -1.]).unwrap();
+    assert_eq!(p.station, a.start_station + 10.);
+    close(p.distance, 1.);
+    close(p.offset, -1.);
+    assert_eq!(p.element, 0);
+}
+
+#[test]
 fn line_arc_line_known_answers() {
     // Tangent east 10, left radius10 quarter-circle about (10,10), tangent north10.
     // Arc delta=pi/2; L=10+5*pi+10. Arc midpoint=(10+10/sqrt2,10-10/sqrt2).
