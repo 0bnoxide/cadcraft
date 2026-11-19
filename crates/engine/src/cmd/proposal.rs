@@ -917,11 +917,30 @@ pub(super) mod files {
                 Err(e) => return Err(e.to_string()),
             }
         }
+        move_without_exclusive_primitive(from, to)
+    }
+    /// The last step of [`rename_no_replace`], reached only when neither an exclusive rename nor a hard link is
+    /// available. A plain rename can replace a regular file created after any final check, and that file can hold
+    /// user data, so a regular-file source is refused here (#93). A directory source keeps the checked rename: a
+    /// rename refuses a non-empty destination directory, so the remaining race can only replace an empty one (#32).
+    pub(super) fn move_without_exclusive_primitive(from: &Path, to: &Path) -> Checked<()> {
+        if fs::symlink_metadata(from).map_err(|e| e.to_string())?.is_file() {
+            return Err("exclusive_publish_failed: no exclusive rename or hard link on this filesystem; file not published".into());
+        }
         if fs::symlink_metadata(to).is_ok() {
             return Err("output_collision: destination exists".into());
         }
-        // shortcut: unsupported filesystems have no exclusive rename; the final check narrows but cannot remove the concurrent-creation race.
         fs::rename(from, to).map_err(|e| e.to_string())
+    }
+    /// Publish a staged regular file exclusively, retaining the stage link until batch cleanup.
+    pub fn publish_file_no_replace(from: &Path, to: &Path) -> Checked<()> {
+        reject_link(from)?;
+        reject_link(to)?;
+        if !fs::symlink_metadata(from).map_err(|e| e.to_string())?.is_file() {
+            return Err("unsafe_path: staged output must be a regular file".into());
+        }
+        // Hard links are atomic and exclusive; unsupported filesystems must refuse (#93).
+        fs::hard_link(from, to).map_err(|e| format!("exclusive_publish_failed: {e}"))
     }
     #[derive(Clone, Debug, serde::Serialize)]
     pub struct Swap {
@@ -1277,6 +1296,34 @@ mod tests {
         assert_eq!(std::fs::read(&target).unwrap(), b"prior");
         assert!(!stage.exists());
         assert!(!root.join("_superseded").exists());
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn file_fallback_refuses_instead_of_racing_a_new_destination() {
+        // #93: with no exclusive rename or hard link, a destination created at the publish boundary must survive.
+        let (root, _, _) = project();
+        let stage = root.join("stage.dxf");
+        let target = root.join("target.dxf");
+        std::fs::write(&stage, b"new").unwrap();
+        let refused = files::move_without_exclusive_primitive(&stage, &target).unwrap_err();
+        assert!(refused.starts_with("exclusive_publish_failed"), "{refused}");
+        assert!(!target.exists());
+        std::fs::write(&target, b"user data").unwrap();
+        assert!(files::move_without_exclusive_primitive(&stage, &target).unwrap_err().starts_with("exclusive_publish_failed"));
+        assert_eq!(std::fs::read(&target).unwrap(), b"user data");
+        assert_eq!(std::fs::read(&stage).unwrap(), b"new");
+        let staged_dir = root.join("contents.stage");
+        let final_dir = root.join("contents");
+        std::fs::create_dir(&staged_dir).unwrap();
+        std::fs::write(staged_dir.join("sheet.pdf"), b"pdf").unwrap();
+        std::fs::create_dir(&final_dir).unwrap();
+        std::fs::write(final_dir.join("keep.txt"), b"keep").unwrap();
+        assert!(files::move_without_exclusive_primitive(&staged_dir, &final_dir).unwrap_err().starts_with("output_collision"));
+        assert_eq!(std::fs::read(final_dir.join("keep.txt")).unwrap(), b"keep");
+        std::fs::remove_dir_all(&final_dir).unwrap();
+        files::move_without_exclusive_primitive(&staged_dir, &final_dir).unwrap();
+        assert_eq!(std::fs::read(final_dir.join("sheet.pdf")).unwrap(), b"pdf");
         std::fs::remove_dir_all(root).unwrap();
     }
 

@@ -47,6 +47,25 @@ pub(super) struct SheetRun {
     pub config: SheetConfig,
     pub source_hash: String,
     pub layouts: Vec<Sheet>,
+    #[serde(default)]
+    pub drawings: Option<Drawings>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Drawings {
+    pub folder: String,
+    pub name: String,
+    pub per: usize,
+    pub version: u32,
+    pub input_hash: String,
+    pub files: Vec<Published>,
+}
+#[derive(Clone, Debug, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub(super) struct Published {
+    pub path: String,
+    pub sha256: String,
+    pub layouts: Vec<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]
@@ -56,6 +75,8 @@ pub(super) struct Sheet {
     pub frames: Vec<u32>,
     pub members: Vec<String>,
     pub hash: String,
+    #[serde(default)]
+    pub file: Option<String>,
 }
 #[derive(Clone, Debug, Serialize, Deserialize)]
 #[serde(deny_unknown_fields)]

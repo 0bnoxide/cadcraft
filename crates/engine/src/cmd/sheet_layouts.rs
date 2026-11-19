@@ -4,8 +4,8 @@ use crate::{Result, Session};
 use serde_json::Value;
 pub fn specs() -> Vec<CommandSpec> {
     vec![
-    CommandSpec::new("sheetcreate","Create Sheets",create).params("{group,template,template_layout,arrangement:plan_profile|plan_plan|profile_profile|plan_only|profile_only,layout_name?:Sheet-{n},number_start?:1,number_increment?:1,number_width?:0,north_arrow?,storage?:current} -> {layouts,warnings}"),
-    CommandSpec::new("sheetupdate","Update Sheets",update).params("{group,add_frames?:[handle]} -> {changed,layouts,gaps_overlaps,warnings}; updates only owned sheets"),
+    CommandSpec::new("sheetcreate","Create Sheets",create).params("{group,template,template_layout,arrangement:plan_profile|plan_plan|profile_profile|plan_only|profile_only,layout_name?:Sheet-{n},number_start?:1,number_increment?:1,number_width?:0,north_arrow?,storage?:current|drawings,output_folder?,drawing_name?:Sheet-{n},layouts_per_drawing?:1,duplicate_objects?:false} -> {layouts,warnings,written?,superseded?,undo_removes_files:false}; drawings require an existing output folder and duplication confirmation; undo leaves published files"),
+    CommandSpec::new("sheetupdate","Update Sheets",update).params("{group,add_frames?:[handle],duplicate_objects?:false} -> {changed,layouts,gaps_overlaps,warnings,written?,superseded?}; drawing updates require duplication confirmation, publish new versions, and undo leaves files on disk"),
 ]
 }
 fn create(s: &mut Session, p: &Value) -> Result<Value> {
@@ -51,7 +51,7 @@ pub(super) mod native {
     };
     const CMD: &str = "sheets";
     const MAX_TEMPLATE_ENTITIES: usize = 10_000;
-    pub(super) fn digest(value: &impl Serialize) -> Result<String> {
+    pub(in crate::cmd) fn digest(value: &impl Serialize) -> Result<String> {
         struct Capped(Vec<u8>);
         impl Write for Capped {
             fn write(&mut self, b: &[u8]) -> std::io::Result<usize> {
@@ -86,7 +86,7 @@ pub(super) mod native {
             v.as_u64().and_then(|v| u32::try_from(v).ok()).ok_or_else(|| bad(CMD, format!("{key} requires an unsigned integer")))
         })
     }
-    fn config(p: &Value) -> Result<SheetConfig> {
+    pub(in crate::cmd) fn config(p: &Value) -> Result<SheetConfig> {
         let width = unsigned(p, "number_width", 0)? as usize;
         let increment = unsigned(p, "number_increment", 1)?;
         if width > 16 || increment == 0 {
@@ -140,6 +140,9 @@ pub(super) mod native {
         let mut arrows = BTreeSet::new();
         for e in l.entities.iter() {
             check_entity(&d, e)?;
+            if matches!(e.kind, EntityKind::Image(_)) {
+                rebase_image(&mut (**e).clone(), path)?;
+            }
             match &e.kind {
                 EntityKind::Viewport(v) if v.id != 1 => {
                     let role = e.common.layer.as_str();
@@ -191,7 +194,7 @@ pub(super) mod native {
         }
     }
     fn check_entity(d: &Drawing, e: &Entity) -> Result<()> {
-        if matches!(e.kind, EntityKind::Unknown(_) | EntityKind::Image(_)) || d.foreign.entities.get(&e.handle).is_some_and(|x| !x.is_empty()) {
+        if matches!(e.kind, EntityKind::Unknown(_)) || d.foreign.entities.get(&e.handle).is_some_and(|x| !x.is_empty()) {
             return Err(bad(CMD, "TEMPLATE_REFERENCE: unsupported external or extension data on template entity"));
         }
         if let EntityKind::Dimension(dim) = &e.kind
@@ -204,7 +207,25 @@ pub(super) mod native {
         }
         Ok(())
     }
-    fn import(d: &mut Drawing, src: &Drawing, l: &Layout, warnings: &mut Vec<Qa>) -> Result<()> {
+    /// Point a copied raster image at its file as the template sees it (#91). A relative path is
+    /// relative to the template's folder, so the copy stores the absolute path and still finds the
+    /// file from the current drawing's folder. A file that is missing, or that the drawing path
+    /// rules refuse to open, refuses the import rather than leaving a broken image behind.
+    fn rebase_image(e: &mut Entity, template: &Path) -> Result<()> {
+        let EntityKind::Image(i) = &mut e.kind else {
+            return Ok(());
+        };
+        let resolved = crate::doc_path::resolve(&i.path, Some(template))
+            .ok()
+            .filter(|p| p.is_file())
+            .ok_or_else(|| bad(CMD, "TEMPLATE_REFERENCE: raster image file referenced by the template is missing"))?;
+        let resolved = resolved.to_str().ok_or_else(|| bad(CMD, "TEMPLATE_REFERENCE: raster image path is not UTF-8"))?;
+        // A canonical Windows template path is verbatim; other programs read a plain drive path.
+        let plain = resolved.strip_prefix(r"\\?\").filter(|rest| rest.as_bytes().get(1) == Some(&b':')).unwrap_or(resolved);
+        i.path = plain.into();
+        Ok(())
+    }
+    fn import(d: &mut Drawing, src: &Drawing, l: &Layout, template: &Path, warnings: &mut Vec<Qa>) -> Result<()> {
         let mut queue: Vec<(String, usize, bool)> =
             l.entities.iter().filter_map(|e| block_ref(e)).map(|s| (s.to_ascii_uppercase(), 0, false)).collect();
         let mut needed = BTreeSet::new();
@@ -245,9 +266,15 @@ pub(super) mod native {
         }
         for name in &needed {
             let b = src.block(name).ok_or_else(|| bad(CMD, "TEMPLATE_BLOCK: block disappeared"))?;
+            let mut entities = Vec::with_capacity(b.entities.len());
+            for e in b.entities.iter() {
+                let mut e = (**e).clone();
+                rebase_image(&mut e, template)?;
+                entities.push(e);
+            }
             if let Some(existing) = d.block(name) {
                 let left = existing.entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
-                let right = b.entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
+                let right = entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
                 let mut metadata = (**b).clone();
                 metadata.name = existing.name.clone();
                 metadata.entities = existing.entities.clone();
@@ -257,8 +284,7 @@ pub(super) mod native {
             } else {
                 let mut copy = (**b).clone();
                 copy.entities = Default::default();
-                for e in b.entities.iter() {
-                    let mut e = (**e).clone();
+                for mut e in entities {
                     e.handle = d.new_handle();
                     copy.entities.push(e);
                 }
@@ -290,7 +316,13 @@ pub(super) mod native {
         tables!(mline_styles);
         Ok(())
     }
-    fn values(g: &Group, a: Option<&alignment_store::Stored>, indices: &[usize], number: &str, count: usize) -> BTreeMap<String, String> {
+    pub(in crate::cmd) fn values(
+        g: &Group,
+        a: Option<&alignment_store::Stored>,
+        indices: &[usize],
+        number: &str,
+        count: usize,
+    ) -> BTreeMap<String, String> {
         let mut out = BTreeMap::from([
             ("SheetNumber".into(), number.into()),
             ("SheetCount".into(), count.to_string()),
@@ -305,7 +337,7 @@ pub(super) mod native {
         }
         out
     }
-    fn name(c: &SheetConfig, number: &str, values: &BTreeMap<String, String>, warnings: &mut Vec<Qa>) -> Result<String> {
+    pub(in crate::cmd) fn name(c: &SheetConfig, number: &str, values: &BTreeMap<String, String>, warnings: &mut Vec<Qa>) -> Result<String> {
         let name = figureexport::native::substitute(&c.layout_name.replace("{n}", number), values, warnings, "layout name", false)
             .map_err(|e| bad(CMD, e))?;
         if name.trim().is_empty()
@@ -323,11 +355,25 @@ pub(super) mod native {
         for h in &s.members {
             let h = store::handle(h)?;
             let e = layout.entities.get(h).ok_or_else(|| bad(CMD, "OWNERSHIP: owned sheet entity missing"))?;
-            data.push((&e.common, &e.kind));
+            let mut kind = e.kind.clone();
+            // DWG renumbers viewport IDs per layout and writes signed zero as zero.
+            match &mut kind {
+                EntityKind::Viewport(v) => {
+                    if v.id != 1 {
+                        v.id = 2;
+                    }
+                    if v.twist == 0. {
+                        v.twist = 0.;
+                    }
+                }
+                EntityKind::Insert(i) if i.rotation == 0. => i.rotation = 0.,
+                _ => {}
+            }
+            data.push((&e.common, kind));
         }
         digest(&(&layout.page, layout.view, layout.limits, data))
     }
-    fn model_hash(d: &Drawing, g: &Group) -> Result<String> {
+    pub(in crate::cmd) fn model_hash(d: &Drawing, g: &Group) -> Result<String> {
         let mut data = Vec::new();
         for f in &g.frames {
             for (role, handles) in [("matchline", f.matchlines.as_slice()), ("profile", f.profile.as_ref().map_or(&[][..], |p| p.handles.as_slice()))]
@@ -344,7 +390,7 @@ pub(super) mod native {
         }
         digest(&data)
     }
-    fn owned(d: &Drawing, g: &Group, run: &SheetRun) -> Result<bool> {
+    pub(in crate::cmd) fn owned(d: &Drawing, g: &Group, run: &SheetRun) -> Result<bool> {
         if run.layouts.len() > 4096 {
             return Err(bad(CMD, "OWNERSHIP: sheet count limit"));
         }
@@ -466,7 +512,7 @@ pub(super) mod native {
         }
         Ok(())
     }
-    fn gaps_overlaps(g: &Group) -> Vec<Value> {
+    pub(in crate::cmd) fn gaps_overlaps(g: &Group) -> Vec<Value> {
         let mut out = Vec::new();
         if g.alignment.is_some() {
             for pair in g.frames.windows(2) {
@@ -480,12 +526,19 @@ pub(super) mod native {
         }
         out
     }
-    pub(super) fn run(s: &mut Session, p: &Value, update: bool) -> Result<Value> {
+    pub(in crate::cmd) fn run(s: &mut Session, p: &Value, update: bool) -> Result<Value> {
+        let h = selected(s, p, "group", CMD)?;
+        let stored = store::load(s.doc()?, h)?;
+        if p.get("storage").and_then(Value::as_str) == Some("drawings") || update && stored.sheets.as_ref().is_some_and(|r| r.drawings.is_some()) {
+            return super::super::sheet_drawings::run(s, p, update);
+        }
+        if stored.sheets.as_ref().is_some_and(|r| r.layouts.iter().any(|l| l.file.is_some())) {
+            return Err(bad(CMD, "SHEET_COPY: update published sheets through their source drawing"));
+        }
         if p.get("storage").is_some_and(|v| v.as_str() != Some("current")) {
             return Err(bad(CMD, "STORAGE_UNAVAILABLE: this stage supports current drawing storage"));
         }
-        let h = selected(s, p, "group", CMD)?;
-        let mut g = store::load(s.doc()?, h)?;
+        let mut g = stored;
         let old = g.sheets.clone();
         let c = if update {
             old.as_ref().ok_or_else(|| bad(CMD, "NO_SHEETS: create sheets first"))?.config.clone()
@@ -566,7 +619,7 @@ pub(super) mod native {
         if let Some(old) = &old {
             remove_sheets(&mut d, &g, old, &names)?;
         }
-        import(&mut d, &source, &layout, &mut warnings)?;
+        import(&mut d, &source, &layout, Path::new(&c.template), &mut warnings)?;
         let mut next_viewport = d
             .layouts
             .iter()
@@ -597,6 +650,7 @@ pub(super) mod native {
             let mut members = Vec::new();
             for original in layout.entities.iter() {
                 let mut e = (**original).clone();
+                rebase_image(&mut e, Path::new(&c.template))?;
                 let role = e.common.layer.clone();
                 let slot = if role.ends_with("-2") { 1 } else { 0 };
                 if two_up(&c) && slot == 1 && indices.len() == 1 && (matches!(e.kind, EntityKind::Viewport(_)) || role == "SHEET-NORTH-2") {
@@ -672,6 +726,7 @@ pub(super) mod native {
                 frames: indices.iter().filter_map(|i| g.frames.get(*i)).map(|f| f.index).collect(),
                 members,
                 hash: String::new(),
+                file: None,
             };
             sheet.hash = member_hash(&d, &sheet)?;
             if two_up(&c) && indices.len() == 1 {
@@ -685,10 +740,13 @@ pub(super) mod native {
         if d.layouts.is_empty() {
             return Err(bad(CMD, "LAST_LAYOUT: keep one paper layout before removing every sheet"));
         }
-        g.sheets = Some(SheetRun { config: c, source_hash: input, layouts: sheets });
+        g.sheets = Some(SheetRun { config: c, source_hash: input, layouts: sheets, drawings: None });
         store::save(&mut d, &g)?;
         let remaining = d.layouts.iter().map(|l| l.name.to_ascii_uppercase()).collect::<BTreeSet<_>>();
+        let added = crate::cmd::image::added_paths(s.doc()?, &d);
         *s.doc_mut()? = d;
+        // Copied template images are new to this drawing: decode them now so the sheets show the logo.
+        crate::cmd::image::load_added(s, &added)?;
         let state = s.state_mut()?;
         state.views.retain(|(space, _)| space.layout().is_none_or(|name| remaining.contains(&name.to_ascii_uppercase())));
         if state.space.layout().is_some_and(|name| !remaining.contains(&name.to_ascii_uppercase())) {

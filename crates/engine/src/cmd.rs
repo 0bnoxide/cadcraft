@@ -38,6 +38,8 @@ mod mleader_edit;
 mod modify;
 mod pointconvert;
 mod profile_cmd;
+#[cfg(not(target_arch = "wasm32"))]
+mod sheet_drawings;
 mod sheet_frames;
 mod sheet_layouts;
 mod sheet_store;
