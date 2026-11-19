@@ -1,6 +1,7 @@
-use crate::cmd::alignment_store;
-use cadcraft_doc::EntityKind;
+use crate::cmd::{alignment_store, sheet_store};
+use cadcraft_doc::{Drawing, EntityKind, LwPolyline};
 use cadcraft_geom::Vec3;
+use std::collections::BTreeMap;
 use std::sync::Arc;
 
 use super::{Entity, Handle, Mat3, Result, Session, Value, Vec2, bad, bool_or, erase_kept, f64_req, json, point_param, point_req, targets};
@@ -9,7 +10,16 @@ use super::{Entity, Handle, Mat3, Result, Session, Value, Vec2, bad, bool_or, er
 
 pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy: bool) -> Result<Vec<Handle>> {
     refuse_ole_frames(s, hs, m, copy)?;
-    edit_entities(s, hs, copy, |e| e.kind.transform(m))
+    edit_transformed(s, hs, m, copy, None)
+}
+
+pub(super) fn rotate_entities(s: &mut Session, hs: &[Handle], base: Vec2, angle: f64, copy: bool) -> Result<Vec<Handle>> {
+    let turn = std::f64::consts::TAU;
+    let remainder = (angle % turn).abs();
+    // Conversion to radians can leave a small remainder even for an exact full turn.
+    let roundoff = (angle.abs() * f64::EPSILON).min(1e-12);
+    let angle = if angle.abs() >= turn / 2. && remainder.min(turn - remainder) <= roundoff { 0. } else { angle };
+    transform_entities(s, hs, &Mat3::rotate_about(base, angle), copy)
 }
 
 /// Scale `hs` by `f` about `base` in 3D, as AutoCAD 2024's SCALE does: about the base point's XY,
@@ -17,11 +27,7 @@ pub(crate) fn transform_entities(s: &mut Session, hs: &[Handle], m: &Mat3, copy:
 pub(crate) fn scale_entities(s: &mut Session, hs: &[Handle], base: Vec3, f: f64, copy: bool) -> Result<Vec<Handle>> {
     let m = Mat3::scale_about(base.xy(), f);
     refuse_ole_frames(s, hs, &m, copy)?;
-    edit_entities(s, hs, copy, |e| {
-        e.kind.transform(&m);
-        e.kind.scale_heights(base.z, f);
-        e.common.thickness *= f;
-    })
+    edit_transformed(s, hs, &m, copy, Some((base.z, f)))
 }
 
 /// An OLE2FRAME only translates or scales uniformly (its corners stay axis aligned): refuse any other `m` before anything
@@ -60,8 +66,7 @@ pub(crate) fn at_elevation(s: &Session, p: Vec2) -> Vec3 {
 
 /// Apply `edit` to each of `hs` still in the drawing, or to a copy of each when `copy`; an object
 /// on a locked layer is left alone unless it is copied. The handles edited or made.
-fn edit_entities(s: &mut Session, hs: &[Handle], copy: bool, edit: impl Fn(&mut Entity)) -> Result<Vec<Handle>> {
-    let d = s.doc_mut()?;
+fn edit_entities(d: &mut Drawing, hs: &[Handle], copy: bool, edit: impl Fn(&mut Entity)) -> Result<Vec<Handle>> {
     let mut out = Vec::new();
     for h in hs {
         let Some(sp) = d.space_of(*h) else { continue };
@@ -86,25 +91,98 @@ fn edit_entities(s: &mut Session, hs: &[Handle], copy: bool, edit: impl Fn(&mut 
     Ok(out)
 }
 
-/// COPY alone duplicates an alignment's owned extension tree and translates its authoritative
-/// definition. Stage the whole batch: a stale source or an invalid later offset must add nothing.
-pub(super) fn copy_translated(s: &mut Session, hs: &[Handle], delta: Vec2, count: u64) -> Result<Vec<Handle>> {
+fn edit_transformed(s: &mut Session, hs: &[Handle], matrix: &Mat3, copy: bool, height_scale: Option<(f64, f64)>) -> Result<Vec<Handle>> {
     let source = s.doc()?;
+    let mut index = None;
+    let mut alignments = BTreeMap::new();
+    for &h in hs {
+        let Some(e) = source.entity(h) else { continue };
+        if !copy && source.layer(&e.common.layer).is_some_and(|layer| layer.locked) {
+            continue;
+        }
+        if alignment_store::is_carrier(source, h, &mut index)? {
+            if copy {
+                return copy_transformed(s, hs, std::iter::once(Ok(*matrix)), height_scale);
+            }
+            let (data, changed) = alignment_store::transformed(source, h, matrix, height_scale, false)?;
+            alignments.insert(h, changed.then_some(data));
+        }
+    }
+    if alignments.is_empty() {
+        return edit_entities(s.doc_mut()?, hs, copy, |e| edit_geometry(e, matrix, height_scale));
+    }
+
     let mut staged = source.clone();
-    let max_foreign = source.foreign.objects.iter().map(|o| o.handle.0).max().unwrap_or(0);
-    staged.handseed = staged.handseed.max(max_foreign.saturating_add(1));
-    let mut out = Vec::new();
-    for k in 1..=count {
+    let out = edit_entities(&mut staged, hs, false, |e| {
+        if !alignments.contains_key(&e.handle) {
+            edit_geometry(e, matrix, height_scale);
+        }
+    })?;
+    let index = index.get_or_insert_with(|| alignment_store::RecordIndex::new(&staged));
+    for (h, data) in alignments {
+        let Some(data) = data else { continue };
+        let carrier = alignment_store::carrier(&data)?;
+        staged.modify_entity(h, |e| replace_carrier(e, carrier.clone(), height_scale))?;
+        alignment_store::save_in(&mut staged, index, h, &data)?;
+        sheet_store::mark_alignment_transformed(&mut staged, index, h)?;
+    }
+    *s.doc_mut()? = staged;
+    Ok(out)
+}
+
+fn edit_geometry(e: &mut Entity, matrix: &Mat3, height_scale: Option<(f64, f64)>) {
+    e.kind.transform(matrix);
+    if let Some((base_z, factor)) = height_scale {
+        e.kind.scale_heights(base_z, factor);
+        e.common.thickness *= factor;
+    }
+}
+
+fn replace_carrier(e: &mut Entity, mut carrier: LwPolyline, height_scale: Option<(f64, f64)>) {
+    if let EntityKind::LwPolyline(p) = &e.kind {
+        carrier.plinegen = p.plinegen;
+    }
+    e.kind = EntityKind::LwPolyline(carrier);
+    if let Some((_, factor)) = height_scale {
+        e.common.thickness *= factor;
+    }
+}
+
+pub(super) fn copy_translated(s: &mut Session, hs: &[Handle], delta: Vec2, count: u64) -> Result<Vec<Handle>> {
+    let matrices = (1..=count).map(|k| {
         let offset = delta * k as f64;
         if !offset.x.is_finite() || !offset.y.is_finite() {
             return Err(bad("copy", "copy offset must remain finite"));
         }
-        let matrix = Mat3::translate(offset);
+        Ok(Mat3::translate(offset))
+    });
+    copy_transformed(s, hs, matrices, None)
+}
+
+/// Stage the whole copy batch. Each alignment gets its own extension tree and exact geometry.
+fn copy_transformed(
+    s: &mut Session,
+    hs: &[Handle],
+    matrices: impl IntoIterator<Item = Result<Mat3>>,
+    height_scale: Option<(f64, f64)>,
+) -> Result<Vec<Handle>> {
+    let source = s.doc()?;
+    let mut staged = source.clone();
+    let mut index = None;
+    let max_foreign = source.foreign.objects.iter().map(|o| o.handle.0).max().unwrap_or(0);
+    staged.handseed = staged.handseed.max(max_foreign.saturating_add(1));
+    let mut out = Vec::new();
+    for matrix in matrices {
+        let matrix = matrix?;
         refuse_ole_frames(s, hs, &matrix, true)?;
         for h in hs {
             let Some(entity) = source.entity(*h).map(|e| (**e).clone()) else { continue };
             let Some(space) = source.space_of(*h) else { continue };
-            let data = alignment_store::translated_if_present(source, *h, offset)?;
+            let data = if alignment_store::is_carrier(source, *h, &mut index)? {
+                Some(alignment_store::transformed(source, *h, &matrix, height_scale, true)?.0)
+            } else {
+                None
+            };
             let tree = data
                 .as_ref()
                 .and_then(|_| source.foreign.entities.get(h))
@@ -118,9 +196,9 @@ pub(super) fn copy_translated(s: &mut Session, hs: &[Handle], delta: Vec2, count
             let new_handle = staged.new_handle();
             let mut copied = Entity { handle: new_handle, ..entity };
             if let Some(data) = &data {
-                copied.kind = EntityKind::LwPolyline(alignment_store::carrier(data)?);
+                replace_carrier(&mut copied, alignment_store::carrier(data)?, height_scale);
             } else {
-                copied.kind.transform(&matrix);
+                edit_geometry(&mut copied, &matrix, height_scale);
             }
             let dst = staged.space_mut(&space).ok_or_else(|| bad("copy", "target space missing"))?;
             dst.push(copied);
@@ -185,8 +263,8 @@ pub(super) fn run_copy(s: &mut Session, p: &Value) -> Result<Value> {
 pub(super) fn run_rotate(s: &mut Session, p: &Value) -> Result<Value> {
     let hs = targets(s, p)?;
     let base = point_req("rotate", p, "base")?;
-    let a = f64_req("rotate", p, "angle")?.to_radians();
-    let r = transform_entities(s, &hs, &Mat3::rotate_about(base, a), bool_or(p, "copy", false))?;
+    let a = (f64_req("rotate", p, "angle")? % 360.).to_radians();
+    let r = rotate_entities(s, &hs, base, a, bool_or(p, "copy", false))?;
     Ok(json!({ "handles": r.iter().map(|h| h.hex()).collect::<Vec<_>>() }))
 }
 

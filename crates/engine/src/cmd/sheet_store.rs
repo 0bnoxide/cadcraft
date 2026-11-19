@@ -9,6 +9,7 @@ use cadcraft_doc::{Drawing, Handle};
 use serde::{Deserialize, Serialize};
 use std::collections::BTreeSet;
 pub(super) const GROUP_KEY: &str = "CADCRAFT_SHEET_GROUP";
+const ALIGNMENT_REVISION_KEY: &str = "CADCRAFT_SHEET_ALIGNMENT_REVISION";
 const OWNER_KEY: &str = "CADCRAFT_SHEET_OWNER";
 pub(super) const MAX_MEMBERS: usize = 200_000;
 pub(super) const PROFILE_LAYER_PREFIX: &str = "CADCRAFT-SHEET-PROFILE-";
@@ -21,6 +22,8 @@ pub(super) struct Group {
     pub version: u32,
     pub own: String,
     pub alignment: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub alignment_revision: Option<u64>,
     pub paper_size: [f64; 2],
     pub scale: f64,
     pub frames: Vec<Member>,
@@ -123,6 +126,18 @@ pub(super) fn invalid(reason: impl std::fmt::Display) -> crate::EngineError {
 pub(super) fn handle(value: &str) -> Result<Handle> {
     Handle::parse_hex(value).filter(|h| h.0 != 0).ok_or_else(|| invalid("invalid member handle"))
 }
+pub(super) fn alignment_revision(d: &Drawing, h: Handle) -> Result<Option<u64>> {
+    if alignment_store::record_handle_for(d, h, ALIGNMENT_REVISION_KEY)?.is_none() {
+        return Ok(None);
+    }
+    let raw = alignment_store::read_record(d, h, ALIGNMENT_REVISION_KEY).map_err(invalid)?;
+    serde_json::from_str(&raw).map(Some).map_err(invalid)
+}
+/// Keep the revision on the source alignment so a transform need not scan for dependent groups.
+pub(super) fn mark_alignment_transformed(d: &mut Drawing, index: &mut alignment_store::RecordIndex, h: Handle) -> Result<()> {
+    let next = alignment_revision(d, h)?.unwrap_or(0).checked_add(1).ok_or_else(|| invalid("alignment revision limit exceeded"))?;
+    alignment_store::save_record_in(d, index, h, ALIGNMENT_REVISION_KEY, &next).map_err(invalid)
+}
 pub(super) fn load(d: &Drawing, h: Handle) -> Result<Group> {
     if d.space_of(h) != Some(cadcraft_doc::Space::Model) {
         return Err(invalid("group anchor missing from model space"));
@@ -132,6 +147,11 @@ pub(super) fn load(d: &Drawing, h: Handle) -> Result<Group> {
     validate(&g)?;
     if g.own != h.hex() {
         return Err(invalid("copied or stale group anchor"));
+    }
+    if let Some(alignment) = &g.alignment
+        && g.alignment_revision != alignment_revision(d, handle(alignment)?)?
+    {
+        return Err(bad("sheets", "STALE_FRAME_GROUP: alignment transformed; regenerate the view frame group with VIEWFRAMECREATE"));
     }
     Ok(g)
 }
@@ -229,6 +249,27 @@ mod tests {
     use super::*;
     use crate::Session;
     use serde_json::json;
+    #[test]
+    fn linked_group_requires_regeneration_after_alignment_transform() {
+        let mut s = Session::new();
+        let a = s.execute("alignmentcreate", &json!({"name":"Road","elements":[{"start":[0,0],"direction":0,"length":1000,"type":"line"}]})).unwrap();
+        let params = json!({"alignment":a["handle"],"paper_size":[300,100],"scale":1,"spacing":250});
+        let original = s.execute("viewframecreate", &params).unwrap();
+        let old = handle(original["group"].as_str().unwrap()).unwrap();
+        let alignment = handle(a["handle"].as_str().unwrap()).unwrap();
+        assert!(load(s.doc().unwrap(), old).is_ok());
+        let d = s.doc_mut().unwrap();
+        let mut index = alignment_store::RecordIndex::new(d);
+        mark_alignment_transformed(d, &mut index, alignment).unwrap();
+        assert!(load(s.doc().unwrap(), old).unwrap_err().to_string().contains("regenerate"));
+        let regenerated = s.execute("viewframecreate", &params).unwrap();
+        let new = handle(regenerated["group"].as_str().unwrap()).unwrap();
+        assert!(load(s.doc().unwrap(), new).is_ok());
+        let d = s.doc_mut().unwrap();
+        let mut index = alignment_store::RecordIndex::new(d);
+        mark_alignment_transformed(d, &mut index, alignment).unwrap();
+        assert!(load(s.doc().unwrap(), new).unwrap_err().to_string().contains("regenerate"));
+    }
     #[test]
     fn corrupt_group_cannot_adopt_a_different_viewport_size() {
         let mut s = Session::new();

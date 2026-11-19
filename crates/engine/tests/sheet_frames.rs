@@ -8,6 +8,28 @@ fn road(s: &mut Session) -> Value {
         .clone()
 }
 #[test]
+fn moving_an_alignment_invalidates_its_sheet_frames_across_save_and_undo() {
+    let mut s = Session::new();
+    let alignment = road(&mut s);
+    let group = s.execute("viewframecreate", &json!({"alignment":alignment,"paper_size":[300,100],"scale":1,"spacing":250})).unwrap();
+    let frame = Handle::parse_hex(group["frames"][0]["handle"].as_str().unwrap()).unwrap();
+    let before = s.doc().unwrap().clone();
+    // The route still fits the old rectangles, but their alignment-derived data is stale.
+    s.execute("move", &json!({"handles":[alignment],"delta":[0,1]})).unwrap();
+    let moved = s.doc().unwrap().clone();
+    assert_eq!(moved.entity(frame), before.entity(frame));
+    let params = json!({"group":group["group"]});
+    assert!(s.execute("sheetcreate", &params).unwrap_err().to_string().contains("regenerate"));
+    assert_eq!(*s.doc().unwrap(), moved);
+    for filename in ["stale.dxf", "stale.dwg"] {
+        let mut reopened = Session::new();
+        *reopened.doc_mut().unwrap() = cadcraft_io::read(&cadcraft_io::write(&moved, filename).unwrap(), filename).unwrap();
+        assert!(reopened.execute("sheetcreate", &params).unwrap_err().to_string().contains("regenerate"));
+    }
+    s.undo().unwrap();
+    assert_eq!(*s.doc().unwrap(), before);
+}
+#[test]
 fn road_group_profiles_roundtrip_and_each_command_undoes_as_one_step() {
     let mut s = Session::new();
     let h = road(&mut s);

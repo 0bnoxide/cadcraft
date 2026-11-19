@@ -1,10 +1,10 @@
 //! Standard entity extension dictionaries keep exact route definitions with their carrier.
 use crate::Result;
-use cadcraft_alignment::{Alignment, MAX_ELEMENTS, ValidatedAlignment};
+use cadcraft_alignment::{Alignment, Kind, MAX_ELEMENTS, ValidatedAlignment};
 use cadcraft_doc::foreign::ForeignObject;
 use cadcraft_doc::{Drawing, Handle, RawTag};
 use cadcraft_doc::{EntityKind, LwPolyline};
-use cadcraft_geom::{PolyVertex, Vec2, Vec3};
+use cadcraft_geom::{Mat3, PolyVertex, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -82,26 +82,63 @@ pub(super) fn validated<'a>(d: &Drawing, handle: Handle, data: &'a Stored) -> Re
     }
     Ok(view)
 }
-/// Validate an alignment carrier before COPY, then translate its authoritative geometry.
-/// A plain entity (including one with another application's dictionary) has no definition.
-pub(super) fn translated_if_present(d: &Drawing, handle: Handle, delta: Vec2) -> Result<Option<Stored>> {
-    if record_handle(d, handle)?.is_none() {
-        return Ok(None);
-    }
+/// Apply a planar similarity to the exact definition while keeping the station origin fixed.
+pub(super) fn transformed(d: &Drawing, handle: Handle, matrix: &Mat3, height_scale: Option<(f64, f64)>, copy: bool) -> Result<(Stored, bool)> {
     let mut data = load(d, handle)?;
-    for element in &mut data.definition.elements {
-        element.start[0] += delta.x;
-        element.start[1] += delta.y;
+    let Some(scale) = matrix.similarity_scale().filter(|scale| scale.is_finite() && !matrix.is_mirroring()) else {
+        return Err(super::bad("alignment", "only planar translation, rotation and positive uniform scale are supported"));
+    };
+    let scale = if let Some((base_z, factor)) = height_scale {
+        if base_z != 0. && factor != 1. {
+            return Err(super::bad("alignment", "scale must keep the alignment in the XY plane"));
+        }
+        factor
+    } else if (scale - 1.).abs() <= 4. * f64::EPSILON {
+        // The length of a rotation matrix column can differ from one by roundoff.
+        1.
+    } else {
+        scale
+    };
+    if scale != 1. && data.profiles.design.is_some() {
+        return Err(super::bad("alignment", "cannot scale an alignment with a design profile"));
     }
-    // Sampled elevations belong to the source location; a copied route must resample.
-    data.profiles.ground = None;
-    // Reject non-finite or out-of-range positions before changing the staged drawing.
-    carrier(&data)?;
-    Ok(Some(data))
+    if *matrix == Mat3::IDENTITY && !copy {
+        return Ok((data, false));
+    }
+    let angle = matrix.b.atan2(matrix.a);
+    let mut changed = false;
+    for element in &mut data.definition.elements {
+        let before = element.clone();
+        let [x, y] = element.start;
+        let point = matrix.apply(Vec2::new(x, y));
+        element.start = [point.x, point.y];
+        if angle != 0. {
+            element.direction = (element.direction.rem_euclid(std::f64::consts::TAU) + angle).rem_euclid(std::f64::consts::TAU);
+        }
+        element.length *= scale;
+        match &mut element.kind {
+            Kind::Line => {}
+            Kind::Arc { radius, .. } => *radius *= scale,
+            Kind::Spiral { radius_start, radius_end, .. } => {
+                *radius_start = radius_start.map(|r| r * scale);
+                *radius_end = radius_end.map(|r| r * scale);
+            }
+        }
+        changed |= *element != before;
+    }
+    if changed || copy {
+        data.chord_tolerance *= scale;
+        // Ground samples belong to the source placement, and copied routes must resample.
+        data.profiles.ground = None;
+    }
+    Ok((data, changed))
 }
 pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()> {
+    save_in(d, &mut RecordIndex::new(d), handle, data)
+}
+pub(super) fn save_in(d: &mut Drawing, index: &mut RecordIndex, handle: Handle, data: &Stored) -> Result<()> {
     data.profiles.validate(&data.definition).map_err(|e| invalid(&e.to_string()))?;
-    save_record(d, handle, KEY, data)
+    save_record_in(d, index, handle, KEY, data)
 }
 pub(super) fn save_record(d: &mut Drawing, handle: Handle, key: &str, data: &impl Serialize) -> Result<()> {
     save_record_in(d, &mut RecordIndex::new(d), handle, key, data)
@@ -223,8 +260,12 @@ fn tag(code: i32, value: impl ToString) -> RawTag {
 fn invalid(reason: &str) -> crate::EngineError {
     super::bad("alignment", format!("INVALID_ALIGNMENT_DATA: {reason}"))
 }
-fn record_handle(d: &Drawing, handle: Handle) -> Result<Option<Handle>> {
-    record_handle_for(d, handle, KEY)
+/// Detect alignment records among transform targets without scanning all objects for each entity.
+pub(super) fn is_carrier(d: &Drawing, handle: Handle, index: &mut Option<RecordIndex>) -> Result<bool> {
+    let Some(dict) = d.foreign.entities.get(&handle).and_then(|x| x.xdict) else { return Ok(false) };
+    let index = index.get_or_insert_with(|| RecordIndex::new(d));
+    let Some(object) = index.at.get(&dict).and_then(|&at| d.foreign.objects.get(at)).filter(|o| o.kind == "DICTIONARY") else { return Ok(false) };
+    Ok(dictionary_entry(object, KEY)?.is_some())
 }
 pub(super) fn record_handle_for(d: &Drawing, handle: Handle, name: &str) -> Result<Option<Handle>> {
     let Some(dict) = d.foreign.entities.get(&handle).and_then(|x| x.xdict) else { return Ok(None) };
@@ -396,7 +437,7 @@ mod tests {
         save_record_in(&mut d, &mut index, a, KEY, &3).unwrap();
         assert_eq!(read_data(&d, a).unwrap(), "3");
         assert_eq!(read_data(&d, b).unwrap(), "2");
-        let record = record_handle(&d, b).unwrap().unwrap();
+        let record = record_handle_for(&d, b, KEY).unwrap().unwrap();
         assert!(record.0 > stray.0, "new handles stay above every existing object");
     }
 

@@ -101,6 +101,7 @@ pub enum Beyond {
 #[derive(Clone, Copy, Debug, PartialEq, Serialize)]
 pub struct Projection {
     pub station: f64,
+    /// At a line angle point, the signed lateral component against the outgoing tangent.
     pub offset: f64,
     pub distance: f64,
     pub element: usize,
@@ -247,6 +248,7 @@ fn spiral_integral(k: f64, rate: f64, length: f64, max_k: f64) -> [f64; 2] {
 
 impl Alignment {
     /// Invalid scalar/size data is an error; all geometric joint defects are returned together.
+    /// Connected line elements may change direction. Joins involving curves must be tangent.
     pub fn validate(&self) -> Result<Vec<JointIssue>> {
         #[cfg(test)]
         VALIDATION_CALLS.with(|n| n.set(n.get() + 1));
@@ -261,20 +263,21 @@ impl Alignment {
         }
         let mut length = 0.;
         let mut issues = Vec::new();
-        let mut previous: Option<Pose> = None;
+        let mut previous: Option<(Pose, Kind)> = None;
         for (i, e) in self.elements.iter().enumerate() {
             e.validate().map_err(|mut err| {
                 err.reason = format!("element {i}: {}", err.reason);
                 err
             })?;
-            if let Some(p) = previous {
+            if let Some((p, kind)) = previous {
                 let gap = distance(p.point, e.start);
                 let direction_break = angle_delta(p.direction, e.direction.rem_euclid(TAU));
-                if gap > POSITION_TOLERANCE || direction_break > DIRECTION_TOLERANCE {
+                let requires_tangency = !matches!((kind, e.kind), (Kind::Line, Kind::Line));
+                if gap > POSITION_TOLERANCE || (requires_tangency && direction_break > DIRECTION_TOLERANCE) {
                     issues.push(JointIssue { index: i, gap, direction_break });
                 }
             }
-            previous = Some(e.at(e.length)?);
+            previous = Some((e.at(e.length)?, e.kind));
             length += e.length;
         }
         if !length.is_finite() || !(self.start_station + length).is_finite() || self.start_station + length <= self.start_station {
@@ -292,6 +295,8 @@ impl Alignment {
     pub fn length(&self) -> Result<f64> {
         Ok(self.validated()?.length())
     }
+    /// At interior joints, the outgoing element supplies the direction and offset normal.
+    /// Projecting an offset position near a bend can return a station on the other leg.
     pub fn at(&self, station: f64, offset: f64) -> Result<Pose> {
         self.validated()?.at(station, offset)
     }
@@ -314,6 +319,25 @@ impl ValidatedAlignment<'_> {
     pub fn length(&self) -> f64 {
         self.cumulative.last().copied().unwrap_or(0.)
     }
+    fn element_at_station(&self, station: f64) -> usize {
+        // Absolute prefix bounds retain inclusive endpoints and let the later element answer joints.
+        self.cumulative.partition_point(|d| self.alignment.start_station + d <= station).saturating_sub(1).min(self.alignment.elements.len() - 1)
+    }
+    pub(crate) fn angle_point_at(&self, station: f64) -> Option<usize> {
+        let a = self.alignment;
+        if station == a.start_station || station == a.start_station + self.length() {
+            return None;
+        }
+        let index = self.element_at_station(station);
+        if station != a.start_station + self.cumulative.get(index)? {
+            return None;
+        }
+        let previous = a.elements.get(index.checked_sub(1)?)?;
+        let outgoing = a.elements.get(index)?;
+        (matches!((previous.kind, outgoing.kind), (Kind::Line, Kind::Line))
+            && angle_delta(previous.direction.rem_euclid(TAU), outgoing.direction.rem_euclid(TAU)) > DIRECTION_TOLERANCE)
+            .then_some(index)
+    }
     pub fn at(&self, station: f64, offset: f64) -> Result<Pose> {
         let a = self.alignment;
         if !station.is_finite() || !offset.is_finite() {
@@ -323,8 +347,7 @@ impl ValidatedAlignment<'_> {
         if station < a.start_station || station > end {
             return Err(error("OUT_OF_RANGE", "station outside alignment"));
         }
-        // Absolute prefix bounds retain inclusive endpoints and let the later element answer joints.
-        let index = self.cumulative.partition_point(|d| a.start_station + d <= station).saturating_sub(1).min(a.elements.len() - 1);
+        let index = self.element_at_station(station);
         let e = a.elements.get(index).ok_or_else(|| error("INVALID_ALIGNMENT", "element missing"))?;
         let base = self.cumulative.get(index).copied().ok_or_else(|| error("INVALID_ALIGNMENT", "element prefix missing"))?;
         let distance = if station == end {

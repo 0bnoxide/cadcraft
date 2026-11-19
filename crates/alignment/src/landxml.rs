@@ -2,6 +2,7 @@
 use crate::geometry::{angle_delta, cross, distance, dot, sub};
 use crate::profile::Profiles;
 mod profiles;
+mod rounded;
 use crate::{Alignment, DIRECTION_TOLERANCE, Element, Kind, MAX_ELEMENTS, POSITION_TOLERANCE, Result, StationFormat, Turn, error};
 use quick_xml::{
     NsReader, XmlVersion,
@@ -227,6 +228,22 @@ fn append_text(stack: &mut [Node], text: &str) -> Result<()> {
 }
 
 pub fn import(bytes: &[u8], unit: Unit) -> Result<Import> {
+    import_with_options(bytes, unit, None)
+}
+
+/// Import rounded horizontal geometry using the source coordinate rounding step in source length units.
+/// The step must be positive and at most 0.001. Reconstructed routes use declared element lengths and
+/// require start, end, and any center or PI to be within the rounding budget. Optional bearings are
+/// checked separately with a tolerance for three decimal places. A warning identifies the largest point
+/// adjustment for each reconstructed route.
+pub fn import_rounded(bytes: &[u8], unit: Unit, coordinate_step: f64) -> Result<Import> {
+    if !coordinate_step.is_finite() || coordinate_step <= 0. || coordinate_step > 0.001 {
+        return Err(error("INVALID_ROUNDING_STEP", "source coordinate rounding step must be greater than zero and at most 0.001"));
+    }
+    import_with_options(bytes, unit, Some(coordinate_step))
+}
+
+fn import_with_options(bytes: &[u8], unit: Unit, coordinate_step: Option<f64>) -> Result<Import> {
     let root = tree(bytes)?;
     if root.name != "LandXML" || root.attr("version")? != "1.2" {
         return Err(error("INVALID_XML", "LandXML version 1.2 required"));
@@ -245,9 +262,20 @@ pub fn import(bytes: &[u8], unit: Unit) -> Result<Import> {
                 return Err(error("ALIGNMENT_LIMIT", "at most 128 alignments per file"));
             }
             let name = n.attrs.get("name").cloned().unwrap_or_default();
-            match alignment(n, scale).and_then(|definition| profiles::parse(n, &definition, scale).map(|profiles| Route { definition, profiles })) {
-                Ok(a) => {
+            let definition = match alignment(n, scale) {
+                Ok(a) => Ok((a, None)),
+                Err(e) if matches!(e.code, "GEOMETRY_MISMATCH" | "INVALID_JOINTS") => match coordinate_step {
+                    Some(step) => rounded::reconstruct(n, scale, step * scale, unit).map(|(a, warning)| (a, Some(warning))),
+                    None => Err(e),
+                },
+                Err(e) => Err(e),
+            };
+            match definition
+                .and_then(|(definition, warning)| profiles::parse(n, &definition, scale).map(|profiles| (Route { definition, profiles }, warning)))
+            {
+                Ok((a, warning)) => {
                     warnings(n, &name, &mut out.warnings);
+                    out.warnings.extend(warning);
                     out.alignments.push(a);
                 }
                 Err(e) => out.refusals.push(Finding { name, code: e.code.into(), reason: e.reason }),
@@ -308,13 +336,18 @@ fn radius(n: &Node, key: &str, scale: f64) -> Result<Option<f64>> {
     let v = n.attr(key)?;
     if v == "INF" { Ok(None) } else { Ok(Some(number(v)? * scale)) }
 }
-fn element(n: &Node, scale: f64) -> Result<Element> {
+fn check_element_type(n: &Node) -> Result<()> {
     if n.name == "Spiral" && n.attrs.get("spiType").is_none_or(|v| v != "clothoid") {
         return Err(error("UNSUPPORTED_SPIRAL", "only explicit spiType=clothoid is supported"));
     }
     if !matches!(n.name.as_str(), "Line" | "Curve" | "Spiral") {
         return Err(error("UNSUPPORTED_ELEMENT", format!("CoordGeom/{} cannot be represented exactly", n.name)));
     }
+    Ok(())
+}
+
+fn element(n: &Node, scale: f64) -> Result<Element> {
+    check_element_type(n)?;
     let start = point(n.child("Start")?, scale)?;
     let end = point(n.child("End")?, scale)?;
     let mut e = match n.name.as_str() {
@@ -400,13 +433,17 @@ fn spiral(n: &Node, start: [f64; 2], scale: f64) -> Result<Element> {
     }
     Ok(e)
 }
-fn alignment(n: &Node, scale: f64) -> Result<Alignment> {
-    let mut out = Alignment {
+fn alignment_header(n: &Node, scale: f64) -> Result<Alignment> {
+    Ok(Alignment {
         name: n.attr("name")?.into(),
         start_station: n.number("staStart")? * scale,
         format: StationFormat::default(),
         elements: Vec::new(),
-    };
+    })
+}
+
+fn alignment(n: &Node, scale: f64) -> Result<Alignment> {
+    let mut out = alignment_header(n, scale)?;
     let geom = n.child("CoordGeom")?;
     for (index, c) in geom.children.iter().enumerate() {
         if out.elements.len() >= MAX_ELEMENTS {
