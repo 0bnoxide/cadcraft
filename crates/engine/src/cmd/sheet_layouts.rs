@@ -743,9 +743,10 @@ pub(super) mod native {
         g.sheets = Some(SheetRun { config: c, source_hash: input, layouts: sheets, drawings: None });
         store::save(&mut d, &g)?;
         let remaining = d.layouts.iter().map(|l| l.name.to_ascii_uppercase()).collect::<BTreeSet<_>>();
+        let added = crate::cmd::image::added_paths(s.doc()?, &d);
         *s.doc_mut()? = d;
         // Copied template images are new to this drawing: decode them now so the sheets show the logo.
-        crate::cmd::image::load_new(s)?;
+        crate::cmd::image::load_added(s, &added)?;
         let state = s.state_mut()?;
         state.views.retain(|(space, _)| space.layout().is_none_or(|name| remaining.contains(&name.to_ascii_uppercase())));
         if state.space.layout().is_some_and(|name| !remaining.contains(&name.to_ascii_uppercase())) {

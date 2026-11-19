@@ -130,17 +130,23 @@ pub(crate) fn after_open(s: &mut Session, i: usize) {
     }
 }
 
-/// Load the pixels of images the current drawing names but has not loaded yet, such as images a
-/// command copied in from another drawing. As on opening, a file that can't be loaded stays a
-/// crossed-out frame and is reported; the command does not fail over it.
-pub(crate) fn load_new(s: &mut Session) -> Result<()> {
-    let paths = paths(s.doc()?);
+/// The image files `after` names that `before` does not: images a command is copying in.
+pub(crate) fn added_paths(before: &Drawing, after: &Drawing) -> Vec<String> {
+    let old: BTreeSet<String> = paths(before).into_iter().collect();
+    paths(after).into_iter().filter(|p| !old.contains(p)).collect()
+}
+
+/// Load the pixels of `paths`, images a command just copied into the current drawing. Files the
+/// drawing already left unloaded are not retried, and the per-drawing limits count the images
+/// already loaded. As on opening, a file that can't be loaded stays a crossed-out frame and is
+/// reported; the command does not fail over it.
+pub(crate) fn load_added(s: &mut Session, paths: &[String]) -> Result<()> {
     let mut rasters = s.doc()?.rasters.clone();
     if paths.iter().all(|p| rasters.get(p).is_some()) {
         return Ok(());
     }
     let host = s.state()?.path.clone();
-    let notes = load_missing(&paths, host.as_deref(), &mut rasters);
+    let notes = load_missing(paths, host.as_deref(), &mut rasters);
     s.doc_mut()?.rasters = rasters;
     for n in notes {
         s.echo(n);
@@ -149,17 +155,20 @@ pub(crate) fn load_new(s: &mut Session) -> Result<()> {
 }
 
 /// Read and decode into `rasters` the files of `paths` that are not in it yet, for a drawing at
-/// `host`. Returns one message per file that could not be loaded.
+/// `host`. The limits count the images `rasters` already holds. Returns one message per file
+/// that could not be loaded.
 fn load_missing(paths: &[String], host: Option<&str>, rasters: &mut cadcraft_doc::Rasters) -> Vec<String> {
     let mut notes = Vec::new();
     let mut missing: Vec<&str> = paths.iter().map(String::as_str).filter(|p| rasters.get(p).is_none()).collect();
-    if missing.len() > MAX_IMAGE_FILES {
-        missing.truncate(MAX_IMAGE_FILES);
+    let room = MAX_IMAGE_FILES.saturating_sub(rasters.len());
+    if missing.len() > room {
+        missing.truncate(room);
         notes.push(format!("Images: only the first {MAX_IMAGE_FILES} image files are loaded"));
     }
-    let decoded = decode_files(&missing, host);
+    let loaded_bytes = rasters.bytes();
+    let decoded = decode_files(&missing, host, loaded_bytes);
     // Kept in the order the drawing uses them, up to the memory limit.
-    let mut kept_bytes = 0u64;
+    let mut kept_bytes = loaded_bytes;
     for (path, result) in missing.iter().zip(decoded) {
         match result {
             Ok(r) => {
@@ -182,9 +191,10 @@ fn over_limit(path: &str) -> String {
 
 /// Read and decode the image files `paths` of a drawing at `host`, a few at a time (decoding is
 /// what opening a drawing with large images waits for). The results are in the order of `paths`.
-fn decode_files(paths: &[&str], host: Option<&str>) -> Vec<std::result::Result<Raster, String>> {
-    // Decoded bytes so far, shared by the loaders: past the limit no further file is started.
-    let decoded_bytes = AtomicU64::new(0);
+fn decode_files(paths: &[&str], host: Option<&str>, loaded_bytes: u64) -> Vec<std::result::Result<Raster, String>> {
+    // Decoded bytes so far, the drawing's loaded images included, shared by the loaders: past the
+    // limit no further file is started.
+    let decoded_bytes = AtomicU64::new(loaded_bytes);
     let load = |path: &str| -> std::result::Result<Raster, String> {
         if decoded_bytes.load(Ordering::Relaxed) > MAX_LOADED_BYTES {
             return Err(format!("not loaded (more than {} MB of images)", MAX_LOADED_BYTES >> 20));
@@ -368,4 +378,24 @@ fn describe(d: &Drawing, path: &str, host: Option<&str>) -> Value {
         (None, Some(_)) => "Not loaded",
     };
     json!({ "path": path, "foundAt": found_at, "status": status, "pixels": loaded.map(|r| json!([r.width(), r.height()])) })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loading_more_images_counts_the_ones_already_loaded() {
+        let mut rasters = cadcraft_doc::Rasters::default();
+        let pixel = Arc::new(Raster::new(1, 1, vec![0, 0, 0, 255]).unwrap());
+        for i in 0..MAX_IMAGE_FILES {
+            rasters.insert(&format!("loaded/{i}.png"), pixel.clone());
+        }
+        assert_eq!(rasters.bytes(), 4 * MAX_IMAGE_FILES as u64);
+        // The file count is already at its limit, so a further file is not read at all.
+        let notes = load_missing(&["added/logo.png".to_string()], None, &mut rasters);
+        assert_eq!(rasters.len(), MAX_IMAGE_FILES);
+        assert!(rasters.get("added/logo.png").is_none());
+        assert!(notes.iter().any(|n| n.contains("only the first")), "{notes:?}");
+    }
 }
