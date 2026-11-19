@@ -140,6 +140,9 @@ pub(super) mod native {
         let mut arrows = BTreeSet::new();
         for e in l.entities.iter() {
             check_entity(&d, e)?;
+            if matches!(e.kind, EntityKind::Image(_)) {
+                rebase_image(&mut (**e).clone(), path)?;
+            }
             match &e.kind {
                 EntityKind::Viewport(v) if v.id != 1 => {
                     let role = e.common.layer.as_str();
@@ -191,7 +194,7 @@ pub(super) mod native {
         }
     }
     fn check_entity(d: &Drawing, e: &Entity) -> Result<()> {
-        if matches!(e.kind, EntityKind::Unknown(_) | EntityKind::Image(_)) || d.foreign.entities.get(&e.handle).is_some_and(|x| !x.is_empty()) {
+        if matches!(e.kind, EntityKind::Unknown(_)) || d.foreign.entities.get(&e.handle).is_some_and(|x| !x.is_empty()) {
             return Err(bad(CMD, "TEMPLATE_REFERENCE: unsupported external or extension data on template entity"));
         }
         if let EntityKind::Dimension(dim) = &e.kind
@@ -204,7 +207,25 @@ pub(super) mod native {
         }
         Ok(())
     }
-    fn import(d: &mut Drawing, src: &Drawing, l: &Layout, warnings: &mut Vec<Qa>) -> Result<()> {
+    /// Point a copied raster image at its file as the template sees it (#91). A relative path is
+    /// relative to the template's folder, so the copy stores the absolute path and still finds the
+    /// file from the current drawing's folder. A file that is missing, or that the drawing path
+    /// rules refuse to open, refuses the import rather than leaving a broken image behind.
+    fn rebase_image(e: &mut Entity, template: &Path) -> Result<()> {
+        let EntityKind::Image(i) = &mut e.kind else {
+            return Ok(());
+        };
+        let resolved = crate::doc_path::resolve(&i.path, Some(template))
+            .ok()
+            .filter(|p| p.is_file())
+            .ok_or_else(|| bad(CMD, "TEMPLATE_REFERENCE: raster image file referenced by the template is missing"))?;
+        let resolved = resolved.to_str().ok_or_else(|| bad(CMD, "TEMPLATE_REFERENCE: raster image path is not UTF-8"))?;
+        // A canonical Windows template path is verbatim; other programs read a plain drive path.
+        let plain = resolved.strip_prefix(r"\\?\").filter(|rest| rest.as_bytes().get(1) == Some(&b':')).unwrap_or(resolved);
+        i.path = plain.into();
+        Ok(())
+    }
+    fn import(d: &mut Drawing, src: &Drawing, l: &Layout, template: &Path, warnings: &mut Vec<Qa>) -> Result<()> {
         let mut queue: Vec<(String, usize, bool)> =
             l.entities.iter().filter_map(|e| block_ref(e)).map(|s| (s.to_ascii_uppercase(), 0, false)).collect();
         let mut needed = BTreeSet::new();
@@ -245,9 +266,15 @@ pub(super) mod native {
         }
         for name in &needed {
             let b = src.block(name).ok_or_else(|| bad(CMD, "TEMPLATE_BLOCK: block disappeared"))?;
+            let mut entities = Vec::with_capacity(b.entities.len());
+            for e in b.entities.iter() {
+                let mut e = (**e).clone();
+                rebase_image(&mut e, template)?;
+                entities.push(e);
+            }
             if let Some(existing) = d.block(name) {
                 let left = existing.entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
-                let right = b.entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
+                let right = entities.iter().map(|e| (&e.common, &e.kind)).collect::<Vec<_>>();
                 let mut metadata = (**b).clone();
                 metadata.name = existing.name.clone();
                 metadata.entities = existing.entities.clone();
@@ -257,8 +284,7 @@ pub(super) mod native {
             } else {
                 let mut copy = (**b).clone();
                 copy.entities = Default::default();
-                for e in b.entities.iter() {
-                    let mut e = (**e).clone();
+                for mut e in entities {
                     e.handle = d.new_handle();
                     copy.entities.push(e);
                 }
@@ -593,7 +619,7 @@ pub(super) mod native {
         if let Some(old) = &old {
             remove_sheets(&mut d, &g, old, &names)?;
         }
-        import(&mut d, &source, &layout, &mut warnings)?;
+        import(&mut d, &source, &layout, Path::new(&c.template), &mut warnings)?;
         let mut next_viewport = d
             .layouts
             .iter()
@@ -624,6 +650,7 @@ pub(super) mod native {
             let mut members = Vec::new();
             for original in layout.entities.iter() {
                 let mut e = (**original).clone();
+                rebase_image(&mut e, Path::new(&c.template))?;
                 let role = e.common.layer.clone();
                 let slot = if role.ends_with("-2") { 1 } else { 0 };
                 if two_up(&c) && slot == 1 && indices.len() == 1 && (matches!(e.kind, EntityKind::Viewport(_)) || role == "SHEET-NORTH-2") {

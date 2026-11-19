@@ -578,3 +578,84 @@ fn rebuilding_the_active_sheet_clears_an_erased_mspace_viewport() {
     assert_eq!(s.space(), Space::Paper("Road-010".into()));
     assert_eq!(s.state().unwrap().mspace, None);
 }
+/// Add an original synthetic logo to the template's layout and to a title block it inserts,
+/// both stored relative to the template's folder (#91).
+fn template_with_logo(temp: &Temp) -> PathBuf {
+    let t = template(temp, &["SHEET-PLAN-1"]);
+    let mut d = cadcraft_io::read(&std::fs::read(&t).unwrap(), &t).unwrap();
+    let logo = |path: &str| {
+        EntityKind::Image(cadcraft_engine::doc::Image {
+            insert: Vec3::new(250., 5., 0.),
+            u: Vec3::new(0.5, 0., 0.),
+            v: Vec3::new(0., 0.5, 0.),
+            size: Vec2::new(4., 2.),
+            path: path.into(),
+            name: "Logo".into(),
+            ..Default::default()
+        })
+    };
+    let mut block = Block::new("TitleLogo");
+    let handle = d.new_handle();
+    block.entities.push(Entity { handle, common: Common::default(), kind: logo("art/logo.png") });
+    d.blocks.insert("TitleLogo".into(), Arc::new(block));
+    d.add(&Space::Paper("Template".into()), Common::default(), logo("art/logo.png")).unwrap();
+    d.add(
+        &Space::Paper("Template".into()),
+        Common::default(),
+        EntityKind::Insert(Insert { block: "TitleLogo".into(), insert: Vec3::new(280., 5., 0.), ..Default::default() }),
+    )
+    .unwrap();
+    std::fs::create_dir(temp.0.join("art")).unwrap();
+    // Placeholder bytes written by this test: no third-party artwork, and the import only needs the file.
+    std::fs::write(temp.0.join("art").join("logo.png"), b"synthetic logo bytes").unwrap();
+    std::fs::write(&t, cadcraft_io::write(&d, &t).unwrap()).unwrap();
+    t
+}
+fn images(d: &Drawing, name: &str) -> Vec<String> {
+    let mut paths: Vec<String> = d
+        .layout(name)
+        .unwrap()
+        .entities
+        .iter()
+        .filter_map(|e| if let EntityKind::Image(i) = &e.kind { Some(i.path.clone()) } else { None })
+        .collect();
+    if let Some(b) = d.block("TitleLogo") {
+        paths.extend(b.entities.iter().filter_map(|e| if let EntityKind::Image(i) = &e.kind { Some(i.path.clone()) } else { None }));
+    }
+    paths
+}
+#[test]
+fn template_raster_images_are_copied_with_paths_that_resolve_from_the_current_drawing() {
+    hooks();
+    let temp = Temp::new();
+    let t = template_with_logo(&temp);
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap();
+    let logo = std::fs::canonicalize(temp.0.join("art").join("logo.png")).unwrap();
+    let paths = images(s.doc().unwrap(), "Road-010");
+    assert_eq!(paths.len(), 2, "layout image and title block image are both copied: {paths:?}");
+    for p in &paths {
+        assert!(std::path::Path::new(p).is_absolute(), "{p}");
+        assert_eq!(std::fs::canonicalize(p).unwrap(), logo);
+    }
+    let after = s.doc().unwrap().clone();
+    let update = s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
+    assert_eq!(update["changed"], false);
+    assert_eq!(*s.doc().unwrap(), after, "an image-bearing template keeps the unchanged shortcut");
+}
+#[test]
+fn a_missing_template_raster_refuses_before_changing_the_drawing_or_template() {
+    hooks();
+    let temp = Temp::new();
+    let t = template_with_logo(&temp);
+    std::fs::remove_file(temp.0.join("art").join("logo.png")).unwrap();
+    let template_bytes = std::fs::read(&t).unwrap();
+    let mut s = Session::new();
+    let g = group(&mut s);
+    let before = s.doc().unwrap().clone();
+    let error = s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap_err().to_string();
+    assert!(error.contains("TEMPLATE_REFERENCE") && error.contains("raster"), "{error}");
+    assert_eq!(*s.doc().unwrap(), before);
+    assert_eq!(std::fs::read(&t).unwrap(), template_bytes, "the template is never rewritten");
+}
