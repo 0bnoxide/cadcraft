@@ -75,6 +75,10 @@ impl Rasters {
     pub fn len(&self) -> usize {
         self.0.len()
     }
+    /// The decoded pixel bytes of every loaded image.
+    pub fn bytes(&self) -> u64 {
+        self.0.values().fold(0u64, |n, r| n.saturating_add(u64::try_from(r.rgba().len()).unwrap_or(u64::MAX)))
+    }
     pub fn is_empty(&self) -> bool {
         self.0.is_empty()
     }
