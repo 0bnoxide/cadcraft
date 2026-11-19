@@ -407,15 +407,25 @@ pub(super) mod native {
                 return Err(bad(CMD, "OWNERSHIP: invalid sheet record"));
             }
             let first = *sheet.frames.first().ok_or_else(|| bad(CMD, "OWNERSHIP: no sheet frame"))?;
-            let l = d.layout(&sheet.name).ok_or_else(|| bad(CMD, "OWNERSHIP: owned layout missing"))?;
+            // A layout or entity erased by hand makes the sheet changed, so an update rebuilds it
+            // rather than leaving the whole group stuck (#98). One that still exists elsewhere is a
+            // copy or a move and stays refused.
+            let l = d.layout(&sheet.name);
+            let mut complete = l.is_some();
             for h in &sheet.members {
                 let h = store::handle(h)?;
-                if !handles.insert(h) || !l.entities.contains(h) {
+                if !handles.insert(h) {
                     return Err(bad(CMD, "OWNERSHIP: copied, missing or duplicate sheet entity"));
                 }
-                store::check(d, h, &g.own, first, "sheet")?;
+                if l.is_some_and(|l| l.entities.contains(h)) {
+                    store::check(d, h, &g.own, first, "sheet")?;
+                } else if d.entity(h).is_some() {
+                    return Err(bad(CMD, "OWNERSHIP: copied, missing or duplicate sheet entity"));
+                } else {
+                    complete = false;
+                }
             }
-            unchanged &= member_hash(d, sheet)? == sheet.hash;
+            unchanged &= complete && member_hash(d, sheet)? == sheet.hash;
         }
         Ok(unchanged)
     }
@@ -501,7 +511,8 @@ pub(super) mod native {
     }
     fn remove_sheets(d: &mut Drawing, g: &Group, run: &SheetRun, names: &BTreeSet<String>) -> Result<()> {
         for sheet in &run.layouts {
-            let l = d.layout(&sheet.name).ok_or_else(|| bad(CMD, "OWNERSHIP: layout missing"))?;
+            // A layout deleted by hand took its members with it; nothing is left to remove.
+            let Some(l) = d.layout(&sheet.name) else { continue };
             let unowned = l.entities.handles().iter().any(|h| !sheet.members.contains(&h.hex()));
             if unowned && !names.contains(&sheet.name.to_ascii_uppercase()) {
                 return Err(bad(CMD, "SHEET_HAS_UNOWNED_OBJECTS: cannot remove a layout containing user objects"));

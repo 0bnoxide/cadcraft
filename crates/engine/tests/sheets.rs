@@ -563,6 +563,55 @@ fn model_output_edits_invalidate_the_unchanged_shortcut() {
     assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], false);
 }
 #[test]
+fn an_owned_sheet_entity_erased_by_hand_is_rebuilt_by_the_next_update() {
+    hooks();
+    let temp = Temp::new();
+    let t = template(&temp, &["SHEET-PLAN-1"]);
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap();
+    let viewport = |s: &Session| {
+        s.doc()
+            .unwrap()
+            .layout("Road-010")
+            .unwrap()
+            .entities
+            .iter()
+            .find(|e| matches!(&e.kind, EntityKind::Viewport(v) if v.id != 1))
+            .map(|e| e.handle)
+    };
+    let erased = viewport(&s).unwrap();
+    s.execute("erase", &json!({"handles":[erased.hex()]})).unwrap();
+    assert!(viewport(&s).is_none());
+    let update = s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
+    assert_eq!(update["changed"], true);
+    let rebuilt = viewport(&s).expect("the erased viewport is drawn again");
+    assert_ne!(rebuilt, erased);
+    assert_eq!(update["layouts"].as_array().unwrap().len(), 4);
+    assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], false);
+}
+#[test]
+fn an_owned_layout_deleted_by_hand_is_recreated_by_the_next_update() {
+    hooks();
+    let temp = Temp::new();
+    let t = template(&temp, &["SHEET-PLAN-1"]);
+    let mut s = Session::new();
+    let g = group(&mut s);
+    s.execute("sheetcreate", &request(&g, &t, "plan_only")).unwrap();
+    let kept = s.doc().unwrap().layout("Road-012").unwrap().clone();
+    s.doc_mut().unwrap().layouts.retain(|l| l.name != "Road-010");
+    let update = s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
+    assert_eq!(update["changed"], true);
+    let l = s.doc().unwrap().layout("Road-010").expect("the deleted sheet is recreated");
+    assert!(
+        l.entities
+            .iter()
+            .any(|e| matches!(&e.kind, EntityKind::Viewport(v) if e.common.layer == "SHEET-PLAN-1" && v.view_center == Vec2::new(125., 0.)))
+    );
+    assert_eq!(s.doc().unwrap().layout("Road-012").unwrap().page, kept.page);
+    assert_eq!(s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap()["changed"], false);
+}
+#[test]
 fn rebuilding_the_active_sheet_clears_an_erased_mspace_viewport() {
     hooks();
     let temp = Temp::new();
