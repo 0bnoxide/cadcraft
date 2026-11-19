@@ -189,9 +189,11 @@ pub(super) fn save(d: &mut Drawing, g: &Group) -> Result<()> {
     validate(g)?;
     alignment_store::save_record(d, handle(&g.own)?, GROUP_KEY, g).map_err(invalid)
 }
-pub(super) fn own(d: &mut Drawing, h: Handle, g: &str, frame: u32, role: &str) -> Result<()> {
-    // shortcut: shared XRECORD lookups scan linearly; batch-index them when large groups are qualified.
-    alignment_store::save_record(d, h, OWNER_KEY, &Owner { version: 1, group: g.into(), own: h.hex(), frame, role: role.into() }).map_err(invalid)
+/// Record that this group owns `h`. `index` is built once per command, so owning many generated
+/// objects costs work linear in their number (#92).
+pub(super) fn own(d: &mut Drawing, index: &mut alignment_store::RecordIndex, h: Handle, g: &str, frame: u32, role: &str) -> Result<()> {
+    let owner = Owner { version: 1, group: g.into(), own: h.hex(), frame, role: role.into() };
+    alignment_store::save_record_in(d, index, h, OWNER_KEY, &owner).map_err(invalid)
 }
 pub(super) fn check(d: &Drawing, h: Handle, g: &str, frame: u32, role: &str) -> Result<()> {
     let raw = alignment_store::read_record(d, h, OWNER_KEY).map_err(invalid)?;

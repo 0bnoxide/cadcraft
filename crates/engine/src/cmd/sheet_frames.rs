@@ -113,9 +113,10 @@ fn road(s: &mut Session, p: &Value) -> Result<Value> {
         sheets: None,
     };
     d.ensure_layer("CADCRAFT-VIEW-FRAMES");
+    let mut records = alignment_store::RecordIndex::new(&d);
     for (i, frame) in f.into_iter().enumerate() {
         let handle = d.add(&Space::Model, Common { layer: "CADCRAFT-VIEW-FRAMES".into(), ..Default::default() }, poly(&frame))?;
-        store::own(&mut d, handle, &g.own, i as u32, "frame")?;
+        store::own(&mut d, &mut records, handle, &g.own, i as u32, "frame")?;
         g.frames.push(Member { index: i as u32, handle: handle.hex(), geometry: frame, matchlines: Vec::new(), profile: None });
     }
     redraw_matchlines(&mut d, &mut g, &a)?;
@@ -132,10 +133,14 @@ pub(super) fn redraw_matchlines(d: &mut Drawing, g: &mut Group, a: &alignment_st
         a.definition.at(station, 0.).map_err(|e| bad(CMD, e.to_string()))?;
     }
     let count = g.frames.len();
-    let mut previous_end: Option<f64> = None;
-    for (position, f) in g.frames.iter_mut().enumerate() {
+    // Erase every old matchline first, so the records of the new ones are written against one index.
+    for f in g.frames.iter_mut() {
         store::erase(d, &f.matchlines, &g.own, f.index, "matchline")?;
         f.matchlines.clear();
+    }
+    let mut records = alignment_store::RecordIndex::new(d);
+    let mut previous_end: Option<f64> = None;
+    for (position, f) in g.frames.iter_mut().enumerate() {
         // A shared boundary belongs to the preceding frame; outer ends are not matchlines.
         let start =
             previous_end.is_some_and(|end| (f.geometry.range[0] - end).abs() > cadcraft_alignment::POSITION_TOLERANCE).then_some(f.geometry.range[0]);
@@ -163,7 +168,7 @@ pub(super) fn redraw_matchlines(d: &mut Drawing, g: &mut Group, a: &alignment_st
                 vec![h, text(d, pose.point, &label, (f.geometry.size[1] / 40.).max(0.25), "CADCRAFT-MATCHLINES")?]
             };
             for h in handles {
-                store::own(d, h, &g.own, f.index, "matchline")?;
+                store::own(d, &mut records, h, &g.own, f.index, "matchline")?;
                 f.matchlines.push(h.hex());
             }
         }
@@ -271,8 +276,9 @@ fn site(s: &mut Session, p: &Value) -> Result<Value> {
         profiles: None,
         sheets: None,
     };
+    let mut records = alignment_store::RecordIndex::new(&d);
     for (index, (h, geometry)) in members.into_iter().enumerate() {
-        store::own(&mut d, h, &g.own, index as u32, "frame")?;
+        store::own(&mut d, &mut records, h, &g.own, index as u32, "frame")?;
         g.frames.push(Member { index: index as u32, handle: h.hex(), geometry, matchlines: Vec::new(), profile: None });
     }
     store::save(&mut d, &g)?;
@@ -348,10 +354,14 @@ pub(super) fn redraw_profiles(d: &mut Drawing, g: &mut Group, a: &alignment_stor
     let mut views = Vec::new();
     let mut clipped = Vec::new();
     let mut total = 0usize;
-    for f in &mut g.frames {
+    // Erase every old figure first, so the records of the new ones are written against one index.
+    for f in &g.frames {
         if let Some(p) = &f.profile {
             store::erase(d, &p.handles, &g.own, f.index, "profile")?;
         }
+    }
+    let mut records = alignment_store::RecordIndex::new(d);
+    for f in &mut g.frames {
         let window = view::adjust(&a.definition, &a.profiles, f.geometry.range, &settings.adjustment).map_err(|e| bad(CMD, e.to_string()))?;
         let figure = view::draw_range(&a.definition, &a.profiles, at, settings.exaggeration, window.range, Some(window.elevation))
             .map_err(|e| bad(CMD, e.to_string()))?;
@@ -365,7 +375,7 @@ pub(super) fn redraw_profiles(d: &mut Drawing, g: &mut Group, a: &alignment_stor
         d.ensure_layer(&layer);
         for h in &handles {
             d.modify_entity(*h, |e| e.common.layer.clone_from(&layer))?;
-            store::own(d, *h, &g.own, f.index, "profile")?;
+            store::own(d, &mut records, *h, &g.own, f.index, "profile")?;
         }
         clipped.push(json!({"frame":f.index,"spans":figure.clipped}));
         let p = ProfileFigure { handles: handles.iter().map(|h| h.hex()).collect(), at, window, exaggeration: settings.exaggeration };
