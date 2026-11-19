@@ -5,7 +5,7 @@
 //! Codes the editor has no control for (stacked fractions `\S`, `\W`, `\T`, `\Q`, `\A`, column
 //! breaks `\N`, non-breaking spaces …) are kept as opaque *atoms*: one placeholder character in
 //! the text ([`ATOM_BASE`] + n) that [`Formatted::to_contents`] writes back as the original
-//! code, so opening and closing the editor never loses them.
+//! code. Atom identity is stored separately, so a literal private-use character stays literal.
 
 use cadcraft_fonts::ParaProps;
 pub use cadcraft_fonts::{ListStyle, MTextColor, ParaAlign, TabKind};
@@ -80,6 +80,8 @@ pub struct Formatted {
     paras: Vec<ParaProps>,
     /// The original code of each atom.
     atoms: Vec<String>,
+    /// Atom identity per character; literal text never acquires identity from its glyph.
+    atom_ids: Vec<Option<usize>>,
     /// The font family bold and italic runs are written with when no font was set inline
     /// (`\fFamily|b1;`): the text style's.
     pub base_font: String,
@@ -87,7 +89,14 @@ pub struct Formatted {
 
 impl Default for Formatted {
     fn default() -> Self {
-        Formatted { text: String::new(), fmt: Vec::new(), paras: vec![ParaProps::default()], atoms: Vec::new(), base_font: "Arial".into() }
+        Formatted {
+            text: String::new(),
+            fmt: Vec::new(),
+            paras: vec![ParaProps::default()],
+            atoms: Vec::new(),
+            atom_ids: Vec::new(),
+            base_font: "Arial".into(),
+        }
     }
 }
 
@@ -241,6 +250,7 @@ impl Formatted {
     fn push_char(&mut self, c: char, fmt: &CharFmt) {
         self.text.push(c);
         self.fmt.push(fmt.clone());
+        self.atom_ids.push(None);
     }
 
     fn push_atom(&mut self, code: String, fmt: &CharFmt) {
@@ -250,6 +260,9 @@ impl Formatted {
         let ch = char::from_u32(ATOM_BASE + self.atoms.len() as u32).unwrap_or('\u{FFFD}');
         self.atoms.push(code);
         self.push_char(ch, fmt);
+        if let Some(id) = self.atom_ids.last_mut() {
+            *id = Some(self.atoms.len() - 1);
+        }
     }
 
     /// The text as the editor shows it.
@@ -286,38 +299,36 @@ impl Formatted {
         self.paras.get(p).or(self.paras.last()).cloned().unwrap_or_default()
     }
 
-    /// The edited text replaced by `new` (what a text box hands back after a keystroke): the
-    /// characters that stay keep their format, new ones take `typing`, and paragraphs follow
-    /// the line breaks added and removed. Text beyond [`MAX_CHARS`] is refused (`false`).
-    pub fn set_text(&mut self, new: &str, typing: &CharFmt) -> bool {
-        if new == self.text {
-            return true;
-        }
-        let old: Vec<char> = self.text.chars().collect();
-        let new_c: Vec<char> = new.chars().collect();
-        if new_c.len() > MAX_CHARS || new_c.iter().filter(|c| **c == '\n').count() >= MAX_PARAS {
+    /// Replace a character range with literal typed or pasted text. Exact ranges distinguish
+    /// an atom from an identical-looking literal beside it; whole-string diffs cannot do that.
+    /// Invalid ranges or edits beyond the character/paragraph limits leave the model unchanged.
+    pub fn replace_text(&mut self, range: std::ops::Range<usize>, inserted: &str, typing: &CharFmt) -> bool {
+        if range.start > range.end || range.end > self.len() {
             return false;
         }
-        let pre = old.iter().zip(&new_c).take_while(|(a, b)| a == b).count();
-        let suf = old.iter().rev().zip(new_c.iter().rev()).take(old.len().min(new_c.len()) - pre).take_while(|(a, b)| a == b).count();
-        let removed = old.get(pre..old.len() - suf).unwrap_or_default();
-        let inserted = new_c.get(pre..new_c.len() - suf).unwrap_or_default();
-        // Typing after a character takes its format unless the toolbar changed it.
-        let first_para = old.iter().take(pre).filter(|c| **c == '\n').count();
+        let count = inserted.chars().take(MAX_CHARS + 1).count();
+        if count > MAX_CHARS - (self.len() - range.len()) {
+            return false;
+        }
+        let old: Vec<char> = self.text.chars().collect();
+        let removed = old.get(range.clone()).unwrap_or_default();
+        let first_para = old.iter().take(range.start).filter(|c| **c == '\n').count();
         let gone = removed.iter().filter(|c| **c == '\n').count();
-        let added = inserted.iter().filter(|c| **c == '\n').count();
-        let end = (first_para + 1 + gone).min(self.paras.len());
-        self.paras.drain((first_para + 1).min(end)..end);
+        let added = inserted.chars().filter(|c| *c == '\n').count();
+        if self.paras.len().saturating_sub(gone) + added > MAX_PARAS {
+            return false;
+        }
+        let start = self.text.char_indices().nth(range.start).map_or(self.text.len(), |(b, _)| b);
+        let end = self.text.char_indices().nth(range.end).map_or(self.text.len(), |(b, _)| b);
+        let para_end = (first_para + 1 + gone).min(self.paras.len());
+        self.paras.drain((first_para + 1).min(para_end)..para_end);
         let template = self.para(first_para);
         for _ in 0..added {
             self.paras.insert((first_para + 1).min(self.paras.len()), template.clone());
         }
-        let ins: Vec<CharFmt> = inserted.iter().map(|_| typing.clone()).collect();
-        self.fmt.splice(pre..old.len() - suf, ins);
-        self.text = new.to_string();
-        if self.paras.is_empty() {
-            self.paras.push(ParaProps::default());
-        }
+        self.fmt.splice(range.clone(), std::iter::repeat_n(typing.clone(), count));
+        self.atom_ids.splice(range, std::iter::repeat_n(None, count));
+        self.text.replace_range(start..end, inserted);
         true
     }
 
@@ -402,22 +413,28 @@ impl Formatted {
         let lines: Vec<&str> = self.text.split('\n').collect();
         let mut out = String::new();
         let mut fmts: Vec<CharFmt> = Vec::new();
+        let mut atom_ids = Vec::new();
         let mut at = 0usize;
         for (k, line) in lines.iter().enumerate() {
             let n = line.chars().count();
             if k > 0 {
                 out.push('\n');
                 fmts.push(self.fmt.get(at).cloned().unwrap_or_default());
+                atom_ids.push(None);
                 at += 1;
             }
             if ps.contains(&k) {
                 let label = format!("{}\t", style.label(k - ps.start));
                 let f = self.fmt.get(at).cloned().unwrap_or_else(|| self.fmt_at(at));
-                label.chars().for_each(|_| fmts.push(f.clone()));
+                label.chars().for_each(|_| {
+                    fmts.push(f.clone());
+                    atom_ids.push(None);
+                });
                 out.push_str(&label);
             }
             out.push_str(line);
             fmts.extend(self.fmt.get(at..at + n).unwrap_or_default().iter().cloned());
+            atom_ids.extend(self.atom_ids.get(at..at + n).unwrap_or_default().iter().copied());
             at += n;
         }
         if fmts.len() > MAX_CHARS {
@@ -425,6 +442,7 @@ impl Formatted {
         }
         self.text = out;
         self.fmt = fmts;
+        self.atom_ids = atom_ids;
         let props = ParaProps { first: -indent, left: indent, tabs: vec![(indent, TabKind::Left)], ..ParaProps::default() };
         for p in ps {
             if let Some(q) = self.paras.get_mut(p) {
@@ -454,7 +472,7 @@ impl Formatted {
                 while j < end && self.fmt.get(j) == Some(&f) {
                     j += 1;
                 }
-                let run: String = chars.get(i..j).unwrap_or_default().iter().map(|c| self.escape(*c)).collect();
+                let run: String = chars.get(i..j).unwrap_or_default().iter().enumerate().map(|(offset, c)| self.escape(i + offset, *c)).collect();
                 if f == CharFmt::default() {
                     out.push_str(&run);
                 } else {
@@ -470,12 +488,30 @@ impl Formatted {
         out
     }
 
-    fn escape(&self, c: char) -> String {
+    /// Plain-text clipboard contents. Keep literal characters unchanged and expose opaque
+    /// codes as their original source, rather than an ambiguous private-use placeholder.
+    /// Pasting this text is literal; it does not recreate rich formatting.
+    pub fn clipboard_text(&self, range: std::ops::Range<usize>) -> String {
+        if range.start > range.end || range.end > self.len() {
+            return String::new();
+        }
+        let mut out = String::new();
+        for (at, c) in self.text.chars().enumerate().skip(range.start).take(range.len()) {
+            if let Some(code) = self.atom_ids.get(at).copied().flatten().and_then(|id| self.atoms.get(id)) {
+                out.push_str(code);
+            } else {
+                out.push(c);
+            }
+        }
+        out
+    }
+
+    fn escape(&self, at: usize, c: char) -> String {
+        if let Some(code) = self.atom_ids.get(at).copied().flatten().and_then(|id| self.atoms.get(id)) {
+            return code.clone();
+        }
         match c {
             '\\' | '{' | '}' => format!("\\{c}"),
-            c if (c as u32) >= ATOM_BASE && (c as u32) < ATOM_BASE + MAX_ATOMS as u32 => {
-                self.atoms.get((c as u32 - ATOM_BASE) as usize).cloned().unwrap_or_default()
-            }
             c => c.to_string(),
         }
     }
@@ -564,6 +600,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn private_use_rejected_replacements_leave_every_part_unchanged() {
+        let mut f = Formatted::from_contents("\\S1/2;\u{e000}\\P{\\Lunder}");
+        let original = f.clone();
+        let (start, end) = (2, 1);
+        for range in [start..end, 0..usize::MAX, usize::MAX..usize::MAX] {
+            assert!(!f.replace_text(range, "x", &CharFmt::default()));
+            assert_eq!(f, original);
+        }
+        assert!(!f.replace_text(0..1, &"x".repeat(MAX_CHARS + 1), &CharFmt::default()));
+        assert_eq!(f, original);
+        assert!(!f.replace_text(0..1, &"\n".repeat(MAX_PARAS), &CharFmt::default()));
+        assert_eq!(f, original);
+    }
+
+    #[test]
+    fn private_use_list_labels_preserve_atom_identity_and_formats() {
+        let mut f = Formatted::from_contents("\\S1/2;\u{e000}\\P{\\L\u{e3e7}}");
+        f.make_list(0..f.len(), ListStyle::Number, 3.0);
+        assert_eq!(f.to_contents(), "\\pxi-3,l3,t3;1.\t\\S1/2;\u{e000}\\P{\\L2.\t\u{e3e7}}");
+    }
+
+    #[test]
+    fn literal_private_use_characters_round_trip_without_atoms() {
+        let text: String = (0..MAX_ATOMS).filter_map(|i| char::from_u32(ATOM_BASE + i as u32)).collect();
+        assert!(Formatted::fits(&text));
+        assert_eq!(Formatted::from_contents(&text).to_contents(), text);
+    }
+
+    #[test]
+    fn literal_private_use_characters_do_not_expand_opaque_codes() {
+        let contents = "A\u{e000}\\S1/2;\u{e001}\\W2;B\u{e3e7}";
+        let mut f = Formatted::from_contents(contents);
+        assert!(Formatted::fits(contents));
+        assert_eq!(f.to_contents(), contents);
+        assert!(f.replace_text(f.len()..f.len(), "!", &CharFmt::default()));
+        assert_eq!(f.to_contents(), format!("{contents}!"));
+    }
+
+    #[test]
+    fn typed_private_use_characters_are_literal_even_with_atoms() {
+        let mut f = Formatted::from_contents("\\S1/2; text");
+        assert!(f.replace_text(f.len()..f.len(), "\u{e000}\u{e001}\u{e3e7}", &CharFmt::default()));
+        assert_eq!(f.to_contents(), "\\S1/2; text\u{e000}\u{e001}\u{e3e7}");
+    }
+
+    #[test]
     fn a_relative_height_is_written_back_relative() {
         let f = Formatted::from_contents_with_height("{\\H2x;big} small {\\H3;abs}", Some(5.0));
         assert_eq!(f.fmt_at(0).height, Some(10.0), "shown at twice the text's height");
@@ -606,9 +688,9 @@ mod tests {
         assert!(f.all_have(0..5, Flag::Bold));
         // Typing inside the bold run takes the typing format; paragraphs follow line breaks.
         let typing = f.fmt_at(2);
-        assert!(f.set_text("hello big world", &CharFmt::default()));
+        assert!(f.replace_text(6..6, "big ", &CharFmt::default()));
         assert!(f.fmt_at(6) == CharFmt::default() && typing.bold);
-        assert!(f.set_text("hello big\nworld", &CharFmt::default()));
+        assert!(f.replace_text(9..10, "\n", &CharFmt::default()));
         assert_eq!(f.paragraph_count(), 2);
         assert_eq!(f.to_contents(), "{\\fArial|b1|i0;hello} big\\Pworld");
         f.toggle(0..5, Flag::Bold);
@@ -644,7 +726,7 @@ mod tests {
         f.set_indents(7..9, f64::NAN, 1.0);
         f.add_tab(0..99, f64::INFINITY, TabKind::Left);
         f.make_list(50..60, ListStyle::Bullet, f64::NAN);
-        assert!(!f.set_text(&"x".repeat(MAX_CHARS + 1), &CharFmt::default()));
+        assert!(!f.replace_text(0..f.len(), &"x".repeat(MAX_CHARS + 1), &CharFmt::default()));
         let _ = f.paragraph_of(usize::MAX);
         let _ = f.fmt_at(usize::MAX);
         let _ = Formatted::from_contents(&"{".repeat(100_000));

@@ -8,7 +8,8 @@
 use std::sync::Arc;
 
 use cadcraft_engine::mtext_edit::{CharFmt, Flag, Formatted, ListStyle, MTextColor, ParaAlign, TabKind};
-use egui::text::{CCursor, CCursorRange, LayoutJob};
+use egui::text::{CCursor, CCursorRange, CharIndex, LayoutJob};
+use egui::util::undoer::{Settings as UndoSettings, Undoer};
 use egui::{Align2, Color32, FontId, Rect, RichText, Sense, Shape, Stroke, TextFormat, pos2, vec2};
 
 use crate::CadApp;
@@ -76,6 +77,8 @@ struct State {
     /// The text box has had keyboard focus: it takes it once when the editor opens, so typing
     /// goes into the text, not to the command line.
     focused: bool,
+    /// Rich snapshots keep atom identity; Arc avoids copying all history when State is cloned.
+    history: Undoer<(Arc<Formatted>, (usize, usize))>,
     /// The MTEXT the state was made for (its insertion point and contents when it opened): a
     /// state kept for another one is not reused, so one MTEXT's text never goes to the next.
     target: Option<(cadcraft_engine::geom::Vec3, String)>,
@@ -122,7 +125,17 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
         }
         // An existing text opens with the caret at its end.
         let caret = (!fmt.is_empty()).then(|| fmt.len());
-        State { fmt, typing: CharFmt::default(), typing_at: 0, top: 70.0, sel: (0, 0), caret, focused: false, target: Some(target.clone()) }
+        State {
+            fmt,
+            typing: CharFmt::default(),
+            typing_at: 0,
+            top: 70.0,
+            sel: (0, 0),
+            caret,
+            focused: false,
+            history: Undoer::with_settings(UndoSettings { max_undos: 16, ..Default::default() }),
+            target: Some(target.clone()),
+        }
     });
     let base_h = if mt.height > 0.0 { mt.height } else { 0.2 };
     let px = ((base_h * scale) as f32).clamp(MIN_PX, MAX_PX);
@@ -452,9 +465,7 @@ fn diameter_button(ui: &mut egui::Ui) -> bool {
 /// Insert `s` at the caret (over the selection).
 fn insert(st: &mut State, s: &str) {
     let (a, b) = (st.sel.0.min(st.sel.1), st.sel.0.max(st.sel.1));
-    let chars: Vec<char> = st.fmt.text().chars().collect();
-    let new: String = chars.iter().take(a).chain(s.chars().collect::<Vec<_>>().iter()).chain(chars.iter().skip(b)).collect();
-    if st.fmt.set_text(&new, &st.typing.clone()) {
+    if st.fmt.replace_text(a..b, s, &st.typing) {
         let at = a + s.chars().count();
         st.sel = (at, at);
         st.typing_at = at;
@@ -527,15 +538,153 @@ fn ruler(ui: &mut egui::Ui, st: &mut State, px: f32, width: f32, base_h: f64) {
     bg.on_hover_text(crate::tl!("Click the ruler to add a tab stop, right-click to remove one"));
 }
 
-/// MTEXT editor area with the formatted preview; restores a pending caret position before laying text out with `base_h`, `px`, `width` and the theme tokens.
-fn text_box(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32, t: &Tokens) {
-    let id = edit_id();
-    if let Some(at) = st.caret.take() {
-        let mut s = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
-        s.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
-        s.store(ui.ctx(), id);
+/// Widget edits carry exact character ranges. Plain-text paste never copies atom identity.
+struct EditorBuffer<'a> {
+    model: &'a mut Formatted,
+    typing: &'a CharFmt,
+    rejected: bool,
+}
+
+impl egui::TextBuffer for EditorBuffer<'_> {
+    fn is_mutable(&self) -> bool {
+        true
     }
-    let fmt = st.fmt.clone();
+
+    fn as_str(&self) -> &str {
+        self.model.text()
+    }
+
+    fn insert_text(&mut self, text: &str, at: CharIndex) -> usize {
+        if self.model.replace_text(at.0..at.0, text, self.typing) {
+            text.chars().count()
+        } else {
+            self.rejected = true;
+            0
+        }
+    }
+
+    fn delete_char_range(&mut self, range: std::ops::Range<CharIndex>) {
+        // TextBuffer deletions clamp like String (e.g. Shift+Tab at a short final line).
+        let len = self.model.len();
+        self.rejected |= !self.model.replace_text(range.start.0.min(len)..range.end.0.min(len), "", self.typing);
+    }
+
+    fn replace_with(&mut self, text: &str) {
+        self.rejected |= !self.model.replace_text(0..self.model.len(), text, self.typing);
+    }
+
+    fn type_id(&self) -> std::any::TypeId {
+        std::any::TypeId::of::<EditorBuffer<'static>>()
+    }
+}
+
+/// MTEXT editor area; rich-model actions split the input stream without reordering edits.
+fn text_box(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32, t: &Tokens) {
+    let model_input = ui.memory(|m| m.has_focus(edit_id())) && ui.input(|i| i.events.iter().any(model_action));
+    if !model_input {
+        text_box_segment(ui, st, base_h, px, width, t);
+        return;
+    }
+    let (events, pointer) = ui.input_mut(|i| (std::mem::take(&mut i.events), i.pointer.clone()));
+    let mut segment = Vec::new();
+    let mut first = true;
+    for event in &events {
+        if model_action(event) {
+            if first || !segment.is_empty() {
+                ui.input_mut(|i| i.events = std::mem::take(&mut segment));
+                // Reuse the same rectangle, without painting or advancing the parent's layout.
+                let mut child = ui.new_child(egui::UiBuilder::new().max_rect(ui.available_rect_before_wrap()));
+                child.set_opacity(0.0);
+                text_box_segment(&mut child, st, base_h, px, width, t);
+                // Pointer selection is applied once, before keyboard events, just as in TextEdit.
+                ui.input_mut(|i| i.pointer = Default::default());
+                first = false;
+            }
+            if let Some(redo) = history_shortcut(event) {
+                restore_history(ui, st, redo);
+            } else {
+                copy_selection(ui, st, matches!(event, egui::Event::Cut));
+            }
+        } else {
+            segment.push(event.clone());
+        }
+    }
+    ui.input_mut(|i| i.events = segment);
+    text_box_segment(ui, st, base_h, px, width, t);
+    ui.input_mut(|i| {
+        i.events = events.into_iter().filter(|e| !model_action(e)).collect();
+        i.pointer = pointer;
+    });
+}
+
+fn model_action(event: &egui::Event) -> bool {
+    matches!(event, egui::Event::Copy | egui::Event::Cut) || history_shortcut(event).is_some()
+}
+
+fn copy_selection(ui: &mut egui::Ui, st: &mut State, cut: bool) {
+    let a = st.sel.0.min(st.sel.1).min(st.fmt.len());
+    let b = st.sel.0.max(st.sel.1).min(st.fmt.len());
+    if a == b {
+        return;
+    }
+    ui.ctx().copy_text(st.fmt.clipboard_text(a..b));
+    if cut && st.fmt.replace_text(a..b, "", &st.typing) {
+        st.sel = (a, a);
+        st.typing_at = a;
+        reset_editor_cursor(ui, Some(CCursorRange::one(CCursor::new(a))));
+    }
+}
+
+/// A restored rich snapshot can have the same glyphs as live IME preedit but different atom
+/// identity. Reset composition explicitly so a later cancellation cannot delete restored atoms.
+fn reset_editor_cursor(ui: &mut egui::Ui, cursor: Option<CCursorRange>) {
+    ui.memory_mut(|m| m.interrupt_ime());
+    let mut edit = egui::text_edit::TextEditState::default();
+    edit.cursor.set_char_range(cursor);
+    edit.store(ui.ctx(), edit_id());
+}
+
+/// Some(false) is Undo; Some(true) is Redo, matching TextEdit's platform shortcuts.
+fn history_shortcut(event: &egui::Event) -> Option<bool> {
+    let egui::Event::Key { key, pressed: true, modifiers, .. } = event else { return None };
+    if (*key == egui::Key::Y && modifiers.matches_logically(egui::Modifiers::COMMAND))
+        || (*key == egui::Key::Z && modifiers.matches_logically(egui::Modifiers::COMMAND | egui::Modifiers::SHIFT))
+    {
+        Some(true)
+    } else if *key == egui::Key::Z && modifiers.matches_logically(egui::Modifiers::COMMAND) {
+        Some(false)
+    } else {
+        None
+    }
+}
+
+fn restore_history(ui: &mut egui::Ui, st: &mut State, redo: bool) {
+    let snapshot = (Arc::new(st.fmt.clone()), st.sel);
+    let restored = if redo { st.history.redo(&snapshot) } else { st.history.undo(&snapshot) };
+    if let Some((model, (a, b))) = restored.cloned() {
+        st.fmt = (*model).clone();
+        st.sel = (a, b);
+        st.typing = st.fmt.fmt_at(a.saturating_sub(1));
+        st.typing_at = a;
+        reset_editor_cursor(ui, Some(CCursorRange { primary: CCursor::new(a), secondary: CCursor::new(b), h_pos: None }));
+    }
+}
+
+/// Process an ordered segment using the ordinary TextEdit behavior, including IME and selection.
+fn text_box_segment(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32, t: &Tokens) {
+    let id = edit_id();
+    let time = ui.input(|i| i.time);
+    let before = Arc::new(st.fmt.clone());
+    st.history.feed_state(time, &(before.clone(), st.sel));
+    let mut edit = egui::TextEdit::load_state(ui.ctx(), id).unwrap_or_default();
+    if let Some(at) = st.caret.take() {
+        edit.cursor.set_char_range(Some(CCursorRange::one(CCursor::new(at))));
+    }
+    // String-only undo cannot distinguish replacing an atom with its identical literal glyph.
+    edit.set_undoer(Undoer::with_settings(UndoSettings { max_undos: 0, ..Default::default() }));
+    let old_cursor = edit.cursor.char_range();
+    edit.store(ui.ctx(), id);
+    let fmt = before.clone();
     let default_color = t.text;
     let mut layouter = move |ui: &egui::Ui, text: &dyn egui::TextBuffer, wrap: f32| -> Arc<egui::Galley> {
         let mut job = LayoutJob::default();
@@ -579,8 +728,9 @@ fn text_box(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32,
         }
         ui.fonts_mut(|f| f.layout_job(job))
     };
-    let mut buf = st.fmt.text().to_string();
-    let out = egui::TextEdit::multiline(&mut buf)
+    let output_start = ui.output(|o| o.commands.len());
+    let mut buffer = EditorBuffer { model: &mut st.fmt, typing: &st.typing, rejected: false };
+    let out = egui::TextEdit::multiline(&mut buffer)
         .id(id)
         .desired_width(width)
         .desired_rows(5)
@@ -589,19 +739,35 @@ fn text_box(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32,
         .char_limit(cadcraft_engine::mtext_edit::MAX_CHARS)
         .layouter(&mut layouter)
         .show(ui);
+    let rejected = buffer.rejected;
+    if rejected {
+        // Paste deletes the selection before inserting. Reject the whole edit, not just its tail.
+        st.fmt = (*before).clone();
+        reset_editor_cursor(ui, old_cursor);
+    }
+    // Egui exports settled selections separately for X11/Wayland PRIMARY paste. Apply the
+    // same lossless plain-text policy, only to commands emitted by this widget invocation.
+    let selection = out.state.cursor.char_range().filter(|r| !r.is_empty());
+    ui.output_mut(|o| {
+        let commands = o.commands.split_off(output_start);
+        o.commands.extend(commands.into_iter().filter_map(|command| match command {
+            egui::OutputCommand::TextSelectionSettled(_) if rejected => None,
+            egui::OutputCommand::TextSelectionSettled(_) => selection.map(|r| {
+                let range = r.as_sorted_char_range();
+                egui::OutputCommand::TextSelectionSettled(st.fmt.clipboard_text(range.start.0..range.end.0))
+            }),
+            command => Some(command),
+        }));
+    });
     out.response.response.clone().accessible_name(crate::tl!("Text"));
     // On opening, and while the text is empty, the editor takes the focus; a field of the toolbar
     // the user clicked keeps it.
     let free = ui.memory(|m| m.focused().is_none());
-    if !out.response.has_focus() && (!st.focused || (buf.is_empty() && st.fmt.is_empty() && free)) {
+    if !out.response.has_focus() && (!st.focused || (st.fmt.is_empty() && free)) {
         out.response.request_focus();
     }
     st.focused = true;
-    if out.response.changed() {
-        let typing = st.typing.clone();
-        st.fmt.set_text(&buf, &typing);
-    }
-    if let Some(r) = out.cursor_range {
+    if !rejected && let Some(r) = out.cursor_range {
         let (a, b) = (r.primary.index.0, r.secondary.index.0);
         st.sel = (a, b);
         if a == b {
@@ -614,6 +780,8 @@ fn text_box(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, width: f32,
             }
         }
     }
+    let after = if *before == st.fmt { before } else { Arc::new(st.fmt.clone()) };
+    st.history.feed_state(time, &(after, st.sel));
 }
 
 #[cfg(test)]
@@ -626,6 +794,208 @@ mod tests {
 
     use crate::Services;
 
+    fn private_use_editor(contents: &str) -> (egui::Context, State) {
+        let ctx = egui::Context::default();
+        // Private-use glyphs depend on the drawing's fonts; these tests check the text data.
+        ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Tofu);
+        let mut st = State {
+            fmt: Formatted::from_contents(contents),
+            typing: CharFmt::default(),
+            typing_at: 0,
+            top: 70.0,
+            sel: (0, 0),
+            caret: Some(0),
+            focused: false,
+            history: Undoer::with_settings(UndoSettings { max_undos: 16, ..Default::default() }),
+            target: None,
+        };
+        private_use_frame(&ctx, &mut st, vec![]);
+        private_use_frame(&ctx, &mut st, vec![]);
+        (ctx, st)
+    }
+
+    fn private_use_frame(ctx: &egui::Context, st: &mut State, events: Vec<egui::Event>) {
+        private_use_frame_at(ctx, st, events, None);
+    }
+
+    fn private_use_frame_at(ctx: &egui::Context, st: &mut State, events: Vec<egui::Event>, time: Option<f64>) -> egui::FullOutput {
+        let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(800.0, 300.0))), events, time, ..Default::default() };
+        let mut out = ctx.run_ui(raw, |ui| text_box(ui, st, 2.5, 20.0, 700.0, &Tokens::get()));
+        out.textures_delta.clear();
+        out
+    }
+
+    fn private_use_select(ctx: &egui::Context, st: &mut State, a: usize, b: usize) {
+        st.sel = (a, b);
+        let mut edit = egui::TextEdit::load_state(ctx, edit_id()).unwrap();
+        edit.cursor.set_char_range(Some(CCursorRange::two(CCursor::new(a), CCursor::new(b))));
+        edit.store(ctx, edit_id());
+    }
+
+    fn private_use_key(key: egui::Key, modifiers: egui::Modifiers) -> egui::Event {
+        egui::Event::Key { key, physical_key: None, pressed: true, repeat: false, modifiers }
+    }
+
+    #[test]
+    fn private_use_typing_and_paste_beside_an_atom_stay_literal() {
+        for before in [true, false] {
+            for paste in [true, false] {
+                let (ctx, mut st) = private_use_editor(r"\S1/2;");
+                let at = usize::from(!before);
+                private_use_select(&ctx, &mut st, at, at);
+                let event = if paste { egui::Event::Paste("\u{e000}".into()) } else { egui::Event::Text("\u{e000}".into()) };
+                private_use_frame(&ctx, &mut st, vec![event]);
+                let expected = if before { "\u{e000}\\S1/2;" } else { "\\S1/2;\u{e000}" };
+                assert_eq!(st.fmt.to_contents(), expected);
+                private_use_select(&ctx, &mut st, at, at + 1);
+                private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Backspace, egui::Modifiers::NONE)]);
+                assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+            }
+        }
+    }
+
+    #[test]
+    fn private_use_atom_replacement_can_undo_and_redo_without_text_changes() {
+        let (ctx, mut st) = private_use_editor(r"\S1/2;");
+        private_use_select(&ctx, &mut st, 0, 1);
+        private_use_frame(&ctx, &mut st, vec![egui::Event::Paste("\u{e000}".into())]);
+        assert_eq!(st.fmt.to_contents(), "\u{e000}");
+        private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+        private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Y, egui::Modifiers::COMMAND)]);
+        assert_eq!(st.fmt.to_contents(), "\u{e000}");
+    }
+
+    #[test]
+    fn private_use_deleting_atom_preserves_identical_literal_and_history() {
+        for before in [true, false] {
+            let original = if before { "\u{e000}\\S1/2;" } else { "\\S1/2;\u{e000}" };
+            let (ctx, mut st) = private_use_editor(original);
+            let at = usize::from(before);
+            private_use_select(&ctx, &mut st, at, at + 1);
+            private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Delete, egui::Modifiers::NONE)]);
+            assert_eq!(st.fmt.to_contents(), "\u{e000}");
+            private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+            assert_eq!(st.fmt.to_contents(), original);
+            private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Z, egui::Modifiers::COMMAND | egui::Modifiers::SHIFT)]);
+            assert_eq!(st.fmt.to_contents(), "\u{e000}");
+        }
+    }
+
+    #[test]
+    fn private_use_history_respects_ordered_events_in_one_frame() {
+        let (ctx, mut st) = private_use_editor(r"\S1/2;");
+        private_use_select(&ctx, &mut st, 0, 1);
+        private_use_frame(&ctx, &mut st, vec![egui::Event::Paste("\u{e000}".into()), private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)]);
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+        private_use_frame(
+            &ctx,
+            &mut st,
+            vec![private_use_key(egui::Key::Y, egui::Modifiers::COMMAND), private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)],
+        );
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+    }
+
+    #[test]
+    fn private_use_restored_selection_keeps_redo_available() {
+        let (ctx, mut st) = private_use_editor(r"\S1/2;");
+        private_use_select(&ctx, &mut st, 0, 1);
+        private_use_frame_at(&ctx, &mut st, vec![], Some(1.0));
+        private_use_frame_at(&ctx, &mut st, vec![], Some(3.0));
+        let selected = st.sel;
+        private_use_frame_at(&ctx, &mut st, vec![egui::Event::Paste("\u{e000}".into())], Some(4.0));
+        assert_eq!(st.fmt.to_contents(), "\u{e000}");
+        private_use_frame_at(&ctx, &mut st, vec![private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)], Some(5.0));
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+        assert_eq!(st.sel, selected);
+        private_use_frame_at(&ctx, &mut st, vec![private_use_key(egui::Key::Y, egui::Modifiers::COMMAND)], Some(6.0));
+        assert_eq!(st.fmt.to_contents(), "\u{e000}");
+    }
+
+    #[test]
+    fn private_use_clipboard_keeps_opaque_codes_as_literal_source() {
+        for cut in [false, true] {
+            let (ctx, mut st) = private_use_editor("\\S1/2;\u{e000}");
+            private_use_select(&ctx, &mut st, 0, 2);
+            let event = if cut { egui::Event::Cut } else { egui::Event::Copy };
+            let out = private_use_frame_at(&ctx, &mut st, vec![event], None);
+            let copied = out
+                .platform_output
+                .commands
+                .iter()
+                .find_map(|c| match c {
+                    egui::OutputCommand::CopyText(text) => Some(text.clone()),
+                    _ => None,
+                })
+                .expect("clipboard output");
+            assert_eq!(copied, "\\S1/2;\u{e000}");
+            if cut {
+                assert!(st.fmt.is_empty());
+                private_use_frame(&ctx, &mut st, vec![egui::Event::Paste(copied)]);
+                // Plain-text clipboard preserves raw code bytes, not rich formatting identity.
+                assert_eq!(st.fmt.text(), "\\S1/2;\u{e000}");
+                assert_eq!(st.fmt.to_contents(), "\\\\S1/2;\u{e000}");
+            } else {
+                assert_eq!(st.fmt.to_contents(), "\\S1/2;\u{e000}");
+            }
+        }
+    }
+
+    #[test]
+    fn private_use_undo_interrupts_identical_ime_preedit() {
+        let (ctx, mut st) = private_use_editor(r"\S1/2;");
+        private_use_select(&ctx, &mut st, 0, 1);
+        private_use_frame_at(&ctx, &mut st, vec![], Some(1.0));
+        private_use_frame_at(&ctx, &mut st, vec![], Some(3.0));
+        private_use_frame_at(
+            &ctx,
+            &mut st,
+            vec![egui::Event::Ime(egui::ImeEvent::Preedit { text: "\u{e000}".into(), active_range_chars: None })],
+            Some(4.0),
+        );
+        assert_eq!(st.fmt.to_contents(), "\u{e000}");
+        private_use_frame_at(&ctx, &mut st, vec![private_use_key(egui::Key::Z, egui::Modifiers::COMMAND)], Some(5.0));
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+        private_use_frame_at(&ctx, &mut st, vec![egui::Event::Ime(egui::ImeEvent::Commit(String::new()))], Some(6.0));
+        assert_eq!(st.fmt.to_contents(), r"\S1/2;");
+    }
+
+    #[test]
+    fn private_use_primary_selection_keeps_opaque_source() {
+        let (ctx, mut st) = private_use_editor("\\S1/2;\u{e000}");
+        private_use_select(&ctx, &mut st, 0, 2);
+        let out = private_use_frame_at(&ctx, &mut st, vec![], None);
+        let selected = out
+            .platform_output
+            .commands
+            .iter()
+            .find_map(|c| match c {
+                egui::OutputCommand::TextSelectionSettled(text) => Some(text.as_str()),
+                _ => None,
+            })
+            .expect("PRIMARY selection output");
+        assert_eq!(selected, "\\S1/2;\u{e000}");
+    }
+
+    #[test]
+    fn private_use_short_indentation_can_be_removed() {
+        for spaces in [" ", "  ", "   "] {
+            let (ctx, mut st) = private_use_editor(spaces);
+            let end = st.fmt.len();
+            private_use_select(&ctx, &mut st, end, end);
+            private_use_frame(&ctx, &mut st, vec![private_use_key(egui::Key::Tab, egui::Modifiers::SHIFT)]);
+            assert!(st.fmt.is_empty(), "short indentation remains: {:?}", st.fmt.text());
+        }
+    }
+
+    #[test]
+    fn private_use_rejected_paste_preserves_selected_text() {
+        let (ctx, mut st) = private_use_editor("\\S1/2;\u{e000}");
+        private_use_select(&ctx, &mut st, 0, 2);
+        private_use_frame(&ctx, &mut st, vec![egui::Event::Paste("\n".repeat(20_000))]);
+        assert_eq!(st.fmt.to_contents(), "\\S1/2;\u{e000}");
+    }
+
     /// Clicking Diameter inserts U+2300 into both the formatted text and `to_contents()`, selects it, and leaves no unnamed widget.
     #[test]
     fn diameter_insertion_keeps_real_text_and_renders_without_optional_fonts() {
@@ -637,6 +1007,7 @@ mod tests {
             sel: (0, 0),
             caret: None,
             focused: false,
+            history: Undoer::with_settings(UndoSettings { max_undos: 16, ..Default::default() }),
             target: None,
         };
         let mut harness = Harness::builder().with_size(vec2(1100.0, 300.0)).with_context_setup(install_diameter_glyph).build_ui_state(
@@ -667,6 +1038,7 @@ mod tests {
             sel: (0, 0),
             caret: None,
             focused: false,
+            history: Undoer::with_settings(UndoSettings { max_undos: 16, ..Default::default() }),
             target: None,
         };
         let mut harness = Harness::builder().with_size(vec2(1100.0, 300.0)).build_ui_state(
@@ -695,6 +1067,7 @@ mod tests {
             sel: (0, 0),
             caret: None,
             focused: false,
+            history: Undoer::with_settings(UndoSettings { max_undos: 16, ..Default::default() }),
             target: None,
         };
         let mut harness = Harness::builder().with_size(vec2(1100.0, 120.0)).build_ui(move |ui| toolbar(ui, &mut state, 2.5));
@@ -776,7 +1149,7 @@ mod tests {
         assert!((m.width - 5.0).abs() < 1e-9, "{}", m.width);
         frame(&mut app);
         let mut st = ctx.data_mut(|d| d.get_temp::<State>(state_id())).expect("editor open");
-        st.fmt.set_text("hello", &CharFmt::default());
+        st.fmt.replace_text(0..st.fmt.len(), "hello", &CharFmt::default());
         st.fmt.toggle(0..5, Flag::Bold);
         let contents = st.fmt.to_contents();
         app.session.input(cadcraft_engine::Input::Text(contents.clone())).unwrap();
@@ -838,7 +1211,7 @@ mod tests {
         assert_eq!(st.fmt.text(), "first\nsecond");
         assert!(st.fmt.fmt_at(0).bold && !st.fmt.fmt_at(7).bold, "formats kept");
         let mut st = st;
-        st.fmt.set_text("first\nsecond\nthird", &CharFmt::default());
+        st.fmt.replace_text(st.fmt.len()..st.fmt.len(), "\nthird", &CharFmt::default());
         app.session.input(cadcraft_engine::Input::Text(st.fmt.to_contents())).unwrap();
         frame(&mut app);
         assert!(ctx.data_mut(|d| d.get_temp::<State>(state_id())).is_none(), "editor closed");
