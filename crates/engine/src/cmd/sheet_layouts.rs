@@ -460,6 +460,7 @@ pub(super) mod native {
             .ok_or_else(|| bad(CMD, "FRAME_LIMIT: add_frames requires a bounded handle array"))?;
         let mut seen = g.frames.iter().map(|f| store::handle(&f.handle)).collect::<Result<BTreeSet<_>>>()?;
         let mut index = g.frames.iter().map(|f| f.index).max().map_or(Some(0), |i| i.checked_add(1)).ok_or_else(|| bad(CMD, "FRAME_INDEX_LIMIT"))?;
+        let mut records = alignment_store::RecordIndex::new(d);
         for value in handles {
             let h = crate::cmd::curves::handle_value(value).ok_or_else(|| bad(CMD, "INVALID_FRAME: invalid added frame handle"))?;
             if !seen.insert(h) || alignment_store::record_handle_for(d, h, "CADCRAFT_SHEET_OWNER")?.is_some() {
@@ -492,7 +493,7 @@ pub(super) mod native {
             if geometry.size.iter().zip(g.paper_size).any(|(s, p)| (s - p * g.scale).abs() > 1e-6) {
                 return Err(bad(CMD, "FRAME_SIZE_MISMATCH: added rectangle differs from group viewport"));
             }
-            store::own(d, h, &g.own, index, "frame")?;
+            store::own(d, &mut records, h, &g.own, index, "frame")?;
             g.frames.push(store::Member { index, handle: h.hex(), geometry, matchlines: Vec::new(), profile: None });
             index = index.checked_add(1).ok_or_else(|| bad(CMD, "FRAME_INDEX_LIMIT"))?;
         }
@@ -634,6 +635,7 @@ pub(super) mod native {
         let profile_layers: Vec<_> =
             d.layers.iter().map(|l| &l.name).filter(|n| n.starts_with(store::PROFILE_LAYER_PREFIX)).take(store::MAX_MEMBERS + 1).cloned().collect();
         let mut frozen_count = 0usize;
+        let mut records = alignment_store::RecordIndex::new(&d);
         for (name, indices, values) in planned {
             let mut copied = layout.clone();
             copied.name = name.clone();
@@ -710,7 +712,7 @@ pub(super) mod native {
                     _ => {}
                 }
                 let h = d.add(&Space::Paper(name.clone()), e.common, e.kind)?;
-                store::own(&mut d, h, &g.own, first, "sheet")?;
+                store::own(&mut d, &mut records, h, &g.own, first, "sheet")?;
                 members.push(h.hex());
             }
             let marker = d.add(
@@ -718,7 +720,7 @@ pub(super) mod native {
                 Common { visible: false, ..Default::default() },
                 EntityKind::Point(Point { p: Vec3::ZERO, angle: 0. }),
             )?;
-            store::own(&mut d, marker, &g.own, first, "sheet")?;
+            store::own(&mut d, &mut records, marker, &g.own, first, "sheet")?;
             members.push(marker.hex());
             let mut sheet = Sheet {
                 name: name.clone(),

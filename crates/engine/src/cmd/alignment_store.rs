@@ -6,6 +6,7 @@ use cadcraft_doc::{Drawing, Handle, RawTag};
 use cadcraft_doc::{EntityKind, LwPolyline};
 use cadcraft_geom::{PolyVertex, Vec2, Vec3};
 use serde::{Deserialize, Serialize};
+use std::collections::HashMap;
 use std::sync::Arc;
 
 #[derive(Clone, Debug, Serialize, Deserialize)]
@@ -103,6 +104,11 @@ pub(super) fn save(d: &mut Drawing, handle: Handle, data: &Stored) -> Result<()>
     save_record(d, handle, KEY, data)
 }
 pub(super) fn save_record(d: &mut Drawing, handle: Handle, key: &str, data: &impl Serialize) -> Result<()> {
+    save_record_in(d, &mut RecordIndex::new(d), handle, key, data)
+}
+/// [`save_record`] for a command that writes many records: `index` is built once for the
+/// command, so each record costs no scan of every drawing object (#92).
+pub(super) fn save_record_in(d: &mut Drawing, index: &mut RecordIndex, handle: Handle, key: &str, data: &impl Serialize) -> Result<()> {
     // Serialization is capped while writing, before an input-sized string can be allocated.
     struct Capped(Vec<u8>);
     impl std::io::Write for Capped {
@@ -135,7 +141,78 @@ pub(super) fn save_record(d: &mut Drawing, handle: Handle, key: &str, data: &imp
             }
         }
     }
-    write_record(d, handle, key, &ascii)
+    write_record_in(d, index, handle, key, &ascii)
+}
+
+/// Where each kept drawing object is, by handle, and the largest object handle. A command that
+/// writes many records builds it once, so the records cost work linear in their number rather than
+/// a scan of every object per record (#92). The index checks the object list on every use and is
+/// rebuilt when anything else changed the list.
+pub(super) struct RecordIndex {
+    at: HashMap<Handle, usize>,
+    maximum: u64,
+    len: usize,
+    last: Option<Handle>,
+    /// Objects visited while building, so tests can bound the work.
+    scanned: usize,
+}
+impl RecordIndex {
+    pub(super) fn new(d: &Drawing) -> Self {
+        let mut index = RecordIndex { at: HashMap::new(), maximum: 0, len: 0, last: None, scanned: 0 };
+        index.rebuild(d);
+        index
+    }
+    fn rebuild(&mut self, d: &Drawing) {
+        let objects = &d.foreign.objects;
+        self.at.clear();
+        self.maximum = 0;
+        for (position, o) in objects.iter().enumerate() {
+            // The first object with a handle wins, as a linear search would find it.
+            self.at.entry(o.handle).or_insert(position);
+            self.maximum = self.maximum.max(o.handle.0);
+        }
+        self.len = objects.len();
+        self.last = objects.last().map(|o| o.handle);
+        self.scanned = self.scanned.saturating_add(objects.len());
+    }
+    fn refresh(&mut self, d: &Drawing) {
+        if self.len != d.foreign.objects.len() || self.last != d.foreign.objects.last().map(|o| o.handle) {
+            self.rebuild(d);
+        }
+    }
+    /// The position of the object `handle` of type `kind`.
+    fn find(&mut self, d: &Drawing, handle: Handle, kind: &str) -> Option<usize> {
+        self.refresh(d);
+        let hit = |index: &Self| index.at.get(&handle).copied().filter(|&i| d.foreign.objects.get(i).is_some_and(|o| o.handle == handle));
+        // A miss rebuilds once: something may have changed the list without changing its length
+        // or last object. A miss is an error for every caller, so this costs nothing on success.
+        let position = match hit(self) {
+            Some(position) => position,
+            None => {
+                self.rebuild(d);
+                hit(self)?
+            }
+        };
+        d.foreign.objects.get(position).is_some_and(|o| o.kind == kind).then_some(position)
+    }
+    /// Note the `count` objects just pushed onto the end of the list.
+    fn rebuild_tail(&mut self, d: &Drawing, count: usize) {
+        let objects = &d.foreign.objects;
+        if self.len.saturating_add(count) != objects.len() {
+            self.rebuild(d);
+            return;
+        }
+        for (position, o) in objects.iter().enumerate().skip(self.len) {
+            self.at.entry(o.handle).or_insert(position);
+            self.maximum = self.maximum.max(o.handle.0);
+        }
+        self.len = objects.len();
+        self.last = objects.last().map(|o| o.handle);
+    }
+    #[cfg(test)]
+    pub(super) fn scanned(&self) -> usize {
+        self.scanned
+    }
 }
 
 const KEY: &str = "CADCRAFT_ALIGNMENT";
@@ -153,6 +230,10 @@ pub(super) fn record_handle_for(d: &Drawing, handle: Handle, name: &str) -> Resu
     let Some(dict) = d.foreign.entities.get(&handle).and_then(|x| x.xdict) else { return Ok(None) };
     let dict =
         d.foreign.objects.iter().find(|o| o.handle == dict && o.kind == "DICTIONARY").ok_or_else(|| invalid("missing extension dictionary"))?;
+    dictionary_entry(dict, name)
+}
+/// The handle the extension dictionary `dict` stores under `name`.
+fn dictionary_entry(dict: &ForeignObject, name: &str) -> Result<Option<Handle>> {
     let mut out = None;
     for (index, key) in dict.tags.iter().enumerate() {
         if key.code == 3 && key.value == name {
@@ -167,46 +248,60 @@ pub(super) fn record_handle_for(d: &Drawing, handle: Handle, name: &str) -> Resu
 }
 #[cfg(test)]
 fn write_data(d: &mut Drawing, handle: Handle, data: &str) -> Result<()> {
-    write_record(d, handle, KEY, data)
+    write_record_in(d, &mut RecordIndex::new(d), handle, KEY, data)
 }
-fn write_record(d: &mut Drawing, handle: Handle, key: &str, data: &str) -> Result<()> {
+fn write_record_in(d: &mut Drawing, index: &mut RecordIndex, handle: Handle, key: &str, data: &str) -> Result<()> {
     if data.is_empty() || data.len() > MAX_DATA || !data.is_ascii() {
         return Err(invalid("ASCII JSON payload exceeds 8MiB or is empty"));
     }
     if d.entity(handle).is_none() {
         return Err(invalid("carrier does not exist"));
     }
-    let existing = record_handle_for(d, handle, key)?;
+    let old_dict = d.foreign.entities.get(&handle).and_then(|x| x.xdict);
+    let dict_at = match old_dict {
+        Some(dict) => Some(index.find(d, dict, "DICTIONARY").ok_or_else(|| invalid("missing extension dictionary"))?),
+        None => None,
+    };
+    let existing = match dict_at {
+        Some(at) => dictionary_entry(&d.foreign.objects[at], key)?,
+        None => None,
+    };
     if let Some(record) = existing {
+        let at = index.find(d, record, "XRECORD").ok_or_else(|| invalid("missing alignment XRECORD"))?;
         let f = Arc::make_mut(&mut d.foreign);
-        let obj = f.objects.iter_mut().find(|o| o.handle == record && o.kind == "XRECORD").ok_or_else(|| invalid("missing alignment XRECORD"))?;
+        let obj = f.objects.get_mut(at).ok_or_else(|| invalid("missing alignment XRECORD"))?;
         obj.tags.retain(|t| t.code != 1);
         obj.tags.extend(data.as_bytes().chunks(240).map(|b| tag(1, String::from_utf8_lossy(b))));
         return Ok(());
     }
-    let maximum = d.foreign.objects.iter().map(|o| o.handle.0).max().unwrap_or(0);
-    let next = d.handseed.max(maximum.saturating_add(1));
+    index.refresh(d);
+    let next = d.handseed.max(index.maximum.saturating_add(1));
     if next > u64::MAX - 3 {
         return Err(invalid("handle space exhausted"));
     }
     d.handseed = next;
-    let old_dict = d.foreign.entities.get(&handle).and_then(|x| x.xdict);
     let dict = old_dict.unwrap_or_else(|| d.new_handle());
     let record = d.new_handle();
     let f = Arc::make_mut(&mut d.foreign);
-    if old_dict.is_none() {
-        f.objects.push(ForeignObject {
-            handle: dict,
-            kind: "DICTIONARY".into(),
-            tags: vec![tag(5, dict.hex()), tag(330, handle.hex()), tag(100, "AcDbDictionary"), tag(280, 1), tag(281, 1)],
-        });
-        f.entities.entry(handle).or_default().xdict = Some(dict);
-    }
-    let object = f.objects.iter_mut().find(|o| o.handle == dict).ok_or_else(|| invalid("missing extension dictionary"))?;
+    let dict_at = match dict_at {
+        Some(at) => at,
+        None => {
+            f.objects.push(ForeignObject {
+                handle: dict,
+                kind: "DICTIONARY".into(),
+                tags: vec![tag(5, dict.hex()), tag(330, handle.hex()), tag(100, "AcDbDictionary"), tag(280, 1), tag(281, 1)],
+            });
+            f.entities.entry(handle).or_default().xdict = Some(dict);
+            f.objects.len() - 1
+        }
+    };
+    let object = f.objects.get_mut(dict_at).ok_or_else(|| invalid("missing extension dictionary"))?;
     object.tags.extend([tag(3, key), tag(360, record.hex())]);
     let mut tags = vec![tag(5, record.hex()), tag(330, dict.hex()), tag(100, "AcDbXrecord"), tag(280, 1)];
     tags.extend(data.as_bytes().chunks(240).map(|b| tag(1, String::from_utf8_lossy(b))));
     f.objects.push(ForeignObject { handle: record, kind: "XRECORD".into(), tags });
+    // The new dictionary, if any, and the record: both at the end of the list.
+    index.rebuild_tail(d, if old_dict.is_none() { 2 } else { 1 });
     Ok(())
 }
 fn read_data(d: &Drawing, handle: Handle) -> Result<String> {
@@ -253,6 +348,56 @@ mod tests {
         assert_eq!(d.foreign.objects.iter().find(|o| o.handle == foreign).unwrap(), &object);
         assert!(d.foreign.objects.iter().find(|o| o.handle == dict).unwrap().tags.iter().any(|t| t.code == 3 && t.value == "OTHER_APP"));
         assert_eq!(read_data(&d, h).unwrap(), "{\"version\":2}");
+    }
+
+    fn point(d: &mut Drawing) -> Handle {
+        d.add(&Space::Model, Common::default(), EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3::ZERO, angle: 0. })).unwrap()
+    }
+
+    #[test]
+    fn many_records_through_one_index_cost_one_scan_of_the_objects() {
+        let mut d = Drawing::new_metric();
+        // Unrelated objects already in the drawing, as a large production file would have.
+        for _ in 0..3000 {
+            let h = d.new_handle();
+            Arc::make_mut(&mut d.foreign).objects.push(ForeignObject { handle: h, kind: "XRECORD".into(), tags: vec![tag(5, h.hex())] });
+        }
+        let carriers: Vec<Handle> = (0..2000).map(|_| point(&mut d)).collect();
+        let before = d.foreign.objects.len();
+        let mut index = RecordIndex::new(&d);
+        for (i, &h) in carriers.iter().enumerate() {
+            save_record_in(&mut d, &mut index, h, KEY, &i).unwrap();
+        }
+        // A rewrite of the same records goes through the same index too.
+        for (i, &h) in carriers.iter().enumerate() {
+            save_record_in(&mut d, &mut index, h, KEY, &(i + 1)).unwrap();
+        }
+        assert_eq!(index.scanned(), before, "the objects are scanned once, not once per record");
+        assert_eq!(d.foreign.objects.len(), before + 2 * carriers.len());
+        for (i, &h) in carriers.iter().enumerate() {
+            assert_eq!(read_data(&d, h).unwrap(), (i + 1).to_string());
+        }
+        let mut handles: Vec<u64> = d.foreign.objects.iter().map(|o| o.handle.0).collect();
+        handles.sort_unstable();
+        handles.dedup();
+        assert_eq!(handles.len(), d.foreign.objects.len(), "every new object has its own handle");
+    }
+
+    #[test]
+    fn an_index_follows_objects_added_outside_it() {
+        let mut d = Drawing::new_metric();
+        let (a, b) = (point(&mut d), point(&mut d));
+        let mut index = RecordIndex::new(&d);
+        save_record_in(&mut d, &mut index, a, KEY, &1).unwrap();
+        // Another writer adds an object with a handle above the drawing's seed.
+        let stray = Handle(d.handseed + 50);
+        Arc::make_mut(&mut d.foreign).objects.push(ForeignObject { handle: stray, kind: "XRECORD".into(), tags: vec![tag(5, stray.hex())] });
+        save_record_in(&mut d, &mut index, b, KEY, &2).unwrap();
+        save_record_in(&mut d, &mut index, a, KEY, &3).unwrap();
+        assert_eq!(read_data(&d, a).unwrap(), "3");
+        assert_eq!(read_data(&d, b).unwrap(), "2");
+        let record = record_handle(&d, b).unwrap().unwrap();
+        assert!(record.0 > stray.0, "new handles stay above every existing object");
     }
 
     #[test]
