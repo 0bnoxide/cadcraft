@@ -130,6 +130,24 @@ pub(crate) fn after_open(s: &mut Session, i: usize) {
     }
 }
 
+/// Load the pixels of images the current drawing names but has not loaded yet, such as images a
+/// command copied in from another drawing. As on opening, a file that can't be loaded stays a
+/// crossed-out frame and is reported; the command does not fail over it.
+pub(crate) fn load_new(s: &mut Session) -> Result<()> {
+    let paths = paths(s.doc()?);
+    let mut rasters = s.doc()?.rasters.clone();
+    if paths.iter().all(|p| rasters.get(p).is_some()) {
+        return Ok(());
+    }
+    let host = s.state()?.path.clone();
+    let notes = load_missing(&paths, host.as_deref(), &mut rasters);
+    s.doc_mut()?.rasters = rasters;
+    for n in notes {
+        s.echo(n);
+    }
+    Ok(())
+}
+
 /// Read and decode into `rasters` the files of `paths` that are not in it yet, for a drawing at
 /// `host`. Returns one message per file that could not be loaded.
 fn load_missing(paths: &[String], host: Option<&str>, rasters: &mut cadcraft_doc::Rasters) -> Vec<String> {

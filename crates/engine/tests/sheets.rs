@@ -31,6 +31,7 @@ fn hooks() {
         write: |d, n| cadcraft_io::write(d, n).map_err(|e| e.to_string()),
         plot: None,
     });
+    cadcraft_engine::cmd::file::set_image_decoder(|b| cadcraft_io::raster::decode(b).map_err(|e| e.to_string()));
 }
 fn template(temp: &Temp, roles: &[&str]) -> PathBuf {
     let mut d = Drawing::new_metric();
@@ -606,8 +607,10 @@ fn template_with_logo(temp: &Temp) -> PathBuf {
     )
     .unwrap();
     std::fs::create_dir(temp.0.join("art")).unwrap();
-    // Placeholder bytes written by this test: no third-party artwork, and the import only needs the file.
-    std::fs::write(temp.0.join("art").join("logo.png"), b"synthetic logo bytes").unwrap();
+    // Four by two pixels written by this test: no third-party artwork.
+    let px: Vec<u8> = (0..8u8).flat_map(|i| [i * 30, 255 - i * 30, 7, 255]).collect();
+    let png = cadcraft_io::raster::encode_png(&cadcraft_engine::doc::Raster::new(4, 2, px).unwrap()).unwrap();
+    std::fs::write(temp.0.join("art").join("logo.png"), png).unwrap();
     std::fs::write(&t, cadcraft_io::write(&d, &t).unwrap()).unwrap();
     t
 }
@@ -638,6 +641,8 @@ fn template_raster_images_are_copied_with_paths_that_resolve_from_the_current_dr
     for p in &paths {
         assert!(std::path::Path::new(p).is_absolute(), "{p}");
         assert_eq!(std::fs::canonicalize(p).unwrap(), logo);
+        let loaded = s.doc().unwrap().rasters.get(p).map(|r| (r.width(), r.height()));
+        assert_eq!(loaded, Some((4, 2)), "the copied logo shows without reopening the drawing");
     }
     let after = s.doc().unwrap().clone();
     let update = s.execute("sheetupdate", &json!({"group":g["group"]})).unwrap();
