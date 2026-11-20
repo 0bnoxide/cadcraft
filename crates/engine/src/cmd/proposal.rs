@@ -459,7 +459,9 @@ mod native {
         layout.page.plot_style_table = p.plot.style_sheet.clone();
         layout.page.scale = p.plot.scale;
         layout.page.scale_to_fit = false;
-        layout.page.paper_mm = Some(p.plot.units == "Millimeters");
+        // The layout's paper unit is the one the sheet geometry was scaled to (`paper_unit` above);
+        // upstream (#3249) reads an explicit inch choice as inch paper space.
+        layout.page.paper_mm = Some(paper_unit == 1.0);
         layout.page.landscape = p.orientation == "Landscape";
         layout.page.width_mm = width.min(height);
         layout.page.height_mm = width.max(height);
