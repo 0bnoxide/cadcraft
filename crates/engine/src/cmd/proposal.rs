@@ -459,7 +459,7 @@ mod native {
         layout.page.plot_style_table = p.plot.style_sheet.clone();
         layout.page.scale = p.plot.scale;
         layout.page.scale_to_fit = false;
-        layout.page.paper_mm = p.plot.units == "Millimeters";
+        layout.page.paper_mm = Some(p.plot.units == "Millimeters");
         layout.page.landscape = p.orientation == "Landscape";
         layout.page.width_mm = width.min(height);
         layout.page.height_mm = width.max(height);
