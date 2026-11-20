@@ -57,7 +57,8 @@ pub fn dyn_frame(app: &CadApp) -> Option<crate::dyninput::Frame> {
         return None;
     }
     let p = app.session.current_prompt().filter(cadcraft_engine::pointmod::accepts)?;
-    Some(crate::dyninput::Frame { base: p.base, cartesian: st.dynpi_cartesian, absolute: st.dynpi_absolute })
+    let ucs = app.session.input_ucs();
+    Some(crate::dyninput::Frame { base: p.base, cartesian: st.dynpi_cartesian, absolute: st.dynpi_absolute, ucs })
 }
 
 /// Take Tab away from egui before it moves keyboard focus to the next widget (which would leave
@@ -372,11 +373,7 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
             egui::Event::Ime(_) => {}
             egui::Event::Key { key, pressed: true, repeat, modifiers, .. } => match key {
                 Key::Enter => submit(app),
-                Key::Escape => {
-                    app.cmd.buffer.clear();
-                    app.cmd.preedit.clear();
-                    app.session.cancel();
-                }
+                Key::Escape => escape(app),
                 Key::Backspace => {
                     let press = KeyPress { repeat, plain: !(modifiers.alt || modifiers.ctrl || modifiers.command) };
                     let erase = backspace_erases(
@@ -423,6 +420,14 @@ pub fn keyboard(app: &mut CadApp, ctx: &egui::Context) {
         }
         app.cmd.note_typing();
     }
+}
+
+/// What Escape does, and the right-click or menu "Cancel" that stand for it: what was typed so far
+/// goes, and so does the running command.
+pub fn escape(app: &mut CadApp) {
+    app.cmd.buffer.clear();
+    app.cmd.preedit.clear();
+    app.session.cancel();
 }
 
 pub fn submit(app: &mut CadApp) {

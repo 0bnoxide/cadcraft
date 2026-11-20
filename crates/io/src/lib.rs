@@ -9,6 +9,7 @@ mod dxf_raw;
 mod dxf_clip;
 mod dxf_ext;
 mod dxf_image;
+mod dxf_layer_states;
 mod dxf_mleader;
 mod dxf_read;
 mod dxf_table;
@@ -32,6 +33,7 @@ use std::path::{Path, PathBuf};
 
 pub use cadcraft_doc::Format;
 pub use craft_dxf::Version;
+pub use dxf_raw::{ObjectRecord, object_records};
 pub use dxf_read::entity_from_groups;
 pub use dxf_write::entity_groups;
 pub use pdf::{PdfOptions, pdf, plot};
