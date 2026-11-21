@@ -262,6 +262,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn override_survives_rerun() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut s = Session::new();
         s.execute("point", &json!({"at":[1,2,3]})).unwrap();
         let source = s.doc().unwrap().model.iter().next().unwrap().handle.hex();

@@ -251,6 +251,7 @@ mod tests {
 
     #[test]
     fn copy_translates_exact_definition_and_duplicates_owned_extension_tree() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut s = Session::new();
         let h = line(&mut s, "route");
         let external = s.add_entity(cadcraft_doc::EntityKind::Point(cadcraft_doc::Point { p: cadcraft_geom::Vec3::ZERO, angle: 0. })).unwrap();
@@ -320,6 +321,7 @@ mod tests {
 
     #[test]
     fn copy_keeps_reactors_distinct_from_the_extension_dictionary_owner() {
+        cadcraft_io::dwg_worker::allow_in_process();
         fn owner_and_reactors(tags: &[RawTag]) -> (Option<Handle>, Vec<Handle>) {
             let mut group = None;
             let mut owner = None;
@@ -518,6 +520,7 @@ mod tests {
 
     #[test]
     fn copy_preserves_both_signed_major_arc_carriers_through_reopen() {
+        cadcraft_io::dwg_worker::allow_in_process();
         use super::super::alignment_store;
         for (turn, sign) in [("left", 1.), ("right", -1.)] {
             let mut s = Session::new();
@@ -561,6 +564,7 @@ mod tests {
 
     #[test]
     fn copy_of_spiral_preserves_exact_definition_and_chorded_carrier() {
+        cadcraft_io::dwg_worker::allow_in_process();
         use super::super::alignment_store;
         let mut s = Session::new();
         let created = s
@@ -659,6 +663,7 @@ mod tests {
     }
     #[test]
     fn commands_create_report_exchange_reopen_and_reject_stale_carrier() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut s = Session::new();
         let p = json!({"name":"Route 路线","start_station":100.,"elements":[{"start":[0,0],"direction":0,"length":10,"type":"line"},{"start":[10,0],"direction":0,"length":15.707963267948966,"type":"arc","radius":10,"turn":"left"}]});
         let created = s.execute("alignmentcreate", &p).unwrap();
@@ -702,6 +707,7 @@ mod tests {
 
     #[test]
     fn major_arc_carrier_survives_both_formats_and_checks_bulge_edits() {
+        cadcraft_io::dwg_worker::allow_in_process();
         use super::super::alignment_store;
         use cadcraft_doc::EntityKind;
         for turn in ["left", "right"] {

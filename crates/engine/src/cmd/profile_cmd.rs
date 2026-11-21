@@ -138,6 +138,7 @@ mod tests {
     use serde_json::json;
     #[test]
     fn sample_design_view_undo_and_profile_exchange_reopen() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut s = Session::new();
         let created =
             s.execute("alignmentcreate", &json!({"name":"Route","elements":[{"start":[0,0],"direction":0,"length":400,"type":"line"}]})).unwrap();
