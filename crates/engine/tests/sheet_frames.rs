@@ -9,6 +9,7 @@ fn road(s: &mut Session) -> Value {
 }
 #[test]
 fn road_group_profiles_roundtrip_and_each_command_undoes_as_one_step() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut s = Session::new();
     let h = road(&mut s);
     s.execute("profilecreate", &json!({"alignment":h,"pvis":[{"station":0,"elevation":100},{"station":1000,"elevation":110}]})).unwrap();

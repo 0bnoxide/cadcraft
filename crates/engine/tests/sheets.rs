@@ -221,6 +221,7 @@ fn profile_only_and_profile_pair_arrangements_keep_horizontal_scale() {
 }
 #[test]
 fn tall_profile_viewports_plot_only_their_own_figure() {
+    cadcraft_io::dwg_worker::allow_in_process();
     hooks();
     let temp = Temp::new();
     let t = template(&temp, &["SHEET-PLAN-1", "SHEET-PROFILE-1"]);
@@ -259,6 +260,7 @@ fn tall_profile_viewports_plot_only_their_own_figure() {
 }
 #[test]
 fn north_arrow_rotation_is_absolute_and_owned_sheets_reopen_in_both_formats() {
+    cadcraft_io::dwg_worker::allow_in_process();
     hooks();
     let temp = Temp::new();
     let t = template(&temp, &["SHEET-PLAN-1"]);
