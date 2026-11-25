@@ -1168,6 +1168,8 @@ pub(super) mod files {
         foreign.targets.clear();
         // File handles of objects CADCraft writes itself; saving renumbers them (upstream #495).
         foreign.handles.clear();
+        // The LAYER table order of the file it was read from (upstream #3094); saving rewrites it.
+        d.proxy_layers.clear();
         d
     }
     pub fn same_drawing(a: &Drawing, b: &Drawing) -> bool {
