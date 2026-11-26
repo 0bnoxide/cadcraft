@@ -172,7 +172,7 @@ pub fn show(app: &mut CadApp, ctx: &egui::Context) {
             });
         });
     });
-    if ctx.input(|i| i.key_pressed(egui::Key::Escape)) {
+    if crate::framework::escape_pressed(ctx) {
         done = Done::Cancel;
     } else if ctx.input(|i| i.modifiers.command && i.key_pressed(egui::Key::Enter)) {
         done = Done::Ok;
@@ -264,7 +264,7 @@ fn toolbar(ui: &mut egui::Ui, st: &mut State, base_h: f64) {
         ui.add_space(4.0);
         // Font
         let shown = cur.font.clone().unwrap_or_else(|| st.fmt.base_font.clone());
-        craft_ui::ComboBox::from_id_salt("mtext_font")
+        egui::ComboBox::from_id_salt("mtext_font")
             .width(120.0)
             .selected_text(shown.clone())
             .show_ui(ui, |ui| {
@@ -762,7 +762,7 @@ fn text_box_segment(ui: &mut egui::Ui, st: &mut State, base_h: f64, px: f32, wid
     out.response.response.clone().accessible_name(crate::tl!("Text"));
     // On opening, and while the text is empty, the editor takes the focus; a field of the toolbar
     // the user clicked keeps it.
-    let free = ui.memory(|m| m.focused().is_none());
+    let free = !crate::framework::widget_has_keyboard(ui.ctx());
     if !out.response.has_focus() && (!st.focused || (st.fmt.is_empty() && free)) {
         out.response.request_focus();
     }
@@ -1085,6 +1085,7 @@ mod tests {
     #[test]
     fn diameter_button_is_painted_and_named_under_bundled_fonts() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         ctx.set_missing_glyph_policy(egui::MissingGlyphPolicy::Panic);
         let raw = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(120.0, 60.0))), ..Default::default() };
         let mut out = ctx.run_ui(raw, |ui| {
@@ -1131,6 +1132,7 @@ mod tests {
     #[test]
     fn editor_opens_only_for_mtext_text_entry_and_finishes_with_formatted_contents() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = CadApp::new(Session::new(), Services::default());
         let frame = |app: &mut CadApp| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() };
@@ -1166,6 +1168,7 @@ mod tests {
     #[test]
     fn textedit_on_the_next_mtext_does_not_keep_the_first_ones_text() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = CadApp::new(Session::new(), Services::default());
         let frame = |app: &mut CadApp| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() };
@@ -1191,6 +1194,7 @@ mod tests {
     #[test]
     fn textedit_opens_an_existing_mtext_with_its_contents() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = CadApp::new(Session::new(), Services::default());
         let frame = |app: &mut CadApp| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() };
@@ -1226,6 +1230,7 @@ mod tests {
     #[test]
     fn a_relative_height_in_a_multileaders_text_is_kept() {
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = CadApp::new(Session::new(), Services::default());
         let frame = |app: &mut CadApp| {
             let input = egui::RawInput { screen_rect: Some(Rect::from_min_size(pos2(0.0, 0.0), vec2(1200.0, 800.0))), ..Default::default() };
@@ -1269,6 +1274,7 @@ mod tests {
             return;
         }
         let ctx = egui::Context::default();
+        crate::framework::install_headless(&ctx);
         let mut app = CadApp::new(Session::new(), Services::default());
         app.run("mtext", serde_json::json!({ "at": [0, 20], "text": thai, "height": 2.5, "width": 40 })).unwrap();
         app.start("textedit");
