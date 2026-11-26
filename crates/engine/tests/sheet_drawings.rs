@@ -26,7 +26,7 @@ impl Fixture {
         std::fs::create_dir(&root).unwrap();
         let template = root.join("template.dxf");
         let mut d = Drawing::new_metric();
-        d.layouts = vec![Layout::new("Template", 1)];
+        d.layouts = vec![Layout::new("Template", 1)].into();
         d.add(
             &Space::Paper("Template".into()),
             Common { layer: "SHEET-PLAN-1".into(), ..Default::default() },

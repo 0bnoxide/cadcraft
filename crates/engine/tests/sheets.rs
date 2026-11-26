@@ -35,7 +35,7 @@ fn hooks() {
 }
 fn template(temp: &Temp, roles: &[&str]) -> PathBuf {
     let mut d = Drawing::new_metric();
-    d.layouts = vec![Layout::new("Template", 1)];
+    d.layouts = vec![Layout::new("Template", 1)].into();
     let mut block = Block::new("North");
     let handle = d.new_handle();
     block.entities.push(Entity { handle, common: Common::default(), kind: EntityKind::Line(Line { a: Vec3::ZERO, b: Vec3::new(0., 5., 0.) }) });
