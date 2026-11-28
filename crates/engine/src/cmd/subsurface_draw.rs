@@ -76,7 +76,7 @@ fn draw(s: &mut Session, log: Log) -> Result<Value> {
                         EntityKind::Hatch(Hatch {
                             pattern: pattern.into(),
                             solid: pattern == "SOLID",
-                            loops: vec![HatchLoop { vertices: vertices.clone(), outer: true, sources: Vec::new() }],
+                            loops: vec![HatchLoop { vertices: vertices.clone(), outer: true, boundary_flags: None, sources: Vec::new() }],
                             scale: 1.0,
                             angle: 0.0,
                             associative: false,

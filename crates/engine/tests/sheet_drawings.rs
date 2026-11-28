@@ -26,7 +26,7 @@ impl Fixture {
         std::fs::create_dir(&root).unwrap();
         let template = root.join("template.dxf");
         let mut d = Drawing::new_metric();
-        d.layouts = vec![Layout::new("Template", 1)];
+        d.layouts = vec![Layout::new("Template", 1)].into();
         d.add(
             &Space::Paper("Template".into()),
             Common { layer: "SHEET-PLAN-1".into(), ..Default::default() },
@@ -59,6 +59,7 @@ impl Drop for Fixture {
 }
 #[test]
 fn drawings_require_confirmation_and_publish_reopened_batches_without_overwrite() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut f = Fixture::new();
     let before = f.session.doc().unwrap().clone();
     let files = f.bytes();
@@ -86,6 +87,7 @@ fn drawings_require_confirmation_and_publish_reopened_batches_without_overwrite(
 }
 #[test]
 fn drawings_update_versions_owned_files_and_refuses_the_exact_colliding_version() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut f = Fixture::new();
     f.session.execute("sheetcreate", &f.params).unwrap();
     let old = f.bytes();
@@ -142,14 +144,17 @@ fn header_change_republishes(name: &str, value: Value) {
 }
 #[test]
 fn drawings_republish_after_ltscale_changes() {
+    cadcraft_io::dwg_worker::allow_in_process();
     header_change_republishes("LTSCALE", json!(2.5));
 }
 #[test]
 fn drawings_republish_after_psltscale_changes() {
+    cadcraft_io::dwg_worker::allow_in_process();
     header_change_republishes("PSLTSCALE", json!(0));
 }
 #[test]
 fn duplicate_drawing_names_and_changed_owned_files_refuse_without_outputs() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut f = Fixture::new();
     f.params["drawing_name"] = json!("Same");
     let files = f.bytes();
@@ -166,6 +171,7 @@ fn duplicate_drawing_names_and_changed_owned_files_refuse_without_outputs() {
 }
 #[test]
 fn profile_drawings_and_source_manifest_survive_both_drawing_formats() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut f = Fixture::new();
     let template = PathBuf::from(f.params["template"].as_str().unwrap());
     let mut d = cadcraft_io::read(&std::fs::read(&template).unwrap(), &template).unwrap();
@@ -238,6 +244,7 @@ fn hostile_drawing_settings_and_unsupported_references_leave_no_stage_or_files()
 }
 #[test]
 fn corrupt_model_ownership_refuses_even_when_geometry_is_unchanged() {
+    cadcraft_io::dwg_worker::allow_in_process();
     let mut f = Fixture::new();
     f.session.execute("sheetcreate", &f.params).unwrap();
     let h = cadcraft_engine::doc::Handle::parse_hex(f.group["frames"][0]["handle"].as_str().unwrap()).unwrap();
@@ -250,6 +257,7 @@ fn corrupt_model_ownership_refuses_even_when_geometry_is_unchanged() {
 }
 #[test]
 fn site_drawings_copy_the_placed_block_and_keep_an_odd_last_batch() {
+    cadcraft_io::dwg_worker::allow_in_process();
     use cadcraft_engine::{
         doc::{Block, Entity, Insert, LwPolyline},
         geom::{PolyVertex, Vec2},

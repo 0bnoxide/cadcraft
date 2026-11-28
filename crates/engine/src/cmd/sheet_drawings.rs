@@ -68,7 +68,7 @@ fn signature(d: &Drawing, g: &Group, c: &SheetConfig, settings: &Drawings) -> Re
         &settings.name,
         settings.per,
         model,
-        &d.blocks,
+        &*d.blocks,
         // Use the renderer's effective dash settings, including its defaults.
         (d.header.f64("LTSCALE", 1.), d.header.i64("PSLTSCALE", 1) != 0),
         (

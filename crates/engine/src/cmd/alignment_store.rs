@@ -402,6 +402,7 @@ mod tests {
 
     #[test]
     fn large_xrecord_survives_dxf_and_dwg_reopen() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut d = Drawing::new_metric();
         let h = d
             .add(

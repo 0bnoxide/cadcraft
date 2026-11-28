@@ -41,11 +41,18 @@ pub struct DocState {
     /// The Block Editor (BEDIT), when it is open: `doc` is then the editor's drawing, and the
     /// drawing itself waits in it ([`DocState::drawing`]).
     pub block_edit: Option<blockedit::BlockEdit>,
+    /// The user was told that the current UCS is tilted ([`Session::note_tilted_ucs`]).
+    pub ucs_tilted_noted: bool,
     /// What the last erase removed, for OOPS.
     pub(crate) erased: crate::cmd::Erased,
     /// The fonts missing on Windows that a save last named: the next save names them again only
     /// when they change.
     pub(crate) fonts_noted: String,
+    /// The files the user linked with DATALINK since the drawing was opened, as the file system
+    /// resolves them, each with when it was last chosen (a larger number is later):
+    /// DATALINKUPDATE reads these also outside the drawing's folder ([`crate::doc_path`]). Kept
+    /// with the open drawing only, never saved.
+    pub(crate) chosen_links: std::collections::HashMap<std::path::PathBuf, u64>,
 }
 
 static NEXT_UID: std::sync::atomic::AtomicU64 = std::sync::atomic::AtomicU64::new(1);
@@ -72,8 +79,10 @@ impl DocState {
             uid: NEXT_UID.fetch_add(1, std::sync::atomic::Ordering::Relaxed),
             binary_dxf: false,
             block_edit: None,
+            ucs_tilted_noted: false,
             erased: Default::default(),
             fonts_noted: String::new(),
+            chosen_links: Default::default(),
         }
     }
     /// The drawing has changes not saved to its file, or the Block Editor has changes not yet

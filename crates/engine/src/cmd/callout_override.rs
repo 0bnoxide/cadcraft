@@ -149,6 +149,7 @@ mod tests {
     use super::*;
     #[test]
     fn replacement_clear_dormant_and_long_description_roundtrip() {
+        cadcraft_io::dwg_worker::allow_in_process();
         let mut s = Session::new();
         let template = "\\".repeat(64);
         let source = "\"".repeat(128);
